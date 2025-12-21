@@ -42,6 +42,7 @@ mod file_watcher;
 mod flags;
 pub mod git_info;
 mod guardian;
+pub mod hooks;
 pub mod instructions;
 pub mod landlock;
 pub mod mcp;

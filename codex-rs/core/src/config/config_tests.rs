@@ -3265,6 +3265,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             tui_status_line: None,
             tui_theme: None,
             otel: OtelConfig::default(),
+            hooks: HooksConfig::default(),
         },
         o3_profile_config
     );
@@ -3400,6 +3401,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         tui_status_line: None,
         tui_theme: None,
         otel: OtelConfig::default(),
+        hooks: HooksConfig::default(),
     };
 
     assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -3533,6 +3535,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         tui_status_line: None,
         tui_theme: None,
         otel: OtelConfig::default(),
+        hooks: HooksConfig::default(),
     };
 
     assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -3652,6 +3655,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         tui_status_line: None,
         tui_theme: None,
         otel: OtelConfig::default(),
+        hooks: HooksConfig::default(),
     };
 
     assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
@@ -4681,6 +4685,7 @@ struct TuiTomlTest {
 
 #[derive(Deserialize, Debug, PartialEq)]
 struct RootTomlTest {
+    hooks: Option<crate::config::types::HooksConfig>,
     tui: TuiTomlTest,
 }
 
@@ -4704,6 +4709,25 @@ fn test_tui_notifications_custom_array() {
     assert_matches!(
         parsed.tui.notifications,
         Notifications::Custom(ref v) if v == &vec!["foo".to_string()]
+    );
+}
+
+#[test]
+fn config_toml_deserializes_hook_matcher() {
+    let toml = r#"
+            [hooks.pre_tool_use]
+            matcher = "shell:*"
+            on_match = "deny"
+            "#;
+    let parsed: RootTomlTest = toml::from_str(toml).expect("deserialize hooks.pre_tool_use");
+    assert_eq!(
+        parsed.hooks,
+        Some(crate::config::types::HooksConfig {
+            pre_tool_use: vec![crate::config::types::HookRuleToml {
+                matcher: "shell:*".to_string(),
+                on_match: crate::config::types::PreToolUseAction::Deny,
+            }],
+        })
     );
 }
 
