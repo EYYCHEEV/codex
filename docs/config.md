@@ -24,6 +24,23 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 - https://developers.openai.com/codex/config-reference
 
+## Hooks
+
+Codex can run hooks before tool execution. Configure them in `~/.codex/config.toml`:
+
+```toml
+[[hooks.pre_tool_use]]
+matcher = "shell*" # "*", "shell", "shell*", etc.
+command = ["python3", "/Users/you/.codex/hooks/block-dangerous.py"]
+timeout_sec = 5 # default: 5
+on_failure = "deny" # default: "deny"; set "allow" for audit-only hooks
+```
+
+Notes:
+
+- Use absolute paths in `command` (no `~` expansion).
+- Hooks read JSON on stdin and write JSON on stdout. The `decision` can be `allow`, `deny`, or `ask` (treated as deny).
+
 ## JSON Schema
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.

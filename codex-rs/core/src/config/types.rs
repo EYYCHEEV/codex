@@ -666,6 +666,45 @@ impl Default for ShellEnvironmentPolicy {
     }
 }
 
+// ===== Hooks configuration =====
+
+/// Configuration for all hook types.
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+pub struct HooksConfig {
+    #[serde(default)]
+    pub pre_tool_use: Vec<PreToolUseHookConfig>,
+}
+
+/// Configuration for a single PreToolUse hook.
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+pub struct PreToolUseHookConfig {
+    /// Pattern to match tool names (e.g., "shell", "shell*", "*")
+    pub matcher: String,
+    /// Command and arguments to execute (e.g., ["python3", "/path/to/hook.py"])
+    pub command: Vec<String>,
+    /// Timeout in seconds (default: 5)
+    #[serde(default = "default_hook_timeout")]
+    pub timeout_sec: u64,
+    /// What to do when hook execution fails (default: deny)
+    #[serde(default)]
+    pub on_failure: HookFailurePolicy,
+}
+
+/// Policy for handling hook execution failures.
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailurePolicy {
+    /// Block the tool call (fail-closed)
+    #[default]
+    Deny,
+    /// Allow the tool call (fail-open, audit-only mode)
+    Allow,
+}
+
+const fn default_hook_timeout() -> u64 {
+    5
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
