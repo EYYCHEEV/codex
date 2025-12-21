@@ -6,6 +6,7 @@ use std::time::Instant;
 use crate::client_common::tools::ToolSpec;
 use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
+use crate::hooks::run_pre_tool_use_hooks;
 use crate::memories::usage::emit_metric_for_tool_read;
 use crate::protocol::SandboxPolicy;
 use crate::sandbox_tags::sandbox_tag;
@@ -162,6 +163,33 @@ impl ToolRegistry {
             return Err(FunctionCallError::Fatal(message));
         }
 
+        // Apply fail-closed PreToolUse hooks before executing the tool.
+        let config = invocation.turn.client.config();
+        if !config.hooks.pre_tool_use.is_empty() {
+            let tool_input = extract_tool_input_for_hooks(&invocation.payload);
+            let session_id = invocation.session.conversation_id().to_string();
+            let cwd = invocation.turn.cwd.to_string_lossy().to_string();
+            let transcript_path = config
+                .codex_home
+                .join("history.jsonl")
+                .to_string_lossy()
+                .to_string();
+
+            if let Err(reason) = run_pre_tool_use_hooks(
+                &config.hooks,
+                &tool_name,
+                tool_input,
+                &call_id_owned,
+                &session_id,
+                &cwd,
+                &transcript_path,
+            )
+            .await
+            {
+                return Err(FunctionCallError::Denied(reason));
+            }
+        }
+
         let is_mutating = handler.is_mutating(&invocation).await;
         let output_cell = tokio::sync::Mutex::new(None);
         let invocation_for_tool = invocation.clone();
@@ -311,6 +339,40 @@ fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &str) -> Stri
     match payload {
         ToolPayload::Custom { .. } => format!("unsupported custom tool call: {tool_name}"),
         _ => format!("unsupported call: {tool_name}"),
+    }
+}
+
+fn extract_tool_input_for_hooks(payload: &ToolPayload) -> serde_json::Value {
+    match payload {
+        ToolPayload::Function { arguments } => {
+            if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(arguments) {
+                normalize_command_to_string(&mut value);
+                value
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        ToolPayload::LocalShell { params } => serde_json::json!({
+            "command": params.command.join(" "),
+        }),
+        ToolPayload::Mcp { raw_arguments, .. } => {
+            serde_json::from_str(raw_arguments).unwrap_or(serde_json::Value::Null)
+        }
+        ToolPayload::Custom { input } => serde_json::Value::String(input.clone()),
+    }
+}
+
+fn normalize_command_to_string(value: &mut serde_json::Value) {
+    if let serde_json::Value::Object(object) = value
+        && let Some(command) = object.get_mut("command")
+        && let serde_json::Value::Array(values) = command
+    {
+        let joined = values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" ");
+        *command = serde_json::Value::String(joined);
     }
 }
 
