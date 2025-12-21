@@ -4,6 +4,7 @@ use crate::config::edit::ConfigEditsBuilder;
 use crate::config::types::AppsConfigToml;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
+use crate::config::types::HooksConfig;
 use crate::config::types::McpServerConfig;
 use crate::config::types::McpServerDisabledReason;
 use crate::config::types::McpServerTransportConfig;
@@ -500,6 +501,9 @@ pub struct Config {
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
     pub otel: crate::config::types::OtelConfig,
+
+    /// PreToolUse hooks configuration for intercepting tool calls.
+    pub hooks: HooksConfig,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1256,6 +1260,10 @@ pub struct ConfigToml {
     /// Collection of in-product notices (different from notifications)
     /// See [`crate::config::types::Notices`] for more details
     pub notice: Option<Notice>,
+
+    /// PreToolUse hooks for intercepting tool calls.
+    #[serde(default)]
+    pub hooks: Option<HooksConfig>,
 
     /// Legacy, now use features
     /// Deprecated: ignored. Use `model_instructions_file`.
@@ -2214,6 +2222,7 @@ impl Config {
                     metrics_exporter,
                 }
             },
+            hooks: cfg.hooks.unwrap_or_default(),
         };
         Ok(config)
     }
@@ -4800,6 +4809,7 @@ model_verbosity = "high"
                 tui_status_line: None,
                 tui_theme: None,
                 otel: OtelConfig::default(),
+                hooks: HooksConfig::default(),
             },
             o3_profile_config
         );
@@ -4926,6 +4936,7 @@ model_verbosity = "high"
             tui_status_line: None,
             tui_theme: None,
             otel: OtelConfig::default(),
+            hooks: HooksConfig::default(),
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -5050,6 +5061,7 @@ model_verbosity = "high"
             tui_status_line: None,
             tui_theme: None,
             otel: OtelConfig::default(),
+            hooks: HooksConfig::default(),
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -5160,6 +5172,7 @@ model_verbosity = "high"
             tui_status_line: None,
             tui_theme: None,
             otel: OtelConfig::default(),
+            hooks: HooksConfig::default(),
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
