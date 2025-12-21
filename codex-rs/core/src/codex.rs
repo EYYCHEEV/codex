@@ -996,6 +996,11 @@ impl Session {
         self.services.state_db.clone()
     }
 
+    /// Get the conversation ID for this session.
+    pub(crate) fn conversation_id(&self) -> &ThreadId {
+        &self.conversation_id
+    }
+
     /// Ensure all rollout writes are durably flushed.
     pub(crate) async fn flush_rollout(&self) {
         let recorder = {

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use crate::client_common::tools::ToolSpec;
 use crate::function_tool::FunctionCallError;
+use crate::hooks::run_pre_tool_use_hooks;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -103,6 +104,37 @@ impl ToolRegistry {
             );
             return Err(FunctionCallError::Fatal(message));
         }
+
+        // --- PreToolUse hooks (after validation, before execution) ---
+        // IMPORTANT: Bind Arc to variable first to avoid lifetime issues
+        let config = invocation.turn.client.config();
+        if !config.hooks.pre_tool_use.is_empty() {
+            let tool_input = extract_tool_input_for_hooks(&invocation.payload);
+            let session_id = invocation.session.conversation_id().to_string();
+            let cwd = invocation.turn.cwd.to_string_lossy().to_string();
+
+            // Transcript path: history.jsonl in codex_home
+            let transcript_path = config
+                .codex_home
+                .join("history.jsonl")
+                .to_string_lossy()
+                .to_string();
+
+            if let Err(reason) = run_pre_tool_use_hooks(
+                &config.hooks,
+                &tool_name,
+                tool_input,
+                &call_id_owned,
+                &session_id,
+                &cwd,
+                &transcript_path,
+            )
+            .await
+            {
+                return Err(FunctionCallError::Denied(reason));
+            }
+        }
+        // --- END PreToolUse hooks ---
 
         let output_cell = tokio::sync::Mutex::new(None);
 
@@ -230,4 +262,45 @@ fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &str) -> Stri
         ToolPayload::Custom { .. } => format!("unsupported custom tool call: {tool_name}"),
         _ => format!("unsupported call: {tool_name}"),
     }
+}
+
+/// Extract tool input as JSON Value for hooks.
+/// Normalizes shell command arrays to strings for Claude hook compatibility.
+fn extract_tool_input_for_hooks(payload: &ToolPayload) -> serde_json::Value {
+    match payload {
+        ToolPayload::Function { arguments } => {
+            // Parse and normalize: if command is array, join to string
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(arguments) {
+                normalize_command_to_string(&mut v);
+                v
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        ToolPayload::LocalShell { params } => {
+            // LocalShell: command is Vec<String>, join to string
+            serde_json::json!({
+                "command": params.command.join(" ")
+            })
+        }
+        ToolPayload::Mcp { raw_arguments, .. } => {
+            serde_json::from_str(raw_arguments).unwrap_or(serde_json::Value::Null)
+        }
+        ToolPayload::Custom { input } => serde_json::Value::String(input.clone()),
+    }
+}
+
+/// Normalize command field to string if it's an array.
+/// This enables Claude's hook scripts that expect tool_input.command as string.
+fn normalize_command_to_string(value: &mut serde_json::Value) {
+    if let serde_json::Value::Object(obj) = value
+        && let Some(cmd) = obj.get_mut("command")
+            && let serde_json::Value::Array(arr) = cmd {
+                let joined = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                *cmd = serde_json::Value::String(joined);
+            }
 }
