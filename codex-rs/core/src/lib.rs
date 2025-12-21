@@ -45,6 +45,7 @@ mod flags;
 pub mod git_info;
 mod guardian;
 mod hook_runtime;
+pub mod hooks;
 pub mod instructions;
 pub mod landlock;
 pub mod mcp;
