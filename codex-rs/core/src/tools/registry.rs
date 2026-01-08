@@ -295,12 +295,13 @@ fn extract_tool_input_for_hooks(payload: &ToolPayload) -> serde_json::Value {
 fn normalize_command_to_string(value: &mut serde_json::Value) {
     if let serde_json::Value::Object(obj) = value
         && let Some(cmd) = obj.get_mut("command")
-            && let serde_json::Value::Array(arr) = cmd {
-                let joined = arr
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                *cmd = serde_json::Value::String(joined);
-            }
+        && let serde_json::Value::Array(arr) = cmd
+    {
+        let joined = arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        *cmd = serde_json::Value::String(joined);
+    }
 }
