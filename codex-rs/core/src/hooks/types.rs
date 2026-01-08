@@ -57,9 +57,10 @@ impl HookOutput {
     pub fn decision(&self) -> HookDecision {
         // First: check hookSpecificOutput.permissionDecision (Claude preferred)
         if let Some(ref hso) = self.hook_specific_output
-            && let Some(ref d) = hso.permission_decision {
-                return d.clone();
-            }
+            && let Some(ref d) = hso.permission_decision
+        {
+            return d.clone();
+        }
         // Fallback: legacy top-level decision field
         self.decision.clone().unwrap_or_default()
     }
@@ -68,9 +69,10 @@ impl HookOutput {
     pub fn reason(&self) -> Option<String> {
         // First: hookSpecificOutput.permissionDecisionReason
         if let Some(ref hso) = self.hook_specific_output
-            && hso.permission_decision_reason.is_some() {
-                return hso.permission_decision_reason.clone();
-            }
+            && hso.permission_decision_reason.is_some()
+        {
+            return hso.permission_decision_reason.clone();
+        }
         // Fallback: legacy top-level reason field
         self.reason.clone()
     }
