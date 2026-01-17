@@ -737,14 +737,14 @@ impl Default for ShellEnvironmentPolicy {
 // ===== Hooks configuration =====
 
 /// Configuration for all hook types.
-#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 pub struct HooksConfig {
     #[serde(default)]
     pub pre_tool_use: Vec<PreToolUseHookConfig>,
 }
 
 /// Configuration for a single PreToolUse hook.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, JsonSchema)]
 pub struct PreToolUseHookConfig {
     /// Pattern to match tool names (e.g., "shell", "shell*", "*")
     pub matcher: String,
@@ -759,7 +759,7 @@ pub struct PreToolUseHookConfig {
 }
 
 /// Policy for handling hook execution failures.
-#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HookFailurePolicy {
     /// Block the tool call (fail-closed)

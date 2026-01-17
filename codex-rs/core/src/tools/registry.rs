@@ -166,7 +166,7 @@ impl ToolRegistry {
                     &reason,
                     &metric_tags,
                 );
-                return Err(FunctionCallError::Denied(reason));
+                return Err(FunctionCallError::RespondToModel(reason));
             }
         }
         // --- END PreToolUse hooks ---
