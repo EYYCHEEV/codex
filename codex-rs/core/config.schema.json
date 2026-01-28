@@ -428,6 +428,38 @@
         }
       ]
     },
+    "HookFailurePolicy": {
+      "description": "Policy for handling hook execution failures.",
+      "oneOf": [
+        {
+          "description": "Block the tool call (fail-closed)",
+          "enum": [
+            "deny"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Allow the tool call (fail-open, audit-only mode)",
+          "enum": [
+            "allow"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "HooksConfig": {
+      "description": "Configuration for all hook types.",
+      "properties": {
+        "pre_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/PreToolUseHookConfig"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "ModeKind": {
       "description": "Initial collaboration mode to use when the TUI starts.",
       "enum": [
@@ -772,6 +804,43 @@
         "pragmatic"
       ],
       "type": "string"
+    },
+    "PreToolUseHookConfig": {
+      "description": "Configuration for a single PreToolUse hook.",
+      "properties": {
+        "command": {
+          "description": "Command and arguments to execute (e.g., [\"python3\", \"/path/to/hook.py\"])",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "matcher": {
+          "description": "Pattern to match tool names (e.g., \"shell\", \"shell*\", \"*\")",
+          "type": "string"
+        },
+        "on_failure": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HookFailurePolicy"
+            }
+          ],
+          "default": "deny",
+          "description": "What to do when hook execution fails (default: deny)"
+        },
+        "timeout_sec": {
+          "default": 5,
+          "description": "Timeout in seconds (default: 5)",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command",
+        "matcher"
+      ],
+      "type": "object"
     },
     "ProjectConfig": {
       "additionalProperties": false,
@@ -1425,6 +1494,15 @@
       ],
       "default": null,
       "description": "Settings that govern if and what will be written to `~/.codex/history.jsonl`."
+    },
+    "hooks": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HooksConfig"
+        }
+      ],
+      "default": null,
+      "description": "PreToolUse hooks for intercepting tool calls."
     },
     "instructions": {
       "description": "System instructions.",
