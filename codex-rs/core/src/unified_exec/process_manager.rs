@@ -265,19 +265,21 @@ impl UnifiedExecProcessManager {
             // one implementation.
             let exit_code = process.exit_code();
             let exit = exit_code.unwrap_or(-1);
-            emit_exec_end_for_unified_exec(
-                Arc::clone(&context.session),
-                Arc::clone(&context.turn),
-                context.call_id.clone(),
-                request.command.clone(),
-                cwd.clone(),
-                Some(process_id.to_string()),
-                Arc::clone(&transcript),
-                text.clone(),
-                exit,
-                wall_time,
-            )
-            .await;
+            if process.try_mark_end_event_emitted() {
+                emit_exec_end_for_unified_exec(
+                    Arc::clone(&context.session),
+                    Arc::clone(&context.turn),
+                    context.call_id.clone(),
+                    request.command.clone(),
+                    cwd.clone(),
+                    Some(process_id.to_string()),
+                    Arc::clone(&transcript),
+                    text.clone(),
+                    exit,
+                    wall_time,
+                )
+                .await;
+            }
 
             self.release_process_id(request.process_id).await;
             finish_deferred_network_approval(
@@ -376,6 +378,26 @@ impl UnifiedExecProcessManager {
             } => (Some(process_id), exit_code, call_id),
             ProcessStatus::Exited { exit_code, entry } => {
                 let call_id = entry.call_id.clone();
+
+                let should_emit_end_event = entry.process.try_mark_end_event_emitted();
+                if should_emit_end_event {
+                    entry.process.output_drained_notify().notified().await;
+
+                    emit_exec_end_for_unified_exec(
+                        Arc::clone(&entry.session),
+                        Arc::clone(&entry.turn),
+                        entry.call_id.clone(),
+                        entry.command.clone(),
+                        entry.cwd,
+                        Some(entry.process_id),
+                        entry.transcript,
+                        output.clone(),
+                        exit_code.unwrap_or(-1),
+                        Instant::now().saturating_duration_since(entry.started_at),
+                    )
+                    .await;
+                }
+
                 (None, exit_code, call_id)
             }
             ProcessStatus::Unknown => {
@@ -493,9 +515,14 @@ impl UnifiedExecProcessManager {
     ) {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
+            session: Arc::clone(&context.session),
+            turn: Arc::clone(&context.turn),
             call_id: context.call_id.clone(),
             process_id,
             command: command.to_vec(),
+            cwd: cwd.clone(),
+            transcript: Arc::clone(&transcript),
+            started_at,
             tty,
             network_approval_id,
             session: Arc::downgrade(&context.session),
