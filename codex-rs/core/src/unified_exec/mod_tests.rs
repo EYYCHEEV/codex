@@ -124,18 +124,24 @@ async fn exec_command_with_tty(
     let context =
         UnifiedExecContext::new(Arc::clone(session), Arc::clone(turn), "call".to_string());
     let started_at = Instant::now();
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let process_started_alive = !process.has_exited() && process.exit_code().is_none();
     if process_started_alive {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
+            session: Arc::clone(session),
+            session_weak: Arc::downgrade(session),
+            turn: Arc::clone(turn),
             call_id: context.call_id.clone(),
             process_id,
             cwd: cwd.clone().into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            command: command.clone(),
             hook_command: cmd.to_string(),
+            transcript: Arc::clone(&transcript),
+            started_at,
             tty,
             network_approval: None,
-            session: Arc::downgrade(session),
             last_used: started_at,
         };
         manager
@@ -144,6 +150,17 @@ async fn exec_command_with_tty(
             .await
             .processes
             .insert(process_id, entry);
+        super::async_watcher::spawn_exit_watcher(
+            Arc::clone(&process),
+            Arc::clone(session),
+            Arc::clone(turn),
+            context.call_id.clone(),
+            command.clone(),
+            cwd.clone(),
+            process_id,
+            transcript,
+            started_at,
+        );
     }
 
     let OutputHandles {
@@ -668,19 +685,29 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
     .await?;
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
+    let started_at = Instant::now();
     manager.process_store.lock().await.processes.insert(
         process_id,
         ProcessEntry {
             process,
+            session: Arc::clone(&session),
+            session_weak: Arc::downgrade(&session),
+            turn: Arc::clone(&turn),
             call_id: "call".to_string(),
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             hook_command: "sleep 60".to_string(),
+            command: vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "sleep 60".to_string(),
+            ],
+            transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
+            started_at,
             tty: true,
             network_approval: None,
-            session: Arc::downgrade(&session),
-            last_used: Instant::now(),
+            last_used: started_at,
         },
     );
 
@@ -741,18 +768,28 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
     #[allow(deprecated)]
     let cwd = turn.cwd.clone();
     let last_used = Instant::now() - Duration::from_secs(1);
+    let started_at = last_used;
     manager.process_store.lock().await.processes.insert(
         process_id,
         ProcessEntry {
             process: Arc::clone(&process),
+            session: Arc::clone(&session),
+            session_weak: Arc::downgrade(&session),
+            turn: Arc::clone(&turn),
             call_id: "call".to_string(),
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             hook_command: "sleep 60".to_string(),
+            command: vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "sleep 60".to_string(),
+            ],
+            transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
+            started_at,
             tty: true,
             network_approval: None,
-            session: Arc::downgrade(&session),
             last_used,
         },
     );
