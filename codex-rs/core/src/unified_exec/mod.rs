@@ -140,9 +140,14 @@ impl Default for UnifiedExecProcessManager {
 
 struct ProcessEntry {
     process: Arc<UnifiedExecProcess>,
+    session: Arc<Session>,
+    turn: Arc<TurnContext>,
     call_id: String,
     process_id: String,
     command: Vec<String>,
+    cwd: PathBuf,
+    transcript: Arc<Mutex<head_tail_buffer::HeadTailBuffer>>,
+    started_at: tokio::time::Instant,
     tty: bool,
     last_used: tokio::time::Instant,
 }

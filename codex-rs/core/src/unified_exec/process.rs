@@ -44,6 +44,7 @@ pub(crate) struct UnifiedExecProcess {
     output_drained: Arc<Notify>,
     output_task: JoinHandle<()>,
     sandbox_type: SandboxType,
+    end_event_emitted: AtomicBool,
 }
 
 impl UnifiedExecProcess {
@@ -92,6 +93,7 @@ impl UnifiedExecProcess {
             output_drained,
             output_task,
             sandbox_type,
+            end_event_emitted: AtomicBool::new(false),
         }
     }
 
@@ -119,6 +121,10 @@ impl UnifiedExecProcess {
 
     pub(super) fn output_drained_notify(&self) -> Arc<Notify> {
         Arc::clone(&self.output_drained)
+    }
+
+    pub(super) fn try_mark_end_event_emitted(&self) -> bool {
+        !self.end_event_emitted.swap(true, Ordering::SeqCst)
     }
 
     pub(super) fn has_exited(&self) -> bool {
