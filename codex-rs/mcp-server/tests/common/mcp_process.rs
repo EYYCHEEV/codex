@@ -169,22 +169,22 @@ impl McpProcess {
         assert_eq!(jsonrpc, JsonRpcVersion2_0);
         assert_eq!(id, RequestId::Number(request_id));
         assert_eq!(
-            result,
-            json!({
-                "capabilities": {
-                    "tools": {
-                        "listChanged": true
-                    },
-                },
-                "serverInfo": {
-                    "name": "codex-mcp-server",
-                    "title": "Codex",
-                    "version": "0.0.0",
-                    "user_agent": user_agent
-                },
-                "protocolVersion": ProtocolVersion::V_2025_03_26
-            })
-        );
+	            result,
+	            json!({
+	                "capabilities": {
+	                    "tools": {
+	                        "listChanged": true
+	                    },
+	                },
+	                "protocolVersion": ProtocolVersion::V_2025_03_26,
+	                "serverInfo": {
+	                    "name": "codex-mcp-server",
+	                    "title": "Codex",
+	                    "version": build_version,
+	                    "user_agent": user_agent
+	                },
+	            })
+	        );
 
         // Send notifications/initialized to ack the response.
         self.send_jsonrpc_message(JsonRpcMessage::Notification(JsonRpcNotification {
