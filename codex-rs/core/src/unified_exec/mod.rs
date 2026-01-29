@@ -151,12 +151,18 @@ impl Default for UnifiedExecProcessManager {
 
 struct ProcessEntry {
     process: Arc<UnifiedExecProcess>,
+    session: Arc<Session>,
+    session_weak: Weak<Session>,
+    turn: Arc<TurnContext>,
     call_id: String,
     process_id: i32,
     hook_command: String,
+    command: Vec<String>,
+    cwd: AbsolutePathBuf,
+    transcript: Arc<Mutex<head_tail_buffer::HeadTailBuffer>>,
+    started_at: tokio::time::Instant,
     tty: bool,
     network_approval: Option<DeferredNetworkApproval>,
-    session: Weak<Session>,
     last_used: tokio::time::Instant,
 }
 
