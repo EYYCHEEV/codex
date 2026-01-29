@@ -70,7 +70,7 @@ pub(crate) fn start_streaming_output(
                         sleep.as_mut().await;
                     }
                 }, if grace_sleep.is_some() => {
-                    output_drained.notify_one();
+                    output_drained.notify_waiters();
                     break;
                 }
 
@@ -81,7 +81,7 @@ pub(crate) fn start_streaming_output(
                             continue;
                         },
                         Err(RecvError::Closed) => {
-                            output_drained.notify_one();
+                            output_drained.notify_waiters();
                             break;
                         }
                     };
@@ -122,6 +122,9 @@ pub(crate) fn spawn_exit_watcher(
         exit_token.cancelled().await;
         output_drained.notified().await;
 
+        if !process.try_mark_end_event_emitted() {
+            return;
+        }
         let duration = Instant::now().saturating_duration_since(started_at);
         if let Some(message) = process.failure_message() {
             emit_failed_exec_end_for_unified_exec(

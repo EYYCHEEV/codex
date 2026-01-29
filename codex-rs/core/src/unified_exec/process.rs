@@ -88,6 +88,7 @@ pub(crate) struct UnifiedExecProcess {
     output_task: Option<JoinHandle<()>>,
     sandbox_type: SandboxType,
     _spawn_lifecycle: Option<SpawnLifecycleHandle>,
+    end_event_emitted: AtomicBool,
 }
 
 impl std::fmt::Debug for UnifiedExecProcess {
@@ -130,6 +131,7 @@ impl UnifiedExecProcess {
             output_task: None,
             sandbox_type,
             _spawn_lifecycle: spawn_lifecycle,
+            end_event_emitted: AtomicBool::new(false),
         }
     }
 
@@ -182,6 +184,10 @@ impl UnifiedExecProcess {
 
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.interaction_lock)
+    }
+
+    pub(super) fn try_mark_end_event_emitted(&self) -> bool {
+        !self.end_event_emitted.swap(true, Ordering::SeqCst)
     }
 
     pub(super) fn has_exited(&self) -> bool {
