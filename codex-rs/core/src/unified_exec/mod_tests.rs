@@ -111,12 +111,18 @@ async fn exec_command_with_tty(
     if process_started_alive {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
+            session: Arc::clone(session),
+            session_weak: Arc::downgrade(session),
+            turn: Arc::clone(turn),
             call_id: context.call_id.clone(),
             process_id,
+            command: command.clone(),
             hook_command: cmd.to_string(),
+            cwd: cwd.clone(),
+            transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
+            started_at,
             tty,
             network_approval: None,
-            session: Arc::downgrade(session),
             last_used: started_at,
         };
         manager
