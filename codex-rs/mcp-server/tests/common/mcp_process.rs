@@ -164,13 +164,13 @@ impl McpProcess {
                         "listChanged": true
                     },
                 },
+                "protocolVersion": ProtocolVersion::V_2025_03_26,
                 "serverInfo": {
                     "name": "codex-mcp-server",
                     "title": "Codex",
-                    "version": "0.0.0",
+                    "version": build_version,
                     "user_agent": user_agent
                 },
-                "protocolVersion": ProtocolVersion::V_2025_03_26
             })
         );
 
