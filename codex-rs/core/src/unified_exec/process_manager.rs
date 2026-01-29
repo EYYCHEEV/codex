@@ -185,7 +185,7 @@ fn exec_server_process_id(process_id: i32) -> String {
 
 async fn unregister_network_approval_for_entry(entry: &ProcessEntry) {
     if let Some(network_approval) = entry.network_approval.as_ref()
-        && let Some(session) = entry.session.upgrade()
+        && let Some(session) = entry.session_weak.upgrade()
     {
         session
             .services
@@ -198,7 +198,7 @@ async fn unregister_network_approval_for_entry(entry: &ProcessEntry) {
 async fn finish_network_approval_after_process_exit_for_entry(
     entry: &ProcessEntry,
 ) -> Result<(), String> {
-    let session = entry.session.upgrade();
+    let session = entry.session_weak.upgrade();
     finish_deferred_network_approval_after_process_exit_for_session(
         session.as_ref(),
         entry.network_approval.clone(),
@@ -556,19 +556,21 @@ impl UnifiedExecProcessManager {
             }
             let exit_code = process.exit_code();
             let exit = exit_code.unwrap_or(-1);
-            emit_exec_end_for_unified_exec(
-                Arc::clone(&context.session),
-                Arc::clone(&context.turn),
-                context.call_id.clone(),
-                request.command.clone(),
-                cwd.clone(),
-                Some(process_id.to_string()),
-                Arc::clone(&transcript),
-                text.clone(),
-                exit,
-                wall_time,
-            )
-            .await;
+            if process.try_mark_end_event_emitted() {
+                emit_exec_end_for_unified_exec(
+                    Arc::clone(&context.session),
+                    Arc::clone(&context.turn),
+                    context.call_id.clone(),
+                    request.command.clone(),
+                    cwd.clone(),
+                    Some(process_id.to_string()),
+                    Arc::clone(&transcript),
+                    text.clone(),
+                    exit,
+                    wall_time,
+                )
+                .await;
+            }
 
             self.release_process_id(request.process_id).await;
             process.check_for_sandbox_denial_with_text(&text).await?;
@@ -711,6 +713,26 @@ impl UnifiedExecProcessManager {
                 {
                     return Err(fail_process_with_message(entry.process.as_ref(), message));
                 }
+
+                let should_emit_end_event = entry.process.try_mark_end_event_emitted();
+                if should_emit_end_event {
+                    entry.process.output_drained_notify().notified().await;
+
+                    emit_exec_end_for_unified_exec(
+                        Arc::clone(&entry.session),
+                        Arc::clone(&entry.turn),
+                        entry.call_id.clone(),
+                        entry.command.clone(),
+                        entry.cwd,
+                        Some(entry.process_id.to_string()),
+                        entry.transcript,
+                        output.clone(),
+                        exit_code.unwrap_or(-1),
+                        Instant::now().saturating_duration_since(entry.started_at),
+                    )
+                    .await;
+                }
+
                 (None, exit_code, call_id)
             }
             ProcessStatus::Unknown => {
@@ -780,11 +802,10 @@ impl UnifiedExecProcessManager {
             output_closed_notify,
             cancellation_token,
         } = entry.process.output_handles();
-        let pause_state = entry
-            .session
-            .upgrade()
+        let session = entry.session_weak.upgrade();
+        let pause_state = session
+            .as_ref()
             .map(|session| session.subscribe_out_of_band_elicitation_pause_state());
-        let session = entry.session.upgrade();
 
         Ok(PreparedProcessHandles {
             process: Arc::clone(&entry.process),
@@ -818,12 +839,18 @@ impl UnifiedExecProcessManager {
     ) {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
+            session: Arc::clone(&context.session),
+            session_weak: Arc::downgrade(&context.session),
+            turn: Arc::clone(&context.turn),
             call_id: context.call_id.clone(),
             process_id,
             hook_command,
+            command: command.to_vec(),
+            cwd,
+            transcript: Arc::clone(&transcript),
+            started_at,
             tty,
             network_approval,
-            session: Arc::downgrade(&context.session),
             last_used: started_at,
         };
         let pruned_entry = {
