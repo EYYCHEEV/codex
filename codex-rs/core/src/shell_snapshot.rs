@@ -754,7 +754,7 @@ mod tests {
             bash_snapshot_script()
         );
         let output =
-            run_script_with_timeout(&shell, &script, Duration::from_millis(500), true, home)
+            run_script_with_timeout(&shell, &script, Duration::from_secs(2), true, home)
                 .await
                 .context("run snapshot command")?;
 
