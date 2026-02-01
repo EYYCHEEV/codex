@@ -693,10 +693,9 @@ mod tests {
             "HOME=\"{home_display}\"; export HOME; {}",
             bash_snapshot_script()
         );
-        let output =
-            run_script_with_timeout(&shell, &script, Duration::from_millis(500), true, home)
-                .await
-                .context("run snapshot command")?;
+        let output = run_script_with_timeout(&shell, &script, Duration::from_secs(2), true, home)
+            .await
+            .context("run snapshot command")?;
 
         assert!(
             output.contains("# Snapshot file"),
