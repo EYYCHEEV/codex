@@ -125,6 +125,58 @@ fn task_started_produces_turn_started_event() {
 }
 
 #[test]
+fn mcp_startup_update_emits_event() {
+    let mut ep = EventProcessorWithJsonOutput::new(None);
+    let out = ep.collect_thread_events(&event(
+        "m1",
+        EventMsg::McpStartupUpdate(codex_core::protocol::McpStartupUpdateEvent {
+            server: "smoke".to_string(),
+            status: codex_core::protocol::McpStartupStatus::Starting,
+        }),
+    ));
+
+    assert_eq!(
+        out,
+        vec![ThreadEvent::McpStartupUpdate(
+            codex_core::protocol::McpStartupUpdateEvent {
+                server: "smoke".to_string(),
+                status: codex_core::protocol::McpStartupStatus::Starting,
+            }
+        )]
+    );
+}
+
+#[test]
+fn mcp_startup_complete_emits_event() {
+    let mut ep = EventProcessorWithJsonOutput::new(None);
+    let out = ep.collect_thread_events(&event(
+        "m2",
+        EventMsg::McpStartupComplete(codex_core::protocol::McpStartupCompleteEvent {
+            ready: vec!["ready1".to_string()],
+            failed: vec![codex_core::protocol::McpStartupFailure {
+                server: "failed1".to_string(),
+                error: "boom".to_string(),
+            }],
+            cancelled: vec!["cancelled1".to_string()],
+        }),
+    ));
+
+    assert_eq!(
+        out,
+        vec![ThreadEvent::McpStartupComplete(
+            codex_core::protocol::McpStartupCompleteEvent {
+                ready: vec!["ready1".to_string()],
+                failed: vec![codex_core::protocol::McpStartupFailure {
+                    server: "failed1".to_string(),
+                    error: "boom".to_string(),
+                }],
+                cancelled: vec!["cancelled1".to_string()],
+            }
+        )]
+    );
+}
+
+#[test]
 fn web_search_end_emits_item_completed() {
     let mut ep = EventProcessorWithJsonOutput::new(None);
     let query = "rust async await".to_string();
