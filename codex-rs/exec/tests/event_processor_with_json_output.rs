@@ -9,6 +9,8 @@ use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::FileUpdateChange as ApiFileUpdateChange;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::McpServerStartupState;
+use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::McpToolCallError;
 use codex_app_server_protocol::McpToolCallResult;
 use codex_app_server_protocol::McpToolCallStatus as ApiMcpToolCallStatus;
@@ -32,6 +34,7 @@ use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::protocol;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_utils_absolute_path::test_support::PathBufExt;
@@ -160,6 +163,68 @@ fn turn_started_emits_turn_started_event() {
         collected,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnStarted(TurnStartedEvent {})],
+            status: CodexStatus::Running,
+        }
+    );
+}
+
+#[test]
+fn mcp_startup_status_updated_emits_update_event() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(ServerNotification::McpServerStatusUpdated(
+        McpServerStatusUpdatedNotification {
+            name: "smoke".to_string(),
+            status: McpServerStartupState::Starting,
+            error: None,
+        },
+    ));
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::McpStartupUpdate(
+                protocol::McpStartupUpdateEvent {
+                    server: "smoke".to_string(),
+                    status: protocol::McpStartupStatus::Starting,
+                }
+            )],
+            status: CodexStatus::Running,
+        }
+    );
+}
+
+#[test]
+fn terminal_mcp_startup_status_emits_aggregate_complete_event() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(ServerNotification::McpServerStatusUpdated(
+        McpServerStatusUpdatedNotification {
+            name: "smoke".to_string(),
+            status: McpServerStartupState::Failed,
+            error: Some("boom".to_string()),
+        },
+    ));
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![
+                ThreadEvent::McpStartupUpdate(protocol::McpStartupUpdateEvent {
+                    server: "smoke".to_string(),
+                    status: protocol::McpStartupStatus::Failed {
+                        error: "boom".to_string(),
+                    },
+                }),
+                ThreadEvent::McpStartupComplete(protocol::McpStartupCompleteEvent {
+                    ready: vec![],
+                    failed: vec![protocol::McpStartupFailure {
+                        server: "smoke".to_string(),
+                        error: "boom".to_string(),
+                    }],
+                    cancelled: vec![],
+                }),
+            ],
             status: CodexStatus::Running,
         }
     );

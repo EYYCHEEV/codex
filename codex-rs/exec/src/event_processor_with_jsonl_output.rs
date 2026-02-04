@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionStatus;
+use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
@@ -15,6 +16,7 @@ use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::config::Config;
 use codex_protocol::models::WebSearchAction;
+use codex_protocol::protocol;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use serde_json::json;
 
@@ -64,6 +66,9 @@ pub struct EventProcessorWithJsonOutput {
     last_critical_error: Option<ThreadErrorEvent>,
     final_message: Option<String>,
     emit_final_message_on_shutdown: bool,
+    mcp_startup_statuses: HashMap<String, protocol::McpStartupStatus>,
+    expected_mcp_startup_servers: Option<usize>,
+    emitted_mcp_startup_complete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +94,9 @@ impl EventProcessorWithJsonOutput {
             last_critical_error: None,
             final_message: None,
             emit_final_message_on_shutdown: false,
+            mcp_startup_statuses: HashMap::new(),
+            expected_mcp_startup_servers: None,
+            emitted_mcp_startup_complete: false,
         }
     }
 
@@ -125,6 +133,78 @@ impl EventProcessorWithJsonOutput {
             output_tokens: usage.total.output_tokens,
             reasoning_output_tokens: usage.total.reasoning_output_tokens,
         }
+    }
+
+    fn configured_mcp_server_count(config: &Config) -> usize {
+        config.mcp_servers.get().len()
+    }
+
+    fn mcp_startup_status_from_notification(
+        status: McpServerStartupState,
+        error: Option<String>,
+    ) -> protocol::McpStartupStatus {
+        match status {
+            McpServerStartupState::Starting => protocol::McpStartupStatus::Starting,
+            McpServerStartupState::Ready => protocol::McpStartupStatus::Ready,
+            McpServerStartupState::Failed => protocol::McpStartupStatus::Failed {
+                error: error.unwrap_or_else(|| "unknown MCP startup failure".to_string()),
+            },
+            McpServerStartupState::Cancelled => protocol::McpStartupStatus::Cancelled,
+        }
+    }
+
+    fn mcp_startup_status_is_terminal(status: &protocol::McpStartupStatus) -> bool {
+        !matches!(status, protocol::McpStartupStatus::Starting)
+    }
+
+    fn maybe_collect_mcp_startup_complete(&mut self) -> Option<ThreadEvent> {
+        if self.emitted_mcp_startup_complete || self.mcp_startup_statuses.is_empty() {
+            return None;
+        }
+
+        let observed = self.mcp_startup_statuses.len();
+        let expected = self.expected_mcp_startup_servers.unwrap_or(observed);
+        if observed < expected
+            || self
+                .mcp_startup_statuses
+                .values()
+                .any(|status| !Self::mcp_startup_status_is_terminal(status))
+        {
+            return None;
+        }
+
+        let mut ready = Vec::new();
+        let mut failed = Vec::new();
+        let mut cancelled = Vec::new();
+
+        for (server, status) in &self.mcp_startup_statuses {
+            match status {
+                protocol::McpStartupStatus::Ready => ready.push(server.clone()),
+                protocol::McpStartupStatus::Failed { error } => {
+                    failed.push(protocol::McpStartupFailure {
+                        server: server.clone(),
+                        error: error.clone(),
+                    });
+                }
+                protocol::McpStartupStatus::Cancelled => {
+                    cancelled.push(server.clone());
+                }
+                protocol::McpStartupStatus::Starting => {}
+            }
+        }
+
+        ready.sort();
+        cancelled.sort();
+        failed.sort_by(|left, right| left.server.cmp(&right.server));
+        self.emitted_mcp_startup_complete = true;
+
+        Some(ThreadEvent::McpStartupComplete(
+            protocol::McpStartupCompleteEvent {
+                ready,
+                failed,
+                cancelled,
+            },
+        ))
     }
 
     pub fn map_todo_items(plan: &[codex_app_server_protocol::TurnPlanStep]) -> Vec<TodoItem> {
@@ -462,6 +542,22 @@ impl EventProcessorWithJsonOutput {
             ServerNotification::HookStarted(_) | ServerNotification::HookCompleted(_) => {
                 CodexStatus::Running
             }
+            ServerNotification::McpServerStatusUpdated(notification) => {
+                let status = Self::mcp_startup_status_from_notification(
+                    notification.status,
+                    notification.error,
+                );
+                let server = notification.name;
+                self.mcp_startup_statuses
+                    .insert(server.clone(), status.clone());
+                events.push(ThreadEvent::McpStartupUpdate(
+                    protocol::McpStartupUpdateEvent { server, status },
+                ));
+                if let Some(event) = self.maybe_collect_mcp_startup_complete() {
+                    events.push(event);
+                }
+                CodexStatus::Running
+            }
             ServerNotification::ItemStarted(notification) => {
                 if let Some(item) = self.map_started_item(notification.item) {
                     events.push(ThreadEvent::ItemStarted(ItemStartedEvent { item }));
@@ -593,10 +689,13 @@ impl EventProcessorWithJsonOutput {
 impl EventProcessor for EventProcessorWithJsonOutput {
     fn print_config_summary(
         &mut self,
-        _: &Config,
+        config: &Config,
         _: &str,
         session_configured: &SessionConfiguredEvent,
     ) {
+        self.mcp_startup_statuses.clear();
+        self.expected_mcp_startup_servers = Some(Self::configured_mcp_server_count(config));
+        self.emitted_mcp_startup_complete = false;
         self.emit(Self::thread_started_event(session_configured));
     }
 
