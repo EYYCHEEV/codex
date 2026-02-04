@@ -1371,11 +1371,13 @@ async fn find_thread_path_by_id_str_in_subdir(
 
     let found = results.matches.into_iter().next().map(|m| m.full_path());
     if let Some(found_path) = found.as_ref() {
-        tracing::debug!("state db missing rollout path for thread {id_str}");
-        tracing::warn!(
-            "state db discrepancy during find_thread_path_by_id_str_in_subdir: falling_back"
-        );
         if let Some(reason) = fallback_reason {
+            if state_db_ctx.is_some() {
+                tracing::debug!("state db missing rollout path for thread {id_str}");
+                tracing::warn!(
+                    "state db discrepancy during find_thread_path_by_id_str_in_subdir: falling_back"
+                );
+            }
             codex_state::record_fallback(
                 "find_thread_path",
                 reason,
