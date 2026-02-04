@@ -1,3 +1,4 @@
+use codex_core::protocol;
 use codex_protocol::models::WebSearchAction;
 use serde::Deserialize;
 use serde::Serialize;
@@ -22,6 +23,12 @@ pub enum ThreadEvent {
     /// Indicates that a turn failed with an error.
     #[serde(rename = "turn.failed")]
     TurnFailed(TurnFailedEvent),
+    /// Emitted when an MCP server startup status changes.
+    #[serde(rename = "mcp.startup.update")]
+    McpStartupUpdate(protocol::McpStartupUpdateEvent),
+    /// Emitted when MCP startup completes (aggregate summary).
+    #[serde(rename = "mcp.startup.complete")]
+    McpStartupComplete(protocol::McpStartupCompleteEvent),
     /// Emitted when a new item is added to the thread. Typically the item will be in an "in progress" state.
     #[serde(rename = "item.started")]
     ItemStarted(ItemStartedEvent),

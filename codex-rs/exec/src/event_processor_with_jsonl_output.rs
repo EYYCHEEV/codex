@@ -153,6 +153,12 @@ impl EventProcessorWithJsonOutput {
             protocol::EventMsg::PatchApplyEnd(ev) => self.handle_patch_apply_end(ev),
             protocol::EventMsg::WebSearchBegin(ev) => self.handle_web_search_begin(ev),
             protocol::EventMsg::WebSearchEnd(ev) => self.handle_web_search_end(ev),
+            protocol::EventMsg::McpStartupUpdate(ev) => {
+                vec![ThreadEvent::McpStartupUpdate(ev.clone())]
+            }
+            protocol::EventMsg::McpStartupComplete(ev) => {
+                vec![ThreadEvent::McpStartupComplete(ev.clone())]
+            }
             protocol::EventMsg::TokenCount(ev) => {
                 if let Some(info) = &ev.info {
                     self.last_total_token_usage = Some(info.total_token_usage.clone());
