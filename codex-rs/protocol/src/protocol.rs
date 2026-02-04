@@ -3721,7 +3721,7 @@ pub struct TurnDiffEvent {
     pub unified_diff: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
 pub struct McpStartupUpdateEvent {
     /// Server name being started.
     pub server: String,
@@ -3729,7 +3729,7 @@ pub struct McpStartupUpdateEvent {
     pub status: McpStartupStatus,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 #[ts(rename_all = "snake_case", tag = "state")]
 pub enum McpStartupStatus {
@@ -3751,14 +3751,14 @@ pub enum McpStartupFailureReason {
     ReauthenticationRequired,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Default)]
 pub struct McpStartupCompleteEvent {
     pub ready: Vec<String>,
     pub failed: Vec<McpStartupFailure>,
     pub cancelled: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
 pub struct McpStartupFailure {
     pub server: String,
     pub error: String,
