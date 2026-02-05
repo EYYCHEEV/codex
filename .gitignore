@@ -33,6 +33,7 @@ result
 CLAUDE.md
 .claude/
 AGENTS.override.md
+/.mcp-tools
 
 # caches
 .cache/
@@ -92,3 +93,5 @@ CHANGELOG.ignore.md
 __pycache__/
 *.pyc
 
+# local scratch
+/tmp/
