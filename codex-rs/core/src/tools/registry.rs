@@ -156,7 +156,7 @@ impl ToolRegistry {
         }
 
         // Apply fail-closed PreToolUse hooks before executing the tool.
-        let config = &invocation.turn.config;
+        let config = Arc::clone(&invocation.turn.config);
         if !config.hooks.pre_tool_use.is_empty() {
             let tool_input = extract_tool_input_for_hooks(&invocation.payload);
             let session_id = invocation.session.conversation_id().to_string();
