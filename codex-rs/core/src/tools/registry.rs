@@ -107,7 +107,7 @@ impl ToolRegistry {
 
         // --- PreToolUse hooks (after validation, before execution) ---
         // IMPORTANT: Bind Arc to variable first to avoid lifetime issues
-        let config = invocation.turn.client.config();
+        let config = Arc::clone(&invocation.turn.config);
         if !config.hooks.pre_tool_use.is_empty() {
             let tool_input = extract_tool_input_for_hooks(&invocation.payload);
             let session_id = invocation.session.conversation_id().to_string();
