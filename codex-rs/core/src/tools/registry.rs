@@ -290,18 +290,87 @@ fn extract_tool_input_for_hooks(payload: &ToolPayload) -> serde_json::Value {
     }
 }
 
-/// Normalize command field to string if it's an array.
+/// Normalize command field to string if it's an array, and map `cmd` to
+/// `command` when `command` is absent.
 /// This enables Claude's hook scripts that expect tool_input.command as string.
 fn normalize_command_to_string(value: &mut serde_json::Value) {
-    if let serde_json::Value::Object(obj) = value
-        && let Some(cmd) = obj.get_mut("command")
-        && let serde_json::Value::Array(arr) = cmd
-    {
-        let joined = arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        *cmd = serde_json::Value::String(joined);
+    if let serde_json::Value::Object(obj) = value {
+        let cmd_alias = obj
+            .get("cmd")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned);
+        if !obj.contains_key("command")
+            && let Some(cmd_alias) = cmd_alias
+        {
+            obj.insert("command".to_string(), serde_json::Value::String(cmd_alias));
+        }
+        if let Some(cmd) = obj.get_mut("command")
+            && let serde_json::Value::Array(arr) = cmd
+        {
+            let joined = arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            *cmd = serde_json::Value::String(joined);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_command_to_string;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_command_array_to_string() {
+        let mut value = json!({
+            "command": ["echo", "hello"],
+        });
+
+        normalize_command_to_string(&mut value);
+
+        assert_eq!(
+            value,
+            json!({
+                "command": "echo hello",
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_cmd_alias_to_command() {
+        let mut value = json!({
+            "cmd": "echo hello",
+        });
+
+        normalize_command_to_string(&mut value);
+
+        assert_eq!(
+            value,
+            json!({
+                "cmd": "echo hello",
+                "command": "echo hello",
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_existing_command_when_cmd_exists() {
+        let mut value = json!({
+            "cmd": "echo hello",
+            "command": "echo from command",
+        });
+
+        normalize_command_to_string(&mut value);
+
+        assert_eq!(
+            value,
+            json!({
+                "cmd": "echo hello",
+                "command": "echo from command",
+            })
+        );
     }
 }
