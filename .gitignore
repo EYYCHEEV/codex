@@ -94,3 +94,4 @@ __pycache__/
 
 # local scratch
 /tmp/
+.stronk-agents/
