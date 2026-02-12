@@ -80,7 +80,7 @@ jobs:
   comment-on-issue:
     name: Comment with potential duplicates
     needs: gather-duplicates
-    if: ${{ needs.gather-duplicates.result != 'skipped' }}
+    if: ${{ github.repository == 'openai/codex' && needs.gather-duplicates.result != 'skipped' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

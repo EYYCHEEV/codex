@@ -8,6 +8,7 @@ on:
 
 jobs:
   cargo-deny:
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-latest
     defaults:
       run:
