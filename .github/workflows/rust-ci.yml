@@ -12,6 +12,7 @@ jobs:
   # --- Detect what changed to detect which tests to run (always runs) -------------------------------------
   changed:
     name: Detect changed areas
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-24.04
     outputs:
       argument_comment_lint: ${{ steps.detect.outputs.argument_comment_lint }}
@@ -61,7 +62,7 @@ jobs:
     name: Format / etc
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -77,7 +78,7 @@ jobs:
     name: cargo shear
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -95,7 +96,7 @@ jobs:
     name: Argument comment lint
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.argument_comment_lint == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.argument_comment_lint == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Linux sandbox build dependencies
@@ -136,7 +137,7 @@ jobs:
     timeout-minutes: 30
     needs: changed
     # Keep job-level if to avoid spinning up runners when not needed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -501,7 +502,7 @@ jobs:
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: 30
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
+    if: ${{ github.repository == 'openai/codex' && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -703,9 +704,8 @@ jobs:
   # --- Gatherer job that you mark as the ONLY required status -----------------
   results:
     name: CI results (required)
-    needs:
-      [changed, general, cargo_shear, argument_comment_lint, lint_build, tests]
-    if: always()
+    needs: [changed, general, cargo_shear, argument_comment_lint, lint_build, tests]
+    if: ${{ github.repository == 'openai/codex' && always() }}
     runs-on: ubuntu-24.04
     steps:
       - name: Summarize
