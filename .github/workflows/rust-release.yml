@@ -51,6 +51,7 @@ concurrency:
 
 jobs:
   tag-check:
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -132,7 +133,7 @@ jobs:
           echo "::endgroup::"
 
   build:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+    if: ${{ github.repository == 'openai/codex' && (github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed') }}
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
@@ -631,7 +632,7 @@ jobs:
             codex-rs/dist/${{ matrix.target }}/*
 
   stage-signed-macos:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_mode == 'promote_signed' }}
+    if: ${{ github.repository == 'openai/codex' && github.event_name == 'workflow_dispatch' && inputs.release_mode == 'promote_signed' }}
     needs: tag-check
     name: Stage signed macOS handoff - ${{ matrix.target }} - ${{ matrix.bundle }}
     runs-on: macos-15-xlarge
@@ -870,7 +871,7 @@ jobs:
             codex-rs/dist/${{ matrix.target }}/*
 
   build-windows:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+    if: ${{ github.repository == 'openai/codex' && (github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed') }}
     needs: tag-check
     uses: ./.github/workflows/rust-release-windows.yml
     with:
@@ -878,7 +879,7 @@ jobs:
     secrets: inherit
 
   argument-comment-lint-release-assets:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+    if: ${{ github.repository == 'openai/codex' && (github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed') }}
     name: argument-comment-lint release assets
     needs: tag-check
     uses: ./.github/workflows/rust-release-argument-comment-lint.yml
@@ -886,7 +887,7 @@ jobs:
       publish: true
 
   zsh-release-assets:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed' }}
+    if: ${{ github.repository == 'openai/codex' && (github.event_name != 'workflow_dispatch' || inputs.release_mode != 'promote_signed') }}
     name: zsh release assets
     needs: tag-check
     uses: ./.github/workflows/rust-release-zsh.yml
@@ -901,6 +902,7 @@ jobs:
       - zsh-release-assets
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         always() &&
         needs.tag-check.result == 'success' &&
         (
@@ -1306,6 +1308,7 @@ jobs:
     # success() check to the whole dependency chain before evaluating release outputs.
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         needs.release.outputs.should_publish_npm == 'true'
@@ -1469,6 +1472,7 @@ jobs:
     # Publish to PyPI for stable releases and alpha pre-releases with numeric suffixes.
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         needs.release.outputs.should_publish_python_runtime == 'true'
@@ -1515,6 +1519,7 @@ jobs:
     # '-' in the semver string (e.g., 1.2.3-alpha.1).
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         needs.release.outputs.sign_macos == 'true' &&
@@ -1541,6 +1546,7 @@ jobs:
     name: Update latest-alpha-cli branch
     if: >-
       ${{
+        github.repository == 'openai/codex' &&
         !cancelled() &&
         needs.release.result == 'success' &&
         needs.release.outputs.sign_macos == 'true'
