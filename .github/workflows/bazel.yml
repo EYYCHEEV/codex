@@ -17,6 +17,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 jobs:
   test:
+    if: github.repository == 'openai/codex'
     # PRs use a fast Windows cross-compiled test leg for pre-merge signal.
     # Post-merge pushes to main also run the native Windows test job below for
     # broader Windows signal without putting PR latency back on the critical
@@ -212,6 +213,7 @@ jobs:
           key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
 
   clippy:
+    if: github.repository == 'openai/codex'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -303,6 +305,7 @@ jobs:
           key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
 
   verify-release-build:
+    if: github.repository == 'openai/codex'
     timeout-minutes: 30
     strategy:
       fail-fast: false
