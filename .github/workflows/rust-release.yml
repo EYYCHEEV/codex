@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   tag-check:
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -48,6 +49,7 @@ jobs:
   build:
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
+    if: github.repository == 'openai/codex'
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -372,6 +374,7 @@ jobs:
 
   build-windows:
     needs: tag-check
+    if: github.repository == 'openai/codex'
     uses: ./.github/workflows/rust-release-windows.yml
     with:
       release-lto: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
@@ -380,6 +383,7 @@ jobs:
   argument-comment-lint-release-assets:
     name: argument-comment-lint release assets
     needs: tag-check
+    if: github.repository == 'openai/codex'
     uses: ./.github/workflows/rust-release-argument-comment-lint.yml
     with:
       publish: true
@@ -387,6 +391,7 @@ jobs:
   zsh-release-assets:
     name: zsh release assets
     needs: tag-check
+    if: github.repository == 'openai/codex'
     uses: ./.github/workflows/rust-release-zsh.yml
 
   release:
@@ -396,6 +401,7 @@ jobs:
       - argument-comment-lint-release-assets
       - zsh-release-assets
     name: release
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -560,7 +566,7 @@ jobs:
   # npm docs: https://docs.npmjs.com/trusted-publishers
   publish-npm:
     # Publish to npm for stable releases and alpha pre-releases with numeric suffixes.
-    if: ${{ needs.release.outputs.should_publish_npm == 'true' }}
+    if: ${{ github.repository == 'openai/codex' && needs.release.outputs.should_publish_npm == 'true' }}
     name: publish-npm
     needs: release
     runs-on: ubuntu-latest
@@ -669,7 +675,7 @@ jobs:
     needs: release
     # Only publish stable/mainline releases to WinGet; pre-releases include a
     # '-' in the semver string (e.g., 1.2.3-alpha.1).
-    if: ${{ !contains(needs.release.outputs.version, '-') }}
+    if: ${{ github.repository == 'openai/codex' && !contains(needs.release.outputs.version, '-') }}
     # This job only invokes a GitHub Action to open/update the winget-pkgs PR;
     # it does not execute Windows-only tooling, so Linux is sufficient.
     runs-on: ubuntu-latest
@@ -692,6 +698,7 @@ jobs:
     permissions:
       contents: write
     needs: release
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-latest
 
     steps:
