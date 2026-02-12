@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   tag-check:
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -55,6 +56,7 @@ jobs:
           git diff --exit-code core/config.schema.json
 
   build:
+    if: github.repository == 'openai/codex'
     needs: tag-check
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
@@ -420,6 +422,7 @@ jobs:
             codex-rs/dist/${{ matrix.target }}/*
 
   shell-tool-mcp:
+    if: github.repository == 'openai/codex'
     name: shell-tool-mcp
     needs: tag-check
     uses: ./.github/workflows/shell-tool-mcp.yml
@@ -429,6 +432,7 @@ jobs:
     secrets: inherit
 
   release:
+    if: github.repository == 'openai/codex'
     needs:
       - build
       - shell-tool-mcp
@@ -574,7 +578,7 @@ jobs:
   # npm docs: https://docs.npmjs.com/trusted-publishers
   publish-npm:
     # Publish to npm for stable releases and alpha pre-releases with numeric suffixes.
-    if: ${{ needs.release.outputs.should_publish_npm == 'true' }}
+    if: ${{ github.repository == 'openai/codex' && needs.release.outputs.should_publish_npm == 'true' }}
     name: publish-npm
     needs: release
     runs-on: ubuntu-latest
@@ -638,6 +642,7 @@ jobs:
           done
 
   update-branch:
+    if: github.repository == 'openai/codex'
     name: Update latest-alpha-cli branch
     permissions:
       contents: write

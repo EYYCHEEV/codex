@@ -22,6 +22,7 @@ env:
 
 jobs:
   metadata:
+    if: github.repository == 'openai/codex'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.compute.outputs.version }}
@@ -69,6 +70,7 @@ jobs:
 
   rust-binaries:
     name: Build Rust - ${{ matrix.target }}
+    if: github.repository == 'openai/codex'
     needs: metadata
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -189,6 +191,7 @@ jobs:
 
   bash-linux:
     name: Build Bash (Linux) - ${{ matrix.variant }} - ${{ matrix.target }}
+    if: github.repository == 'openai/codex'
     needs: metadata
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -287,6 +290,7 @@ jobs:
 
   bash-darwin:
     name: Build Bash (macOS) - ${{ matrix.variant }} - ${{ matrix.target }}
+    if: github.repository == 'openai/codex'
     needs: metadata
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -329,6 +333,7 @@ jobs:
 
   package:
     name: Package npm module
+    if: github.repository == 'openai/codex'
     needs:
       - metadata
       - rust-binaries
@@ -430,7 +435,7 @@ jobs:
     needs:
       - metadata
       - package
-    if: ${{ inputs.publish && needs.metadata.outputs.should_publish == 'true' }}
+    if: ${{ github.repository == 'openai/codex' && inputs.publish && needs.metadata.outputs.should_publish == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
