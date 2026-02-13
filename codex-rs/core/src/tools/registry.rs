@@ -450,15 +450,15 @@ fn normalize_command_to_string(value: &mut serde_json::Value) {
             obj.insert("command".to_string(), serde_json::Value::String(cmd_alias));
         }
 
-        if let Some(command) = obj.get_mut("command")
-            && let serde_json::Value::Array(command) = command
+        if let Some(command_value) = obj.get_mut("command")
+            && let serde_json::Value::Array(command_parts) = command_value
         {
-            let joined = command
+            let joined = command_parts
                 .iter()
                 .filter_map(|value| value.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            *command = serde_json::Value::String(joined);
+            *command_value = serde_json::Value::String(joined);
         }
     }
 }
