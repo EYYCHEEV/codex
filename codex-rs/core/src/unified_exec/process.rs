@@ -28,6 +28,8 @@ pub(crate) type OutputBuffer = Arc<Mutex<HeadTailBuffer>>;
 pub(crate) struct OutputHandles {
     pub(crate) output_buffer: OutputBuffer,
     pub(crate) output_notify: Arc<Notify>,
+    pub(crate) output_closed: Arc<AtomicBool>,
+    pub(crate) output_closed_notify: Arc<Notify>,
     pub(crate) cancellation_token: CancellationToken,
 }
 
@@ -36,6 +38,8 @@ pub(crate) struct UnifiedExecProcess {
     process_handle: ExecCommandSession,
     output_buffer: OutputBuffer,
     output_notify: Arc<Notify>,
+    output_closed: Arc<AtomicBool>,
+    output_closed_notify: Arc<Notify>,
     cancellation_token: CancellationToken,
     output_drained: Arc<Notify>,
     output_task: JoinHandle<()>,
@@ -51,11 +55,15 @@ impl UnifiedExecProcess {
     ) -> Self {
         let output_buffer = Arc::new(Mutex::new(HeadTailBuffer::default()));
         let output_notify = Arc::new(Notify::new());
+        let output_closed = Arc::new(AtomicBool::new(false));
+        let output_closed_notify = Arc::new(Notify::new());
         let cancellation_token = CancellationToken::new();
         let output_drained = Arc::new(Notify::new());
         let mut receiver = initial_output_rx;
         let buffer_clone = Arc::clone(&output_buffer);
         let notify_clone = Arc::clone(&output_notify);
+        let output_closed_clone = Arc::clone(&output_closed);
+        let output_closed_notify_clone = Arc::clone(&output_closed_notify);
         let output_task = tokio::spawn(async move {
             loop {
                 match receiver.recv().await {
@@ -66,7 +74,11 @@ impl UnifiedExecProcess {
                         notify_clone.notify_waiters();
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        output_closed_clone.store(true, Ordering::Release);
+                        output_closed_notify_clone.notify_waiters();
+                        break;
+                    }
                 };
             }
         });
@@ -75,6 +87,8 @@ impl UnifiedExecProcess {
             process_handle,
             output_buffer,
             output_notify,
+            output_closed,
+            output_closed_notify,
             cancellation_token,
             output_drained,
             output_task,
@@ -91,6 +105,8 @@ impl UnifiedExecProcess {
         OutputHandles {
             output_buffer: Arc::clone(&self.output_buffer),
             output_notify: Arc::clone(&self.output_notify),
+            output_closed: Arc::clone(&self.output_closed),
+            output_closed_notify: Arc::clone(&self.output_closed_notify),
             cancellation_token: self.cancellation_token.clone(),
         }
     }
@@ -120,6 +136,8 @@ impl UnifiedExecProcess {
     }
 
     pub(super) fn terminate(&self) {
+        self.output_closed.store(true, Ordering::Release);
+        self.output_closed_notify.notify_waiters();
         self.process_handle.terminate();
         self.cancellation_token.cancel();
         self.output_task.abort();
