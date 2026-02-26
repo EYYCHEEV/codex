@@ -137,7 +137,7 @@ mod state;
 mod tasks;
 mod user_shell_command;
 pub mod util;
-pub(crate) use codex_protocol::protocol;
+pub use codex_protocol::protocol;
 pub(crate) use codex_shell_command::bash;
 pub(crate) use codex_shell_command::is_dangerous_command;
 pub(crate) use codex_shell_command::is_safe_command;
