@@ -142,7 +142,7 @@ impl UnifiedExecProcessManager {
 
     async fn unregister_network_approval_for_entry(entry: &ProcessEntry) {
         if let Some(network_approval_id) = entry.network_approval_id.as_deref()
-            && let Some(session) = entry.session.upgrade()
+            && let Some(session) = entry.session_weak.upgrade()
         {
             session
                 .services
@@ -516,6 +516,7 @@ impl UnifiedExecProcessManager {
         let entry = ProcessEntry {
             process: Arc::clone(&process),
             session: Arc::clone(&context.session),
+            session_weak: Arc::downgrade(&context.session),
             turn: Arc::clone(&context.turn),
             call_id: context.call_id.clone(),
             process_id,
@@ -525,7 +526,6 @@ impl UnifiedExecProcessManager {
             started_at,
             tty,
             network_approval_id,
-            session: Arc::downgrade(&context.session),
             last_used: started_at,
         };
         let (number_processes, pruned_entry) = {
