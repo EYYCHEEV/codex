@@ -145,6 +145,8 @@ impl Default for UnifiedExecProcessManager {
 
 struct ProcessEntry {
     process: Arc<UnifiedExecProcess>,
+    session: Arc<Session>,
+    session_weak: Weak<Session>,
     turn: Arc<TurnContext>,
     call_id: String,
     process_id: i32,
@@ -154,7 +156,6 @@ struct ProcessEntry {
     started_at: tokio::time::Instant,
     tty: bool,
     network_approval_id: Option<String>,
-    session: Weak<Session>,
     last_used: tokio::time::Instant,
 }
 
