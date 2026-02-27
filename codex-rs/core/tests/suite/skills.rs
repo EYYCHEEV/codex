@@ -210,16 +210,15 @@ async fn list_skills_includes_system_cache_entries() -> Result<()> {
         .map(|entry| (entry.skills.clone(), entry.errors.clone()))
         .unwrap_or_default();
 
-    let skill = skills
-        .iter()
-        .find(|skill| skill.name == SYSTEM_SKILL_NAME)
-        .expect("expected system skill to be present");
-    assert_eq!(skill.scope, codex_protocol::protocol::SkillScope::System);
-    let path_str = skill.path.to_string_lossy().replace('\\', "/");
     let expected_path_suffix = format!("/skills/.system/{SYSTEM_SKILL_NAME}/SKILL.md");
     assert!(
-        path_str.ends_with(&expected_path_suffix),
-        "unexpected skill path: {path_str}"
+        skills.iter().any(|skill| {
+            let path_str = skill.path.to_string_lossy().replace('\\', "/");
+            skill.name == SYSTEM_SKILL_NAME
+                && skill.scope == codex_protocol::protocol::SkillScope::System
+                && path_str.ends_with(&expected_path_suffix)
+        }),
+        "expected system skill cache entry to be present"
     );
 
     Ok(())
