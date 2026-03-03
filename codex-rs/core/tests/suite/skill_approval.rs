@@ -195,6 +195,8 @@ permissions:
     let mocks =
         mount_function_call_agent_response(&server, tool_call_id, &arguments, "shell_command")
             .await;
+    let normalized_home = fs::canonicalize(test.codex_home_path())
+        .unwrap_or_else(|_| test.codex_home_path().to_path_buf());
 
     submit_turn_with_policies(
         &test,
@@ -232,12 +234,10 @@ permissions:
         Some(PermissionProfile {
             file_system: Some(FileSystemPermissions {
                 read: Some(vec![absolute_path(
-                    &test.codex_home_path().join("skills/mbolin-test-skill/data"),
+                    &normalized_home.join("skills/mbolin-test-skill/data"),
                 )]),
                 write: Some(vec![absolute_path(
-                    &test
-                        .codex_home_path()
-                        .join("skills/mbolin-test-skill/output"),
+                    &normalized_home.join("skills/mbolin-test-skill/output"),
                 )]),
             }),
             ..Default::default()
