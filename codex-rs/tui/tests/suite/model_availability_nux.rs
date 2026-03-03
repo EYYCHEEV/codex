@@ -19,6 +19,7 @@ async fn resume_startup_does_not_consume_model_availability_nux_count() -> Resul
 
     let repo_root = codex_utils_cargo_bin::repo_root()?;
     let codex_home = tempdir()?;
+    let workspace = tempdir()?;
 
     let mut source_catalog: JsonValue = serde_json::to_value(bundled_models_response()?)?;
     let models = source_catalog
@@ -52,14 +53,14 @@ async fn resume_startup_does_not_consume_model_availability_nux_count() -> Resul
         serde_json::to_string(&source_catalog)?,
     )?;
 
-    let repo_root_display = repo_root.display();
+    let workspace_display = workspace.path().display();
     let catalog_display = custom_catalog_path.display();
     let config_contents = format!(
         r#"model = "{model_slug}"
 model_provider = "openai"
 model_catalog_json = "{catalog_display}"
 
-[projects."{repo_root_display}"]
+[projects."{workspace_display}"]
 trust_level = "trusted"
 
 [tui.model_availability_nux]
@@ -86,9 +87,10 @@ trust_level = "trusted"
         .arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
-        .arg(&repo_root)
+        .arg(workspace.path())
         .arg("seed session for resume")
         .env("CODEX_HOME", codex_home.path())
+        .env("HOME", codex_home.path())
         .env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", fixture_path)
         .output()
@@ -104,6 +106,7 @@ trust_level = "trusted"
         "CODEX_HOME".to_string(),
         codex_home.path().display().to_string(),
     );
+    env.insert("HOME".to_string(), codex_home.path().display().to_string());
     env.insert("OPENAI_API_KEY".to_string(), "dummy".to_string());
 
     let args = vec![
@@ -111,7 +114,7 @@ trust_level = "trusted"
         "--last".to_string(),
         "--no-alt-screen".to_string(),
         "-C".to_string(),
-        repo_root.display().to_string(),
+        workspace.path().display().to_string(),
         "-c".to_string(),
         "analytics.enabled=false".to_string(),
     ];
@@ -119,7 +122,7 @@ trust_level = "trusted"
     let spawned = codex_utils_pty::spawn_pty_process(
         codex.to_string_lossy().as_ref(),
         &args,
-        &repo_root,
+        workspace.path(),
         &env,
         &None,
         codex_utils_pty::TerminalSize::default(),
