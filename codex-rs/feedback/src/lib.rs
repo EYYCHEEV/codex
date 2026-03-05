@@ -705,6 +705,7 @@ mod tests {
 
     use super::*;
     use crate::FeedbackDiagnostic;
+    use crate::FeedbackDiagnostics;
     use pretty_assertions::assert_eq;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
