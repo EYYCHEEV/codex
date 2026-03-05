@@ -2,6 +2,7 @@ use super::*;
 use crate::tools::context::ToolInvocation;
 use async_trait::async_trait;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 
 struct TestHandler;
 
@@ -46,5 +47,56 @@ fn handler_looks_up_namespaced_aliases_explicitly() {
         namespaced
             .as_ref()
             .is_some_and(|handler| Arc::ptr_eq(handler, &namespaced_handler))
+    );
+}
+
+#[test]
+fn normalize_command_array_to_string() {
+    let mut value = json!({
+        "command": ["echo", "hello"],
+    });
+
+    normalize_command_to_string(&mut value);
+
+    assert_eq!(
+        value,
+        json!({
+            "command": "echo hello",
+        })
+    );
+}
+
+#[test]
+fn normalize_cmd_alias_to_command() {
+    let mut value = json!({
+        "cmd": "echo hello",
+    });
+
+    normalize_command_to_string(&mut value);
+
+    assert_eq!(
+        value,
+        json!({
+            "cmd": "echo hello",
+            "command": "echo hello",
+        })
+    );
+}
+
+#[test]
+fn normalize_preserves_existing_command_when_cmd_exists() {
+    let mut value = json!({
+        "cmd": "echo hello",
+        "command": "echo from command",
+    });
+
+    normalize_command_to_string(&mut value);
+
+    assert_eq!(
+        value,
+        json!({
+            "cmd": "echo hello",
+            "command": "echo from command",
+        })
     );
 }
