@@ -641,6 +641,7 @@ mod tests {
 
     use super::*;
     use crate::FeedbackDiagnostic;
+    use crate::FeedbackDiagnostics;
     use pretty_assertions::assert_eq;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
@@ -715,6 +716,7 @@ mod tests {
         );
         let attachments_without_diagnostics = CodexFeedback::new()
             .snapshot(/*session_id*/ None)
+            .with_feedback_diagnostics(FeedbackDiagnostics::default())
             .feedback_attachments(/*include_logs*/ true, &[], Some(vec![1]));
 
         assert_eq!(
