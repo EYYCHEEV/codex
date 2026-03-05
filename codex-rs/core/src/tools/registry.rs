@@ -459,64 +459,6 @@ fn normalize_command_to_string(value: &mut serde_json::Value) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::normalize_command_to_string;
-    use pretty_assertions::assert_eq;
-    use serde_json::json;
-
-    #[test]
-    fn normalize_command_array_to_string() {
-        let mut value = json!({
-            "command": ["echo", "hello"],
-        });
-
-        normalize_command_to_string(&mut value);
-
-        assert_eq!(
-            value,
-            json!({
-                "command": "echo hello",
-            })
-        );
-    }
-
-    #[test]
-    fn normalize_cmd_alias_to_command() {
-        let mut value = json!({
-            "cmd": "echo hello",
-        });
-
-        normalize_command_to_string(&mut value);
-
-        assert_eq!(
-            value,
-            json!({
-                "cmd": "echo hello",
-                "command": "echo hello",
-            })
-        );
-    }
-
-    #[test]
-    fn normalize_preserves_existing_command_when_cmd_exists() {
-        let mut value = json!({
-            "cmd": "echo hello",
-            "command": "echo from command",
-        });
-
-        normalize_command_to_string(&mut value);
-
-        assert_eq!(
-            value,
-            json!({
-                "cmd": "echo hello",
-                "command": "echo from command",
-            })
-        );
-    }
-}
-
 fn sandbox_policy_tag(policy: &SandboxPolicy) -> &'static str {
     match policy {
         SandboxPolicy::ReadOnly { .. } => "read-only",
@@ -645,4 +587,62 @@ async fn dispatch_after_tool_use_hook(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_command_to_string;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_command_array_to_string() {
+        let mut value = json!({
+            "command": ["echo", "hello"],
+        });
+
+        normalize_command_to_string(&mut value);
+
+        assert_eq!(
+            value,
+            json!({
+                "command": "echo hello",
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_cmd_alias_to_command() {
+        let mut value = json!({
+            "cmd": "echo hello",
+        });
+
+        normalize_command_to_string(&mut value);
+
+        assert_eq!(
+            value,
+            json!({
+                "cmd": "echo hello",
+                "command": "echo hello",
+            })
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_existing_command_when_cmd_exists() {
+        let mut value = json!({
+            "cmd": "echo hello",
+            "command": "echo from command",
+        });
+
+        normalize_command_to_string(&mut value);
+
+        assert_eq!(
+            value,
+            json!({
+                "cmd": "echo hello",
+                "command": "echo from command",
+            })
+        );
+    }
 }
