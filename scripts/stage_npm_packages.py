@@ -40,6 +40,7 @@ CODEX_PLATFORM_PACKAGES = getattr(_BUILD_MODULE, "CODEX_PLATFORM_PACKAGES", {})
 CODEX_PACKAGE_COMPONENT = getattr(
     _BUILD_MODULE, "CODEX_PACKAGE_COMPONENT", "codex-package"
 )
+DEFAULT_CODEX_PLATFORM_PACKAGES = PACKAGE_EXPANSIONS.get("codex", ["codex"])[1:]
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,24 @@ def parse_args() -> argparse.Namespace:
         help="Directory where npm tarballs should be written (default: dist/npm).",
     )
     parser.add_argument(
+        "--npm-package-name",
+        default=None,
+        help=(
+            "Override the published Codex npm package name (default: package.json name or "
+            "the CODEX_NPM_PACKAGE_NAME environment variable)."
+        ),
+    )
+    parser.add_argument(
+        "--platform-package",
+        dest="platform_packages",
+        action="append",
+        choices=tuple(CODEX_PLATFORM_PACKAGES),
+        help=(
+            "Limit the Codex meta package to the specified platform package keys. "
+            "Only applies to --package codex."
+        ),
+    )
+    parser.add_argument(
         "--keep-staging-dirs",
         action="store_true",
         help="Retain temporary staging directories instead of deleting them.",
@@ -136,10 +155,14 @@ def collect_native_component_sets(packages: list[str]) -> list[tuple[str, ...]]:
     return component_sets
 
 
-def expand_packages(packages: list[str]) -> list[str]:
+def expand_packages(packages: list[str], codex_platform_packages: list[str]) -> list[str]:
     expanded: list[str] = []
     for package in packages:
-        for expanded_package in PACKAGE_EXPANSIONS.get(package, [package]):
+        if package == "codex":
+            package_expansion = ["codex", *codex_platform_packages]
+        else:
+            package_expansion = PACKAGE_EXPANSIONS.get(package, [package])
+        for expanded_package in package_expansion:
             if expanded_package in expanded:
                 continue
             expanded.append(expanded_package)
@@ -486,7 +509,8 @@ def main() -> int:
 
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
 
-    packages = expand_packages(list(args.packages))
+    codex_platform_packages = args.platform_packages or DEFAULT_CODEX_PLATFORM_PACKAGES
+    packages = expand_packages(list(args.packages), codex_platform_packages)
     native_component_sets = collect_native_component_sets(packages)
     print("Expanded packages: " + ", ".join(packages), flush=True)
     if native_component_sets:
@@ -568,6 +592,11 @@ def main() -> int:
             )
             if vendor_src is not None:
                 cmd.extend(["--vendor-src", str(vendor_src)])
+            if args.npm_package_name:
+                cmd.extend(["--npm-package-name", args.npm_package_name])
+            if package == "codex":
+                for platform_package in codex_platform_packages:
+                    cmd.extend(["--platform-package", platform_package])
 
             staging_jobs.append(
                 (staging_dir, cmd, f"Staged {package} at {pack_output}")
