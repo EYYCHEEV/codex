@@ -1,0 +1,129 @@
+name: fork-npm-release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish from (for example stronk-codex-rust-v0.111.0)
+        required: true
+        type: string
+      npm_package_name:
+        description: Optional override for the npm package name (for example @eyycheev/codex)
+        required: false
+        type: string
+
+jobs:
+  metadata:
+    if: ${{ github.repository != 'openai/codex' }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      should_publish: ${{ steps.resolve.outputs.should_publish }}
+      npm_tag: ${{ steps.resolve.outputs.npm_tag }}
+      npm_package_name: ${{ steps.resolve.outputs.npm_package_name }}
+      npm_scope: ${{ steps.resolve.outputs.npm_scope }}
+
+    steps:
+      - name: Resolve release metadata
+        id: resolve
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          INPUT_NPM_PACKAGE_NAME: ${{ inputs.npm_package_name }}
+          DEFAULT_NPM_PACKAGE_NAME: ${{ vars.CODEX_NPM_PACKAGE_NAME }}
+        run: |
+          set -euo pipefail
+
+          tag="${TAG}"
+          if [[ -z "${tag}" ]]; then
+            echo "missing tag"
+            exit 1
+          fi
+
+          case "${tag}" in
+            stronk-codex-rust-v*)
+              version="${tag#stronk-codex-rust-v}"
+              ;;
+            rust-v*)
+              version="${tag#rust-v}"
+              ;;
+            *)
+              echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+              echo "version=" >> "$GITHUB_OUTPUT"
+              echo "should_publish=false" >> "$GITHUB_OUTPUT"
+              echo "npm_tag=" >> "$GITHUB_OUTPUT"
+              owner="${GITHUB_REPOSITORY_OWNER,,}"
+              npm_package_name="${INPUT_NPM_PACKAGE_NAME:-${DEFAULT_NPM_PACKAGE_NAME:-@${owner}/codex}}"
+              echo "npm_package_name=${npm_package_name}" >> "$GITHUB_OUTPUT"
+              echo "npm_scope=${npm_package_name%%/*}" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          should_publish=false
+          npm_tag=""
+          if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            should_publish=true
+          elif [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+            should_publish=true
+            npm_tag="alpha"
+          fi
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          npm_package_name="${INPUT_NPM_PACKAGE_NAME:-${DEFAULT_NPM_PACKAGE_NAME:-@${owner}/codex}}"
+          npm_scope="${npm_package_name%%/*}"
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "should_publish=${should_publish}" >> "$GITHUB_OUTPUT"
+          echo "npm_tag=${npm_tag}" >> "$GITHUB_OUTPUT"
+          echo "npm_package_name=${npm_package_name}" >> "$GITHUB_OUTPUT"
+          echo "npm_scope=${npm_scope}" >> "$GITHUB_OUTPUT"
+
+  publish:
+    if: ${{ needs.metadata.outputs.should_publish == 'true' }}
+    needs: metadata
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          scope: ${{ needs.metadata.outputs.npm_scope }}
+
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Download npm tarballs from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/npm
+          gh release download "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "codex-npm*-${VERSION}.tgz" \
+            --dir dist/npm
+
+      - name: Publish to npm
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          NPM_TAG: ${{ needs.metadata.outputs.npm_tag }}
+        run: |
+          python3 ./scripts/publish_npm_packages.py \
+            --dir dist/npm \
+            --version "${VERSION}" \
+            --npm-tag "${NPM_TAG}"
