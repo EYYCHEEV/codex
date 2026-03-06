@@ -591,61 +591,10 @@ jobs:
           VERSION: ${{ needs.release.outputs.version }}
           NPM_TAG: ${{ needs.release.outputs.npm_tag }}
         run: |
-          set -euo pipefail
-          prefix=""
-          if [[ -n "${NPM_TAG}" ]]; then
-            prefix="${NPM_TAG}-"
-          fi
-
-          shopt -s nullglob
-          tarballs=(dist/npm/*-"${VERSION}".tgz)
-          if [[ ${#tarballs[@]} -eq 0 ]]; then
-            echo "No npm tarballs found in dist/npm for version ${VERSION}"
-            exit 1
-          fi
-
-          for tarball in "${tarballs[@]}"; do
-            filename="$(basename "${tarball}")"
-            tag=""
-
-            case "${filename}" in
-              codex-npm-linux-*-"${VERSION}".tgz|codex-npm-darwin-*-"${VERSION}".tgz|codex-npm-win32-*-"${VERSION}".tgz)
-                platform="${filename#codex-npm-}"
-                platform="${platform%-${VERSION}.tgz}"
-                tag="${prefix}${platform}"
-                ;;
-              codex-npm-"${VERSION}".tgz|codex-responses-api-proxy-npm-"${VERSION}".tgz|codex-sdk-npm-"${VERSION}".tgz)
-                tag="${NPM_TAG}"
-                ;;
-              *)
-                echo "Unexpected npm tarball: ${filename}"
-                exit 1
-                ;;
-            esac
-
-            publish_cmd=(npm publish "${GITHUB_WORKSPACE}/${tarball}")
-            if [[ -n "${tag}" ]]; then
-              publish_cmd+=(--tag "${tag}")
-            fi
-
-            echo "+ ${publish_cmd[*]}"
-            set +e
-            publish_output="$("${publish_cmd[@]}" 2>&1)"
-            publish_status=$?
-            set -e
-
-            echo "${publish_output}"
-            if [[ ${publish_status} -eq 0 ]]; then
-              continue
-            fi
-
-            if grep -qiE "previously published|cannot publish over|version already exists" <<< "${publish_output}"; then
-              echo "Skipping already-published package version for ${filename}"
-              continue
-            fi
-
-            exit "${publish_status}"
-          done
+          python3 ./scripts/publish_npm_packages.py \
+            --dir dist/npm \
+            --version "${VERSION}" \
+            --npm-tag "${NPM_TAG}"
 
   winget:
     name: winget
