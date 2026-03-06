@@ -11,106 +11,150 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
+const codexPackageName =
+  require(path.join(__dirname, "..", "package.json")).name || "@openai/codex";
 
-const PLATFORM_PACKAGE_BY_TARGET = {
-  "x86_64-unknown-linux-musl": "@openai/codex-linux-x64",
-  "aarch64-unknown-linux-musl": "@openai/codex-linux-arm64",
-  "x86_64-apple-darwin": "@openai/codex-darwin-x64",
-  "aarch64-apple-darwin": "@openai/codex-darwin-arm64",
-  "x86_64-pc-windows-msvc": "@openai/codex-win32-x64",
-  "aarch64-pc-windows-msvc": "@openai/codex-win32-arm64",
+function deriveSiblingPackageName(packageName, suffix) {
+  if (packageName.startsWith("@")) {
+    const [scope, baseName] = packageName.split("/");
+    if (scope && baseName) {
+      return `${scope}/${baseName}-${suffix}`;
+    }
+  }
+
+  return `${packageName}-${suffix}`;
+}
+
+const TARGET_CANDIDATES_BY_PLATFORM = {
+  "linux:x64": [
+    {
+      packageName: deriveSiblingPackageName(codexPackageName, "linux-x64"),
+      targetTriple: "x86_64-unknown-linux-musl",
+    },
+    {
+      packageName: deriveSiblingPackageName(codexPackageName, "linux-x64-gnu"),
+      targetTriple: "x86_64-unknown-linux-gnu",
+    },
+  ],
+  "linux:arm64": [
+    {
+      packageName: deriveSiblingPackageName(codexPackageName, "linux-arm64"),
+      targetTriple: "aarch64-unknown-linux-musl",
+    },
+  ],
+  "darwin:x64": [
+    {
+      packageName: deriveSiblingPackageName(codexPackageName, "darwin-x64"),
+      targetTriple: "x86_64-apple-darwin",
+    },
+  ],
+  "darwin:arm64": [
+    {
+      packageName: deriveSiblingPackageName(codexPackageName, "darwin-arm64"),
+      targetTriple: "aarch64-apple-darwin",
+    },
+  ],
+  "win32:x64": [
+    {
+      packageName: deriveSiblingPackageName(codexPackageName, "win32-x64"),
+      targetTriple: "x86_64-pc-windows-msvc",
+    },
+  ],
+  "win32:arm64": [
+    {
+      packageName: deriveSiblingPackageName(codexPackageName, "win32-arm64"),
+      targetTriple: "aarch64-pc-windows-msvc",
+    },
+  ],
 };
 
 const { platform, arch } = process;
+const platformKey = `${platform === "android" ? "linux" : platform}:${arch}`;
+const targetCandidates = TARGET_CANDIDATES_BY_PLATFORM[platformKey];
 
-let targetTriple = null;
-switch (platform) {
-  case "linux":
-  case "android":
-    switch (arch) {
-      case "x64":
-        targetTriple = "x86_64-unknown-linux-musl";
-        break;
-      case "arm64":
-        targetTriple = "aarch64-unknown-linux-musl";
-        break;
-      default:
-        break;
-    }
-    break;
-  case "darwin":
-    switch (arch) {
-      case "x64":
-        targetTriple = "x86_64-apple-darwin";
-        break;
-      case "arm64":
-        targetTriple = "aarch64-apple-darwin";
-        break;
-      default:
-        break;
-    }
-    break;
-  case "win32":
-    switch (arch) {
-      case "x64":
-        targetTriple = "x86_64-pc-windows-msvc";
-        break;
-      case "arm64":
-        targetTriple = "aarch64-pc-windows-msvc";
-        break;
-      default:
-        break;
-    }
-    break;
-  default:
-    break;
-}
-
-if (!targetTriple) {
+if (!targetCandidates) {
   throw new Error(`Unsupported platform: ${platform} (${arch})`);
 }
 
-const platformPackage = PLATFORM_PACKAGE_BY_TARGET[targetTriple];
-if (!platformPackage) {
-  throw new Error(`Unsupported target triple: ${targetTriple}`);
+const codexBinaryName = process.platform === "win32" ? "codex.exe" : "codex";
+const localVendorRoot = path.join(__dirname, "..", "vendor");
+const packageBinaryPath = (vendorRoot, targetTriple) =>
+  path.join(vendorRoot, targetTriple, "bin", codexBinaryName);
+const legacyBinaryPath = (vendorRoot, targetTriple) =>
+  path.join(vendorRoot, targetTriple, "codex", codexBinaryName);
+
+function resolveNativePackage(vendorRoot, targetTriple) {
+  const packageRoot = path.join(vendorRoot, targetTriple);
+  const binaryPath = packageBinaryPath(vendorRoot, targetTriple);
+  if (existsSync(binaryPath)) {
+    return {
+      binaryPath,
+      pathDir: path.join(packageRoot, "codex-path"),
+    };
+  }
+
+  const legacyPath = legacyBinaryPath(vendorRoot, targetTriple);
+  if (existsSync(legacyPath)) {
+    return {
+      binaryPath: legacyPath,
+      pathDir: path.join(packageRoot, "path"),
+    };
+  }
+
+  return null;
 }
 
-function findCodexExecutable() {
-  let vendorRoot;
+let nativePackage = null;
+
+for (const candidate of targetCandidates) {
   try {
-    const packageJsonPath = require.resolve(`${platformPackage}/package.json`);
-    vendorRoot = path.join(path.dirname(packageJsonPath), "vendor");
+    const packageJsonPath = require.resolve(`${candidate.packageName}/package.json`);
+    nativePackage = resolveNativePackage(
+      path.join(path.dirname(packageJsonPath), "vendor"),
+      candidate.targetTriple,
+    );
+    if (nativePackage) {
+      break;
+    }
   } catch {
-    vendorRoot = path.join(__dirname, "..", "vendor");
+    // Try the locally vendored fallback below.
   }
 
-  const codexExecutable = path.join(
-    vendorRoot,
-    targetTriple,
-    "bin",
-    process.platform === "win32" ? "codex.exe" : "codex",
-  );
-  if (existsSync(codexExecutable)) {
-    return codexExecutable;
+  nativePackage = resolveNativePackage(localVendorRoot, candidate.targetTriple);
+  if (nativePackage) {
+    break;
   }
+}
 
+if (!nativePackage) {
   const packageManager = detectPackageManager();
   const updateCommand =
     packageManager === "bun"
-      ? "bun install -g @openai/codex@latest"
-      : "npm install -g @openai/codex@latest";
+      ? `bun install -g ${codexPackageName}@latest`
+      : `npm install -g ${codexPackageName}@latest`;
+  const missingPackages = targetCandidates.map(({ packageName }) => packageName).join(", ");
   throw new Error(
-    `Missing optional dependency ${platformPackage}. Reinstall Codex: ${updateCommand}`,
+    `Missing optional dependency for ${platform}/${arch} (${missingPackages}). Reinstall Codex: ${updateCommand}`,
   );
 }
 
-const binaryPath = findCodexExecutable();
+const { binaryPath, pathDir } = nativePackage;
 
 // Use an asynchronous spawn instead of spawnSync so that Node is able to
 // respond to signals (e.g. Ctrl-C / SIGINT) while the native binary is
 // executing. This allows us to forward those signals to the child process
 // and guarantees that when either the child terminates or the parent
 // receives a fatal signal, both processes exit in a predictable manner.
+
+function getUpdatedPath(newDirs) {
+  const pathSep = process.platform === "win32" ? ";" : ":";
+  const existingPath = process.env.PATH || "";
+  const updatedPath = [
+    ...newDirs,
+    ...existingPath.split(pathSep).filter(Boolean),
+  ].join(pathSep);
+  return updatedPath;
+}
 
 /**
  * Use heuristics to detect the package manager that was used to install Codex
@@ -141,11 +185,15 @@ const packageManagerEnvVar =
   detectPackageManager() === "bun"
     ? "CODEX_MANAGED_BY_BUN"
     : "CODEX_MANAGED_BY_NPM";
-const env = {
-  ...process.env,
-  [packageManagerEnvVar]: "1",
-  CODEX_MANAGED_PACKAGE_ROOT: realpathSync(path.join(__dirname, "..")),
-};
+const additionalDirs = [];
+if (existsSync(pathDir)) {
+  additionalDirs.push(pathDir);
+}
+const updatedPath = getUpdatedPath(additionalDirs);
+
+const env = { ...process.env, PATH: updatedPath };
+env[packageManagerEnvVar] = "1";
+env.CODEX_MANAGED_PACKAGE_ROOT = realpathSync(path.join(__dirname, ".."));
 
 const child = spawn(binaryPath, process.argv.slice(2), {
   stdio: "inherit",
