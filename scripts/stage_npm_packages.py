@@ -17,7 +17,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 BUILD_SCRIPT = REPO_ROOT / "codex-cli" / "scripts" / "build_npm_package.py"
 INSTALL_NATIVE_DEPS = REPO_ROOT / "codex-cli" / "scripts" / "install_native_deps.py"
 WORKFLOW_NAME = ".github/workflows/rust-release.yml"
-GITHUB_REPO = "openai/codex"
 
 _SPEC = importlib.util.spec_from_file_location("codex_build_npm_package", BUILD_SCRIPT)
 if _SPEC is None or _SPEC.loader is None:
@@ -27,6 +26,7 @@ _SPEC.loader.exec_module(_BUILD_MODULE)
 PACKAGE_NATIVE_COMPONENTS = getattr(_BUILD_MODULE, "PACKAGE_NATIVE_COMPONENTS", {})
 PACKAGE_EXPANSIONS = getattr(_BUILD_MODULE, "PACKAGE_EXPANSIONS", {})
 CODEX_PLATFORM_PACKAGES = getattr(_BUILD_MODULE, "CODEX_PLATFORM_PACKAGES", {})
+DEFAULT_CODEX_PLATFORM_PACKAGES = PACKAGE_EXPANSIONS.get("codex", ["codex"])[1:]
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +54,24 @@ def parse_args() -> argparse.Namespace:
         help="Directory where npm tarballs should be written (default: dist/npm).",
     )
     parser.add_argument(
+        "--npm-package-name",
+        default=None,
+        help=(
+            "Override the published Codex npm package name (default: package.json name or "
+            "the CODEX_NPM_PACKAGE_NAME environment variable)."
+        ),
+    )
+    parser.add_argument(
+        "--platform-package",
+        dest="platform_packages",
+        action="append",
+        choices=tuple(CODEX_PLATFORM_PACKAGES),
+        help=(
+            "Limit the Codex meta package to the specified platform package keys. "
+            "Only applies to --package codex."
+        ),
+    )
+    parser.add_argument(
         "--keep-staging-dirs",
         action="store_true",
         help="Retain temporary staging directories instead of deleting them.",
@@ -61,17 +79,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def collect_native_components(packages: list[str]) -> set[str]:
+def collect_native_components(packages: list[str], codex_platform_packages: list[str]) -> set[str]:
     components: set[str] = set()
     for package in packages:
+        if package == "codex":
+            for platform_package in codex_platform_packages:
+                components.update(PACKAGE_NATIVE_COMPONENTS.get(platform_package, []))
+            continue
         components.update(PACKAGE_NATIVE_COMPONENTS.get(package, []))
     return components
 
 
-def expand_packages(packages: list[str]) -> list[str]:
+def expand_packages(packages: list[str], codex_platform_packages: list[str]) -> list[str]:
     expanded: list[str] = []
     for package in packages:
-        for expanded_package in PACKAGE_EXPANSIONS.get(package, [package]):
+        if package == "codex":
+            package_expansion = ["codex", *codex_platform_packages]
+        else:
+            package_expansion = PACKAGE_EXPANSIONS.get(package, [package])
+        for expanded_package in package_expansion:
             if expanded_package in expanded:
                 continue
             expanded.append(expanded_package)
@@ -145,8 +171,9 @@ def main() -> int:
 
     runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
 
-    packages = expand_packages(list(args.packages))
-    native_components = collect_native_components(packages)
+    codex_platform_packages = args.platform_packages or DEFAULT_CODEX_PLATFORM_PACKAGES
+    packages = expand_packages(list(args.packages), codex_platform_packages)
+    native_components = collect_native_components(packages, codex_platform_packages)
 
     vendor_temp_root: Path | None = None
     vendor_src: Path | None = None
@@ -184,6 +211,11 @@ def main() -> int:
 
             if vendor_src is not None:
                 cmd.extend(["--vendor-src", str(vendor_src)])
+            if args.npm_package_name:
+                cmd.extend(["--npm-package-name", args.npm_package_name])
+            if package == "codex":
+                for platform_package in codex_platform_packages:
+                    cmd.extend(["--platform-package", platform_package])
 
             try:
                 run_command(cmd)
