@@ -78,7 +78,9 @@ BINARY_COMPONENTS = {
 
 RG_TARGET_PLATFORM_PAIRS: list[tuple[str, str]] = [
     ("x86_64-unknown-linux-musl", "linux-x86_64"),
+    ("x86_64-unknown-linux-gnu", "linux-x86_64"),
     ("aarch64-unknown-linux-musl", "linux-aarch64"),
+    ("aarch64-unknown-linux-gnu", "linux-aarch64"),
     ("x86_64-apple-darwin", "macos-x86_64"),
     ("aarch64-apple-darwin", "macos-aarch64"),
     ("x86_64-pc-windows-msvc", "windows-x86_64"),
@@ -157,6 +159,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--rg-target",
+        dest="rg_targets",
+        action="append",
+        choices=tuple(RG_TARGET_TO_PLATFORM),
+        help=(
+            "Limit ripgrep downloads to the specified target triple. "
+            "May be repeated. Defaults to all known ripgrep targets."
+        ),
+    )
+    parser.add_argument(
         "root",
         nargs="?",
         type=Path,
@@ -181,35 +193,38 @@ def main() -> int:
     use_default_workflow = not workflow_override
     workflow_url = workflow_override or DEFAULT_WORKFLOW_URL
 
-    workflow_id = workflow_url.rstrip("/").split("/")[-1]
-    print(f"Downloading native artifacts from workflow {workflow_id}...")
+    binary_components = [BINARY_COMPONENTS[name] for name in components if name in BINARY_COMPONENTS]
+    if CODEX_PACKAGE_COMPONENT in components or binary_components:
+        workflow_id = workflow_url.rstrip("/").split("/")[-1]
+        workflow_repo = _repo_from_workflow_url(workflow_url)
+        print(f"Downloading native artifacts from workflow {workflow_id}...")
 
-    with _gha_group(f"Download native artifacts from workflow {workflow_id}"):
-        with tempfile.TemporaryDirectory(prefix="codex-native-artifacts-") as artifacts_dir_str:
-            artifacts_dir = Path(artifacts_dir_str)
-            _download_artifacts(workflow_id, artifacts_dir)
-            if CODEX_PACKAGE_COMPONENT in components:
-                try:
-                    install_codex_package_archives(artifacts_dir, vendor_dir, BINARY_TARGETS)
-                except FileNotFoundError:
-                    if not (args.allow_legacy_codex_package or use_default_workflow):
-                        raise
-                    install_legacy_codex_package_layouts(
-                        artifacts_dir,
-                        vendor_dir,
-                        BINARY_TARGETS,
-                        manifest_path=RG_MANIFEST,
-                    )
-            install_binary_components(
-                artifacts_dir,
-                vendor_dir,
-                [BINARY_COMPONENTS[name] for name in components if name in BINARY_COMPONENTS],
-            )
+        with _gha_group(f"Download native artifacts from workflow {workflow_id}"):
+            with tempfile.TemporaryDirectory(prefix="codex-native-artifacts-") as artifacts_dir_str:
+                artifacts_dir = Path(artifacts_dir_str)
+                _download_artifacts(workflow_id, workflow_repo, artifacts_dir)
+                if CODEX_PACKAGE_COMPONENT in components:
+                    try:
+                        install_codex_package_archives(artifacts_dir, vendor_dir, BINARY_TARGETS)
+                    except FileNotFoundError:
+                        if not (args.allow_legacy_codex_package or use_default_workflow):
+                            raise
+                        install_legacy_codex_package_layouts(
+                            artifacts_dir,
+                            vendor_dir,
+                            BINARY_TARGETS,
+                            manifest_path=RG_MANIFEST,
+                        )
+                install_binary_components(
+                    artifacts_dir,
+                    vendor_dir,
+                    binary_components,
+                )
 
     if "rg" in components:
         with _gha_group("Fetch ripgrep binaries"):
             print("Fetching ripgrep binaries...")
-            fetch_rg(vendor_dir, DEFAULT_RG_TARGETS, manifest_path=RG_MANIFEST)
+            fetch_rg(vendor_dir, args.rg_targets or DEFAULT_RG_TARGETS, manifest_path=RG_MANIFEST)
 
     print(f"Installed native dependencies into {vendor_dir}")
     return 0
@@ -344,6 +359,15 @@ def _build_legacy_codex_package_layout(
     )
 
 
+def _repo_from_workflow_url(workflow_url: str) -> str:
+    parsed = urlparse(workflow_url)
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if parsed.netloc == "github.com" and len(path_parts) >= 4 and path_parts[2] == "actions":
+        return f"{path_parts[0]}/{path_parts[1]}"
+
+    return os.environ.get("GITHUB_REPOSITORY", "openai/codex")
+
+
 def fetch_rg(
     vendor_dir: Path,
     targets: Sequence[str] | None = None,
@@ -412,7 +436,7 @@ def fetch_rg(
     return [results[target] for target in targets]
 
 
-def _download_artifacts(workflow_id: str, dest_dir: Path) -> None:
+def _download_artifacts(workflow_id: str, workflow_repo: str, dest_dir: Path) -> None:
     cmd = [
         "gh",
         "run",
@@ -420,7 +444,7 @@ def _download_artifacts(workflow_id: str, dest_dir: Path) -> None:
         "--dir",
         str(dest_dir),
         "--repo",
-        "openai/codex",
+        workflow_repo,
         workflow_id,
     ]
     subprocess.check_call(cmd)
