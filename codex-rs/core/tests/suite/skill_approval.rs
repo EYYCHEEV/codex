@@ -14,6 +14,8 @@ use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use core_test_support::responses::ResponseMock;
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::mount_function_call_agent_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -28,6 +30,8 @@ use serde_json::json;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 fn absolute_path(path: &Path) -> AbsolutePathBuf {
     match AbsolutePathBuf::try_from(path) {
@@ -147,6 +151,29 @@ async fn wait_for_turn_complete(test: &TestCodex) {
     .await;
 }
 
+async fn wait_for_single_request(mock: &ResponseMock) -> ResponsesRequest {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let requests = mock.requests();
+        match requests.len() {
+            0 => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for single request"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            1 => {
+                if let Some(request) = requests.into_iter().next() {
+                    return request;
+                }
+                unreachable!("request count matched 1");
+            }
+            count => panic!("expected 1 request, got {count}"),
+        }
+    }
+}
+
 fn output_shows_sandbox_denial(output: &str) -> bool {
     output.contains("Permission denied")
         || output.contains("Operation not permitted")
@@ -210,12 +237,10 @@ permissions:
     let approval = match maybe_approval {
         Some(approval) => approval,
         None => {
-            let call_output = mocks
-                .completion
-                .single_request()
-                .function_call_output(tool_call_id);
+            let function_call_requests = mocks.function_call.requests().len();
+            let completion_requests = mocks.completion.requests().len();
             panic!(
-                "expected exec approval request before completion; function_call_output={call_output:?}"
+                "expected exec approval request before completion; function_call_requests={function_call_requests} completion_requests={completion_requests}"
             );
         }
     };
@@ -246,9 +271,7 @@ permissions:
     assert_eq!(
         approval.skill_metadata,
         Some(ExecApprovalRequestSkillMetadata {
-            path_to_skills_md: test
-                .codex_home_path()
-                .join("skills/mbolin-test-skill/agents/openai.yaml"),
+            path_to_skills_md: normalized_home.join("skills/mbolin-test-skill/SKILL.md"),
         })
     );
 
@@ -262,9 +285,8 @@ permissions:
 
     wait_for_turn_complete(&test).await;
 
-    let call_output = mocks
-        .completion
-        .single_request()
+    let call_output = wait_for_single_request(&mocks.completion)
+        .await
         .function_call_output(tool_call_id);
     let output = call_output["output"].as_str().unwrap_or_default();
     assert!(
@@ -333,9 +355,8 @@ permissions:
     let approval = match maybe_approval {
         Some(approval) => approval,
         None => {
-            let call_output = mocks
-                .completion
-                .single_request()
+            let call_output = wait_for_single_request(&mocks.completion)
+                .await
                 .function_call_output(tool_call_id);
             panic!(
                 "expected exec approval request before completion; function_call_output={call_output:?}"
@@ -355,9 +376,8 @@ permissions:
 
     wait_for_turn_complete(&test).await;
 
-    let call_output = mocks
-        .completion
-        .single_request()
+    let call_output = wait_for_single_request(&mocks.completion)
+        .await
         .function_call_output(tool_call_id);
     let output = call_output["output"].as_str().unwrap_or_default();
     assert!(
@@ -428,11 +448,8 @@ permissions:
         "expected reject sandbox approval policy to skip exec approval"
     );
 
-    wait_for_turn_complete(&test).await;
-
-    let call_output = mocks
-        .completion
-        .single_request()
+    let call_output = wait_for_single_request(&mocks.completion)
+        .await
         .function_call_output(tool_call_id);
     let output = call_output["output"].as_str().unwrap_or_default();
     assert!(
@@ -510,11 +527,8 @@ async fn shell_zsh_fork_skill_without_permissions_inherits_turn_sandbox() -> Res
         "expected permissionless skill script to skip exec approval"
     );
 
-    wait_for_turn_complete(&test).await;
-
-    let first_output = first_mocks
-        .completion
-        .single_request()
+    let first_output = wait_for_single_request(&first_mocks.completion)
+        .await
         .function_call_output(first_call_id)["output"]
         .as_str()
         .unwrap_or_default()
@@ -552,9 +566,8 @@ async fn shell_zsh_fork_skill_without_permissions_inherits_turn_sandbox() -> Res
         "expected permissionless skill rerun to continue skipping exec approval"
     );
 
-    let second_output = second_mocks
-        .completion
-        .single_request()
+    let second_output = wait_for_single_request(&second_mocks.completion)
+        .await
         .function_call_output(second_call_id)["output"]
         .as_str()
         .unwrap_or_default()
@@ -639,11 +652,8 @@ async fn shell_zsh_fork_skill_with_empty_permissions_inherits_turn_sandbox() -> 
         "expected empty skill permissions to skip exec approval"
     );
 
-    wait_for_turn_complete(&test).await;
-
-    let first_output = first_mocks
-        .completion
-        .single_request()
+    let first_output = wait_for_single_request(&first_mocks.completion)
+        .await
         .function_call_output(first_call_id)["output"]
         .as_str()
         .unwrap_or_default()
@@ -680,9 +690,8 @@ async fn shell_zsh_fork_skill_with_empty_permissions_inherits_turn_sandbox() -> 
         "expected empty-permissions skill rerun to continue skipping exec approval"
     );
 
-    let second_output = second_mocks
-        .completion
-        .single_request()
+    let second_output = wait_for_single_request(&second_mocks.completion)
+        .await
         .function_call_output(second_call_id)["output"]
         .as_str()
         .unwrap_or_default()
@@ -802,9 +811,8 @@ async fn shell_zsh_fork_skill_session_approval_enforces_skill_permissions() -> R
 
     wait_for_turn_complete(&test).await;
 
-    let first_output = first_mocks
-        .completion
-        .single_request()
+    let first_output = wait_for_single_request(&first_mocks.completion)
+        .await
         .function_call_output(first_call_id)["output"]
         .as_str()
         .unwrap_or_default()
@@ -850,9 +858,8 @@ async fn shell_zsh_fork_skill_session_approval_enforces_skill_permissions() -> R
         "expected second run to reuse the cached session approval"
     );
 
-    let second_output = second_mocks
-        .completion
-        .single_request()
+    let second_output = wait_for_single_request(&second_mocks.completion)
+        .await
         .function_call_output(second_call_id)["output"]
         .as_str()
         .unwrap_or_default()
@@ -917,9 +924,8 @@ async fn shell_zsh_fork_still_enforces_workspace_write_sandbox() -> Result<()> {
 
     wait_for_turn_complete(&test).await;
 
-    let call_output = mocks
-        .completion
-        .single_request()
+    let call_output = wait_for_single_request(&mocks.completion)
+        .await
         .function_call_output(tool_call_id);
     let output = call_output["output"].as_str().unwrap_or_default();
     assert!(

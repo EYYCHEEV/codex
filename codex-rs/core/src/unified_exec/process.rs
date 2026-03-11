@@ -8,7 +8,6 @@ use tokio::sync::Notify;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::task::JoinHandle;
 use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
@@ -55,7 +54,7 @@ pub(crate) struct UnifiedExecProcess {
     output_closed_notify: Arc<Notify>,
     cancellation_token: CancellationToken,
     output_drained: Arc<Notify>,
-    output_task: JoinHandle<()>,
+    output_drained_flag: Arc<AtomicBool>,
     sandbox_type: SandboxType,
     _spawn_lifecycle: SpawnLifecycleHandle,
     end_event_emitted: AtomicBool,
@@ -74,13 +73,14 @@ impl UnifiedExecProcess {
         let output_closed_notify = Arc::new(Notify::new());
         let cancellation_token = CancellationToken::new();
         let output_drained = Arc::new(Notify::new());
+        let output_drained_flag = Arc::new(AtomicBool::new(false));
         let mut receiver = initial_output_rx;
         let output_rx = receiver.resubscribe();
         let buffer_clone = Arc::clone(&output_buffer);
         let notify_clone = Arc::clone(&output_notify);
         let output_closed_clone = Arc::clone(&output_closed);
         let output_closed_notify_clone = Arc::clone(&output_closed_notify);
-        let output_task = tokio::spawn(async move {
+        tokio::spawn(async move {
             loop {
                 match receiver.recv().await {
                     Ok(chunk) => {
@@ -108,7 +108,7 @@ impl UnifiedExecProcess {
             output_closed_notify,
             cancellation_token,
             output_drained,
-            output_task,
+            output_drained_flag,
             sandbox_type,
             _spawn_lifecycle: spawn_lifecycle,
             end_event_emitted: AtomicBool::new(false),
@@ -137,8 +137,19 @@ impl UnifiedExecProcess {
         self.cancellation_token.clone()
     }
 
-    pub(super) fn output_drained_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.output_drained)
+    pub(super) fn output_drain_latch(&self) -> (Arc<Notify>, Arc<AtomicBool>) {
+        (
+            Arc::clone(&self.output_drained),
+            Arc::clone(&self.output_drained_flag),
+        )
+    }
+
+    pub(super) async fn wait_for_output_drained(&self) {
+        let notified = self.output_drained.notified();
+        if self.output_drained_flag.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
     }
 
     pub(super) fn try_mark_end_event_emitted(&self) -> bool {
@@ -154,11 +165,8 @@ impl UnifiedExecProcess {
     }
 
     pub(super) fn terminate(&self) {
-        self.output_closed.store(true, Ordering::Release);
-        self.output_closed_notify.notify_waiters();
         self.process_handle.terminate();
         self.cancellation_token.cancel();
-        self.output_task.abort();
     }
 
     async fn snapshot_output(&self) -> Vec<Vec<u8>> {

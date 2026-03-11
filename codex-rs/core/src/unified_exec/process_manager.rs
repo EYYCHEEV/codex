@@ -192,7 +192,7 @@ impl UnifiedExecProcessManager {
         );
         emitter.emit(event_ctx, ToolEventStage::Begin).await;
 
-        start_streaming_output(&process, context, Arc::clone(&transcript));
+        start_streaming_output(process.as_ref(), context, Arc::clone(&transcript));
         let yield_time_ms = clamp_yield_time(request.yield_time_ms);
 
         let start = Instant::now();
@@ -235,6 +235,7 @@ impl UnifiedExecProcessManager {
             // one implementation.
             let exit = exit_code.unwrap_or(-1);
             if process.try_mark_end_event_emitted() {
+                process.wait_for_output_drained().await;
                 emit_exec_end_for_unified_exec(
                     Arc::clone(&context.session),
                     Arc::clone(&context.turn),
@@ -373,8 +374,7 @@ impl UnifiedExecProcessManager {
 
                 let should_emit_end_event = entry.process.try_mark_end_event_emitted();
                 if should_emit_end_event {
-                    entry.process.output_drained_notify().notified().await;
-
+                    entry.process.wait_for_output_drained().await;
                     emit_exec_end_for_unified_exec(
                         Arc::clone(&entry.session),
                         Arc::clone(&entry.turn),
@@ -383,7 +383,7 @@ impl UnifiedExecProcessManager {
                         entry.cwd,
                         Some(entry.process_id),
                         entry.transcript,
-                        output.clone(),
+                        text.clone(),
                         exit_code.unwrap_or(-1),
                         Instant::now().saturating_duration_since(entry.started_at),
                     )
@@ -467,7 +467,7 @@ impl UnifiedExecProcessManager {
             cancellation_token,
         } = entry.process.output_handles();
         let pause_state = entry
-            .session
+            .session_weak
             .upgrade()
             .map(|session| session.subscribe_out_of_band_elicitation_pause_state());
 

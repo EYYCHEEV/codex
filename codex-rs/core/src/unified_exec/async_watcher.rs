@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::Mutex;
+use tokio::sync::Notify;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::Sleep;
@@ -42,8 +45,8 @@ pub(crate) fn start_streaming_output(
     transcript: Arc<Mutex<HeadTailBuffer>>,
 ) {
     let mut receiver = process.output_receiver();
-    let output_drained = process.output_drained_notify();
     let exit_token = process.cancellation_token();
+    let (output_drained, output_drained_flag) = process.output_drain_latch();
 
     let session_ref = Arc::clone(&context.session);
     let turn_ref = Arc::clone(&context.turn);
@@ -69,7 +72,7 @@ pub(crate) fn start_streaming_output(
                         sleep.as_mut().await;
                     }
                 }, if grace_sleep.is_some() => {
-                    output_drained.notify_waiters();
+                    mark_output_drained(&output_drained, &output_drained_flag);
                     break;
                 }
 
@@ -80,7 +83,7 @@ pub(crate) fn start_streaming_output(
                             continue;
                         },
                         Err(RecvError::Closed) => {
-                            output_drained.notify_waiters();
+                            mark_output_drained(&output_drained, &output_drained_flag);
                             break;
                         }
                     };
@@ -100,6 +103,11 @@ pub(crate) fn start_streaming_output(
     });
 }
 
+fn mark_output_drained(output_drained: &Arc<Notify>, output_drained_flag: &Arc<AtomicBool>) {
+    output_drained_flag.store(true, Ordering::Release);
+    output_drained.notify_waiters();
+}
+
 /// Spawn a background watcher that waits for the PTY to exit and then emits a
 /// single ExecCommandEnd event with the aggregated transcript.
 #[allow(clippy::too_many_arguments)]
@@ -115,11 +123,10 @@ pub(crate) fn spawn_exit_watcher(
     started_at: Instant,
 ) {
     let exit_token = process.cancellation_token();
-    let output_drained = process.output_drained_notify();
 
     tokio::spawn(async move {
         exit_token.cancelled().await;
-        output_drained.notified().await;
+        process.wait_for_output_drained().await;
 
         if !process.try_mark_end_event_emitted() {
             return;

@@ -10,6 +10,8 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::MockServer;
 
+const MOCK_PROVIDER_ENV_KEY: &str = "CODEX_TEST_MOCK_API_KEY";
+
 fn repo_root() -> std::path::PathBuf {
     #[expect(clippy::expect_used)]
     codex_utils_cargo_bin::repo_root().expect("failed to resolve repo root")
@@ -18,6 +20,17 @@ fn repo_root() -> std::path::PathBuf {
 fn cli_responses_fixture() -> std::path::PathBuf {
     #[expect(clippy::expect_used)]
     find_resource!("tests/cli_responses_fixture.sse").expect("failed to resolve fixture path")
+}
+
+fn cli_exec_command(bin: std::path::PathBuf, home: &TempDir) -> AssertCommand {
+    let mut cmd = AssertCommand::new(bin);
+    cmd.env(
+        "PATH",
+        std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+    )
+    .env("HOME", home.path())
+    .env("CODEX_HOME", home.path());
+    cmd
 }
 
 /// Tests streaming the Responses API through the CLI using a mock server.
@@ -36,12 +49,15 @@ async fn responses_mode_stream_cli() {
 
     let home = TempDir::new().unwrap();
     let provider_override = format!(
-        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
-        server.uri()
+        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"{MOCK_PROVIDER_ENV_KEY}\", wire_api = \"responses\" }}",
+        server.uri(),
     );
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = AssertCommand::new(bin);
-    cmd.timeout(Duration::from_secs(30));
+    let mut cmd = cli_exec_command(bin, &home);
+    // This test runs late in the integration suite while many other Tokio and
+    // child-process tests are still in flight, so keep the child timeout loose
+    // enough to avoid load-sensitive SIGKILLs from assert_cmd.
+    cmd.timeout(Duration::from_secs(120));
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -51,7 +67,7 @@ async fn responses_mode_stream_cli() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
-    cmd.env("CODEX_HOME", home.path())
+    cmd.env(MOCK_PROVIDER_ENV_KEY, "dummy")
         .env("OPENAI_API_KEY", "dummy")
         .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
 
@@ -116,14 +132,14 @@ async fn exec_cli_applies_model_instructions_file() {
     // Build a provider override that points at the mock server and instructs
     // Codex to use the Responses API with the dummy env var.
     let provider_override = format!(
-        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
-        server.uri()
+        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"{MOCK_PROVIDER_ENV_KEY}\", wire_api = \"responses\" }}",
+        server.uri(),
     );
 
     let home = TempDir::new().unwrap();
     let repo_root = repo_root();
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = AssertCommand::new(bin);
+    let mut cmd = cli_exec_command(bin, &home);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -135,7 +151,7 @@ async fn exec_cli_applies_model_instructions_file() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?\n");
-    cmd.env("CODEX_HOME", home.path())
+    cmd.env(MOCK_PROVIDER_ENV_KEY, "dummy")
         .env("OPENAI_API_KEY", "dummy")
         .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
 
@@ -175,14 +191,13 @@ async fn responses_api_stream_cli() {
 
     let home = TempDir::new().unwrap();
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = AssertCommand::new(bin);
+    let mut cmd = cli_exec_command(bin, &home);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
-    cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy")
+    cmd.env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", fixture)
         .env("OPENAI_BASE_URL", "http://unused.local");
 
@@ -211,14 +226,13 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
 
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = AssertCommand::new(bin);
+    let mut cmd = cli_exec_command(bin, &home);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt);
-    cmd.env("CODEX_HOME", home.path())
-        .env(CODEX_API_KEY_ENV_VAR, "dummy")
+    cmd.env(CODEX_API_KEY_ENV_VAR, "dummy")
         .env("CODEX_RS_SSE_FIXTURE", &fixture)
         // Required for CLI arg parsing even though fixture short-circuits network usage.
         .env("OPENAI_BASE_URL", "http://unused.local");
@@ -332,7 +346,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let marker2 = format!("integration-resume-{}", Uuid::new_v4());
     let prompt2 = format!("echo {marker2}");
     let bin2 = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd2 = AssertCommand::new(bin2);
+    let mut cmd2 = cli_exec_command(bin2, &home);
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -340,8 +354,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
         .arg(&prompt2)
         .arg("resume")
         .arg("--last");
-    cmd2.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy")
+    cmd2.env("OPENAI_API_KEY", "dummy")
         .env("CODEX_RS_SSE_FIXTURE", &fixture)
         .env("OPENAI_BASE_URL", "http://unused.local");
 

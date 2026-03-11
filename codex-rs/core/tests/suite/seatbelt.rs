@@ -168,10 +168,10 @@ async fn openpty_works_under_seatbelt() {
         return;
     }
 
-    if which::which("python3").is_err() {
+    let Ok(python3_path) = which::which("python3") else {
         eprintln!("python3 not found in PATH, skipping test.");
         return;
-    }
+    };
 
     let policy = SandboxPolicy::new_read_only_policy();
     let command_cwd = std::env::current_dir().expect("getcwd");
@@ -179,7 +179,7 @@ async fn openpty_works_under_seatbelt() {
 
     let mut child = spawn_command_under_seatbelt(
         vec![
-            "python3".to_string(),
+            python3_path.to_string_lossy().into_owned(),
             "-c".to_string(),
             r#"import os
 
