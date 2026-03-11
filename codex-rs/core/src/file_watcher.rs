@@ -713,6 +713,11 @@ impl FileWatcher {
             .get(path)
             .map(|counts| (counts.non_recursive, counts.recursive))
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_noop(&self) -> bool {
+        self.inner.is_none()
+    }
 }
 
 fn is_mutating_event(event: &Event) -> bool {
