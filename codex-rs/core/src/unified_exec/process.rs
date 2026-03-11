@@ -83,6 +83,7 @@ pub(crate) struct UnifiedExecProcess {
     cancellation_token: CancellationToken,
     output_drained: Arc<Notify>,
     interaction_lock: Arc<Mutex<()>>,
+    output_drained_flag: Arc<AtomicBool>,
     state_tx: watch::Sender<ProcessState>,
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
@@ -113,6 +114,7 @@ impl UnifiedExecProcess {
         let output_closed_notify = Arc::new(Notify::new());
         let cancellation_token = CancellationToken::new();
         let output_drained = Arc::new(Notify::new());
+        let output_drained_flag = Arc::new(AtomicBool::new(false));
         let (output_tx, _) = broadcast::channel(64);
         let (state_tx, state_rx) = watch::channel(ProcessState::default());
 
@@ -126,6 +128,7 @@ impl UnifiedExecProcess {
             cancellation_token,
             output_drained,
             interaction_lock: Arc::new(Mutex::new(())),
+            output_drained_flag,
             state_tx,
             state_rx,
             output_task: None,
@@ -178,8 +181,19 @@ impl UnifiedExecProcess {
         self.cancellation_token.clone()
     }
 
-    pub(super) fn output_drained_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.output_drained)
+    pub(super) fn output_drain_latch(&self) -> (Arc<Notify>, Arc<AtomicBool>) {
+        (
+            Arc::clone(&self.output_drained),
+            Arc::clone(&self.output_drained_flag),
+        )
+    }
+
+    pub(super) async fn wait_for_output_drained(&self) {
+        let notified = self.output_drained.notified();
+        if self.output_drained_flag.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
     }
 
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
@@ -227,7 +241,7 @@ impl UnifiedExecProcess {
                 });
             }
         }
-        self.finish_termination();
+        self.cancellation_token.cancel();
     }
 
     pub(super) async fn terminate_confirmed(&self) -> Result<(), UnifiedExecError> {
