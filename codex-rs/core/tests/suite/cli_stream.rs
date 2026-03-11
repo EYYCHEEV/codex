@@ -31,6 +31,8 @@ const WHOAMI_PATH: &str = "/v1/user-auth-credential/whoami";
 const CLOUD_CONFIG_BUNDLE_PATH: &str = "/backend-api/wham/config/bundle";
 const CLI_TIMEOUT: Duration = Duration::from_secs(30);
 
+const MOCK_PROVIDER_ENV_KEY: &str = "CODEX_TEST_MOCK_API_KEY";
+
 fn repo_root() -> std::path::PathBuf {
     codex_utils_cargo_bin::repo_root().expect("failed to resolve repo root")
 }
@@ -117,6 +119,10 @@ impl Drop for ChildProcessCleanupGuard {
 // can spawn shell/Python grandchildren, so the timeout path must reap the whole
 // process group instead of only the direct CLI child.
 fn run_cli_command(command: &mut Command) -> io::Result<Output> {
+    run_cli_command_with_timeout(command, CLI_TIMEOUT)
+}
+
+fn run_cli_command_with_timeout(command: &mut Command, timeout: Duration) -> io::Result<Output> {
     #[cfg(unix)]
     command.process_group(0);
 
@@ -132,7 +138,7 @@ fn run_cli_command(command: &mut Command) -> io::Result<Output> {
         let _ = sender.send(child.wait_with_output());
     });
 
-    match receiver.recv_timeout(CLI_TIMEOUT) {
+    match receiver.recv_timeout(timeout) {
         Ok(output) => output,
         Err(mpsc::RecvTimeoutError::Timeout) => {
             Err(io::Error::new(io::ErrorKind::TimedOut, "process timed out"))
@@ -208,6 +214,17 @@ async fn responses_mode_stream_cli_does_not_attempt_oauth_refresh_for_personal_a
     server.verify().await;
 }
 
+fn cli_exec_command(bin: std::path::PathBuf, home: &TempDir) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.env(
+        "PATH",
+        std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin:/usr/sbin:/sbin".into()),
+    )
+    .env("HOME", home.path())
+    .env("CODEX_HOME", home.path());
+    cmd
+}
+
 /// Tests streaming the Responses API through the CLI using a mock server.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_mode_stream_cli() {
@@ -224,11 +241,14 @@ async fn responses_mode_stream_cli() {
 
     let home = TempDir::new().unwrap();
     let provider_override = format!(
-        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
-        server.uri()
+        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"{MOCK_PROVIDER_ENV_KEY}\", wire_api = \"responses\" }}",
+        server.uri(),
     );
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = Command::new(bin);
+    let mut cmd = cli_exec_command(bin, &home);
+    // This test runs late in the integration suite while many other Tokio and
+    // child-process tests are still in flight, so keep the child timeout loose
+    // enough to avoid load-sensitive subprocess cleanup.
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -238,10 +258,11 @@ async fn responses_mode_stream_cli() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
-    cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy");
+    cmd.env(MOCK_PROVIDER_ENV_KEY, "dummy")
+        .env("OPENAI_API_KEY", "dummy")
+        .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
 
-    let output = run_cli_command(&mut cmd).unwrap();
+    let output = run_cli_command_with_timeout(&mut cmd, Duration::from_secs(120)).unwrap();
     println!("Status: {}", output.status);
     println!("Stdout:\n{}", String::from_utf8_lossy(&output.stdout));
     println!("Stderr:\n{}", String::from_utf8_lossy(&output.stderr));
@@ -315,14 +336,14 @@ async fn exec_cli_applies_model_instructions_file() {
     // Build a provider override that points at the mock server and instructs
     // Codex to use the Responses API with the dummy env var.
     let provider_override = format!(
-        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
-        server.uri()
+        "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"{MOCK_PROVIDER_ENV_KEY}\", wire_api = \"responses\" }}",
+        server.uri(),
     );
 
     let home = TempDir::new().unwrap();
     let repo_root = repo_root();
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = Command::new(bin);
+    let mut cmd = cli_exec_command(bin, &home);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("--model")
@@ -336,8 +357,9 @@ async fn exec_cli_applies_model_instructions_file() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?\n");
-    cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy");
+    cmd.env(MOCK_PROVIDER_ENV_KEY, "dummy")
+        .env("OPENAI_API_KEY", "dummy")
+        .env("OPENAI_BASE_URL", format!("{}/v1", server.uri()));
 
     let output = run_cli_command(&mut cmd).unwrap();
     println!("Status: {}", output.status);
@@ -441,7 +463,7 @@ async fn responses_api_stream_cli() {
 
     let home = TempDir::new().unwrap();
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = Command::new(bin);
+    let mut cmd = cli_exec_command(bin, &home);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -449,8 +471,7 @@ async fn responses_api_stream_cli() {
         .arg("-C")
         .arg(&repo_root)
         .arg("hello?");
-    cmd.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy");
+    cmd.env("OPENAI_API_KEY", "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
     assert!(output.status.success());
@@ -482,7 +503,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
 
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
     let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd = Command::new(bin);
+    let mut cmd = cli_exec_command(bin, &home);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -490,8 +511,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
         .arg("-C")
         .arg(&repo_root)
         .arg(&prompt);
-    cmd.env("CODEX_HOME", home.path())
-        .env(CODEX_API_KEY_ENV_VAR, "dummy");
+    cmd.env(CODEX_API_KEY_ENV_VAR, "dummy");
 
     let output = run_cli_command(&mut cmd).unwrap();
     assert!(
@@ -598,7 +618,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let marker2 = format!("integration-resume-{}", Uuid::new_v4());
     let prompt2 = format!("echo {marker2}");
     let bin2 = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
-    let mut cmd2 = Command::new(bin2);
+    let mut cmd2 = cli_exec_command(bin2, &home);
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -608,8 +628,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
         .arg(&prompt2)
         .arg("resume")
         .arg("--last");
-    cmd2.env("CODEX_HOME", home.path())
-        .env("OPENAI_API_KEY", "dummy");
+    cmd2.env("OPENAI_API_KEY", "dummy");
 
     let output2 = run_cli_command(&mut cmd2).unwrap();
     assert!(output2.status.success(), "resume codex-cli run failed");
