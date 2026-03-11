@@ -5,6 +5,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitStatus;
@@ -112,9 +113,31 @@ async fn can_apply_linux_sandbox_policy(
         .unwrap_or(false)
 }
 
+fn python3_path() -> Option<String> {
+    let Some(path) = std::env::var_os("PATH") else {
+        eprintln!("PATH is unset, skipping test.");
+        return None;
+    };
+
+    let Some(python3_path) = std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join("python3");
+        let metadata = std::fs::metadata(&candidate).ok()?;
+        (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .then(|| candidate.canonicalize().unwrap_or(candidate))
+    }) else {
+        eprintln!("python3 not found in PATH, skipping test.");
+        return None;
+    };
+
+    Some(python3_path.to_string_lossy().into_owned())
+}
+
 #[tokio::test]
 async fn python_multiprocessing_lock_works_under_sandbox() {
     core_test_support::skip_if_sandbox!();
+    let Some(python3_path) = python3_path() else {
+        return;
+    };
     #[cfg(target_os = "linux")]
     let sandbox_env = match linux_sandbox_test_env().await {
         Some(env) => env,
@@ -157,11 +180,7 @@ if __name__ == '__main__':
     let command_cwd = std::env::current_dir().expect("should be able to get current dir");
     let sandbox_cwd = command_cwd.clone();
     let mut child = spawn_command_under_sandbox(
-        vec![
-            "python3".to_string(),
-            "-c".to_string(),
-            python_code.to_string(),
-        ],
+        vec![python3_path, "-c".to_string(), python_code.to_string()],
         command_cwd,
         &policy,
         sandbox_cwd.as_path(),
@@ -178,6 +197,9 @@ if __name__ == '__main__':
 #[tokio::test]
 async fn python_getpwuid_works_under_sandbox() {
     core_test_support::skip_if_sandbox!();
+    let Some(python3_path) = python3_path() else {
+        return;
+    };
     #[cfg(target_os = "linux")]
     let sandbox_env = match linux_sandbox_test_env().await {
         Some(env) => env,
@@ -186,22 +208,13 @@ async fn python_getpwuid_works_under_sandbox() {
     #[cfg(not(target_os = "linux"))]
     let sandbox_env = HashMap::new();
 
-    if std::process::Command::new("python3")
-        .arg("--version")
-        .status()
-        .is_err()
-    {
-        eprintln!("python3 not found in PATH, skipping test.");
-        return;
-    }
-
     let policy = SandboxPolicy::new_read_only_policy();
     let command_cwd = std::env::current_dir().expect("should be able to get current dir");
     let sandbox_cwd = command_cwd.clone();
 
     let mut child = spawn_command_under_sandbox(
         vec![
-            "python3".to_string(),
+            python3_path,
             "-c".to_string(),
             "import pwd, os; print(pwd.getpwuid(os.getuid()))".to_string(),
         ],
