@@ -6159,7 +6159,7 @@ speaker = "Desk Speakers"
     Ok(())
 }
 
-#[derive(Deserialize, Debug, PartialEq)]
+#[derive(Default, Deserialize, Debug, PartialEq)]
 struct TuiTomlTest {
     #[serde(default)]
     notifications: Notifications,
@@ -6170,6 +6170,7 @@ struct TuiTomlTest {
 #[derive(Deserialize, Debug, PartialEq)]
 struct RootTomlTest {
     hooks: Option<crate::config::types::HooksConfig>,
+    #[serde(default)]
     tui: TuiTomlTest,
 }
 
@@ -6199,17 +6200,20 @@ fn test_tui_notifications_custom_array() {
 #[test]
 fn config_toml_deserializes_hook_matcher() {
     let toml = r#"
-            [hooks.pre_tool_use]
+            [[hooks.pre_tool_use]]
             matcher = "shell:*"
-            on_match = "deny"
+            command = ["python3", "/tmp/hook.py"]
+            on_failure = "deny"
             "#;
     let parsed: RootTomlTest = toml::from_str(toml).expect("deserialize hooks.pre_tool_use");
     assert_eq!(
         parsed.hooks,
         Some(crate::config::types::HooksConfig {
-            pre_tool_use: vec![crate::config::types::HookRuleToml {
+            pre_tool_use: vec![crate::config::types::PreToolUseHookConfig {
                 matcher: "shell:*".to_string(),
-                on_match: crate::config::types::PreToolUseAction::Deny,
+                command: vec!["python3".to_string(), "/tmp/hook.py".to_string()],
+                timeout_sec: 5,
+                on_failure: crate::config::types::HookFailurePolicy::Deny,
             }],
         })
     );
