@@ -366,6 +366,7 @@ impl UnifiedExecProcessManager {
             let exit_code = process.exit_code();
             let exit = exit_code.unwrap_or(-1);
             if process.try_mark_end_event_emitted() {
+                process.wait_for_output_drained().await;
                 emit_exec_end_for_unified_exec(
                     Arc::clone(&context.session),
                     Arc::clone(&context.turn),
@@ -503,10 +504,8 @@ impl UnifiedExecProcessManager {
             ProcessStatus::Exited { exit_code, entry } => {
                 let call_id = entry.call_id.clone();
 
-                let should_emit_end_event = entry.process.try_mark_end_event_emitted();
-                if should_emit_end_event {
-                    entry.process.output_drained_notify().notified().await;
-
+                if entry.process.try_mark_end_event_emitted() {
+                    entry.process.wait_for_output_drained().await;
                     emit_exec_end_for_unified_exec(
                         Arc::clone(&entry.session),
                         Arc::clone(&entry.turn),
