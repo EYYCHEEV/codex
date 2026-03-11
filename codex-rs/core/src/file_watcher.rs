@@ -309,6 +309,11 @@ impl FileWatcher {
         }
         guard.watched_paths.insert(watch_path, mode);
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_noop(&self) -> bool {
+        self.inner.is_none()
+    }
 }
 
 fn classify_event(event: &Event, state: &RwLock<WatchState>) -> Vec<PathBuf> {

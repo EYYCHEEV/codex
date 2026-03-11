@@ -42,7 +42,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::runtime::Handle;
-use tokio::runtime::RuntimeFlavor;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tracing::warn;
@@ -77,13 +76,11 @@ impl Drop for TempCodexHomeGuard {
 }
 
 fn build_file_watcher(codex_home: PathBuf, skills_manager: Arc<SkillsManager>) -> Arc<FileWatcher> {
-    if should_use_test_thread_manager_behavior()
-        && let Ok(handle) = Handle::try_current()
-        && handle.runtime_flavor() == RuntimeFlavor::CurrentThread
-    {
-        // The real watcher spins background tasks that can starve the
-        // current-thread test runtime and cause event waits to time out.
-        warn!("using noop file watcher under current-thread test runtime");
+    if should_use_test_thread_manager_behavior() {
+        // Integration tests exercise skill reload behavior elsewhere, and the
+        // real watcher can hang during teardown on macOS while unregistering
+        // fsevent roots.
+        warn!("using noop file watcher under test thread manager behavior");
         return Arc::new(FileWatcher::noop());
     }
 

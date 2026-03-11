@@ -185,3 +185,15 @@ async fn new_uses_configured_openai_provider_for_model_refresh() {
     let _ = manager.list_models(RefreshStrategy::Online).await;
     assert_eq!(models_mock.requests().len(), 1);
 }
+
+#[test]
+fn test_thread_manager_uses_noop_file_watcher() {
+    let codex_home = tempfile::tempdir().expect("temp dir");
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        crate::built_in_model_providers()["openai"].clone(),
+        codex_home.path().to_path_buf(),
+    );
+
+    assert!(manager.state.file_watcher.is_noop());
+}
