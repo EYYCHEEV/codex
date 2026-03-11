@@ -215,7 +215,7 @@ impl UnifiedExecProcess {
     }
 
     fn finish_termination(&self) {
-        self.cancellation_token.cancel();
+        self.finish_termination();
         if let Some(output_task) = &self.output_task {
             output_task.abort();
         }
@@ -231,7 +231,7 @@ impl UnifiedExecProcess {
                 });
             }
         }
-        self.finish_termination();
+        self.cancellation_token.cancel();
     }
 
     pub(super) async fn terminate_confirmed(&self) -> Result<(), UnifiedExecError> {
