@@ -2505,6 +2505,11 @@ async fn unified_exec_emits_end_event_when_session_dies_via_stdin() -> Result<()
     .await;
 
     assert_eq!(end_event.exit_code, 0);
+    assert!(
+        end_event.aggregated_output.contains("bye-END"),
+        "expected exit-triggering write_stdin output in end event; got {:?}",
+        end_event.aggregated_output
+    );
 
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))

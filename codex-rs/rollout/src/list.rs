@@ -1474,7 +1474,7 @@ async fn find_thread_path_by_id_str_in_subdir(
             if state_db_ctx.is_some() {
                 tracing::debug!("state db missing rollout path for thread {id_str}");
                 tracing::warn!(
-                    "state db discrepancy during find_thread_path_by_id_str_in_subdir: falling_back"
+                    "state db discrepancy during find_thread_path_by_id_str_in_subdir: path_mismatch"
                 );
             }
             codex_state::record_fallback(
