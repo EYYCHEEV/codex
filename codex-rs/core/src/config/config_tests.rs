@@ -4872,6 +4872,75 @@ async fn unselected_profile_sandbox_mode_is_ignored() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn profile_model_token_limits_override_root_values() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "work".to_string(),
+        ConfigProfile {
+            model_context_window: Some(111_111),
+            model_auto_compact_token_limit: Some(88_888),
+            ..Default::default()
+        },
+    );
+    let cfg = ConfigToml {
+        model_context_window: Some(222_222),
+        model_auto_compact_token_limit: Some(99_999),
+        profiles,
+        profile: Some("work".to_string()),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        (
+            config.model_context_window,
+            config.model_auto_compact_token_limit,
+        ),
+        (Some(111_111), Some(88_888))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_model_token_limits_apply_when_profile_values_are_absent() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert("work".to_string(), ConfigProfile::default());
+    let cfg = ConfigToml {
+        model_context_window: Some(222_222),
+        model_auto_compact_token_limit: Some(99_999),
+        profiles,
+        profile: Some("work".to_string()),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        (
+            config.model_context_window,
+            config.model_auto_compact_token_limit,
+        ),
+        (Some(222_222), Some(99_999))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn feature_table_overrides_legacy_flags() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let mut entries = BTreeMap::new();
