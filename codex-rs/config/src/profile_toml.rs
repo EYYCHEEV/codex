@@ -23,6 +23,8 @@ use codex_protocol::protocol::AskForApproval;
 #[schemars(deny_unknown_fields)]
 pub struct ConfigProfile {
     pub model: Option<String>,
+    pub model_context_window: Option<i64>,
+    pub model_auto_compact_token_limit: Option<i64>,
     /// Optional explicit service tier request id for new turns (for example
     /// `default`, `priority`, or `flex`; legacy `fast` also works).
     pub service_tier: Option<String>,
