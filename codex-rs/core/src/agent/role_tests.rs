@@ -366,6 +366,69 @@ model_provider = "role-provider"
 }
 
 #[tokio::test]
+async fn apply_role_uses_role_profile_token_limits_instead_of_current_profile() {
+    let home = TempDir::new().expect("create temp dir");
+    tokio::fs::write(
+        home.path().join(CONFIG_TOML_FILE),
+        r#"
+[model_providers.base-provider]
+name = "Base Provider"
+base_url = "https://base.example.com/v1"
+env_key = "BASE_PROVIDER_API_KEY"
+wire_api = "responses"
+
+[model_providers.role-provider]
+name = "Role Provider"
+base_url = "https://role.example.com/v1"
+env_key = "ROLE_PROVIDER_API_KEY"
+wire_api = "responses"
+
+[profiles.base-profile]
+model_provider = "base-provider"
+model_context_window = 111111
+model_auto_compact_token_limit = 77777
+
+[profiles.role-profile]
+model_provider = "role-provider"
+model_context_window = 222222
+model_auto_compact_token_limit = 88888
+"#,
+    )
+    .await
+    .expect("write config.toml");
+    let mut config = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            config_profile: Some("base-profile".to_string()),
+            ..Default::default()
+        })
+        .fallback_cwd(Some(home.path().to_path_buf()))
+        .build()
+        .await
+        .expect("load config");
+    let role_path =
+        write_role_config(&home, "profile-role.toml", "profile = \"role-profile\"").await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("custom role should apply");
+
+    assert_eq!(config.active_profile.as_deref(), Some("role-profile"));
+    assert_eq!(config.model_provider_id, "role-provider");
+    assert_eq!(config.model_provider.name, "Role Provider");
+    assert_eq!(config.model_context_window, Some(222222));
+    assert_eq!(config.model_auto_compact_token_limit, Some(88888));
+}
+
+#[tokio::test]
 async fn apply_role_uses_role_model_provider_instead_of_current_profile_provider() {
     let home = TempDir::new().expect("create temp dir");
     tokio::fs::write(

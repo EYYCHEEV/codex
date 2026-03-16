@@ -21,6 +21,8 @@ use codex_protocol::openai_models::ReasoningEffort;
 #[schemars(deny_unknown_fields)]
 pub struct ConfigProfile {
     pub model: Option<String>,
+    pub model_context_window: Option<i64>,
+    pub model_auto_compact_token_limit: Option<i64>,
     pub service_tier: Option<ServiceTier>,
     /// The key in the `model_providers` map identifying the
     /// [`ModelProviderInfo`] to use.
