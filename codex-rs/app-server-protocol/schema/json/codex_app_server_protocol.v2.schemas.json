@@ -8580,6 +8580,20 @@
             "null"
           ]
         },
+        "model_auto_compact_token_limit": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model_context_window": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "model_provider": {
           "type": [
             "string",
