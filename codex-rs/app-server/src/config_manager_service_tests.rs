@@ -5,11 +5,13 @@ use codex_app_server_protocol::AppToolApproval;
 use codex_app_server_protocol::AppsConfig;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ConfigLayerSource as ApiConfigLayerSource;
+use codex_app_server_protocol::ProfileV2;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_config::test_support::CloudConfigBundleFixture;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use tempfile::tempdir;
 
 #[test]
@@ -522,6 +524,50 @@ writable_roots = ["~/code"]
     assert_eq!(
         std::fs::read_to_string(tmp.path().join(CONFIG_TOML_FILE)).expect("read config"),
         "model = \"updated\"\n"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_includes_profile_model_token_limits() -> Result<()> {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        r#"
+[profiles.dev]
+model_context_window = 123456
+model_auto_compact_token_limit = 65432
+"#,
+    )?;
+
+    let service = ConfigService::new_with_defaults(tmp.path().to_path_buf());
+    let read = service
+        .read(ConfigReadParams {
+            include_layers: false,
+            cwd: None,
+        })
+        .await
+        .expect("config read succeeds");
+
+    assert_eq!(
+        read.config.profiles.get("dev"),
+        Some(&ProfileV2 {
+            model: None,
+            model_provider: None,
+            approval_policy: None,
+            approvals_reviewer: None,
+            service_tier: None,
+            model_context_window: Some(123456),
+            model_auto_compact_token_limit: Some(65432),
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
+            model_verbosity: None,
+            web_search: None,
+            tools: None,
+            chatgpt_base_url: None,
+            additional: HashMap::new(),
+        })
     );
 
     Ok(())
