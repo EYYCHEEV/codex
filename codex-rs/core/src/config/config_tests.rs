@@ -717,6 +717,27 @@ async fn runtime_config_uses_tui_raw_output_mode() {
 }
 
 #[test]
+fn config_toml_deserializes_profile_model_token_limits() {
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+[profiles.work]
+model_context_window = 123456
+model_auto_compact_token_limit = 65432
+"#,
+    )
+    .expect("TOML deserialization should succeed for profile model token limits");
+
+    assert_eq!(
+        cfg.profiles.get("work"),
+        Some(&ConfigProfile {
+            model_context_window: Some(123456),
+            model_auto_compact_token_limit: Some(65432),
+            ..Default::default()
+        })
+    );
+}
+
+#[test]
 fn config_toml_deserializes_permission_profiles() {
     let toml = r#"
 default_permissions = "workspace"
@@ -3824,6 +3845,44 @@ async fn profile_sandbox_mode_overrides_base() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn profile_model_token_limits_override_root_values() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert(
+        "work".to_string(),
+        ConfigProfile {
+            model_context_window: Some(111_111),
+            model_auto_compact_token_limit: Some(88_888),
+            ..Default::default()
+        },
+    );
+    let cfg = ConfigToml {
+        model_context_window: Some(222_222),
+        model_auto_compact_token_limit: Some(99_999),
+        profiles,
+        profile: Some("work".to_string()),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        (
+            config.model_context_window,
+            config.model_auto_compact_token_limit,
+        ),
+        (Some(111_111), Some(88_888))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn cli_override_takes_precedence_over_profile_sandbox_mode() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let mut profiles = HashMap::new();
@@ -3859,6 +3918,37 @@ async fn cli_override_takes_precedence_over_profile_sandbox_mode() -> std::io::R
             SandboxPolicy::WorkspaceWrite { .. }
         ));
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn root_model_token_limits_apply_when_profile_values_are_absent() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut profiles = HashMap::new();
+    profiles.insert("work".to_string(), ConfigProfile::default());
+    let cfg = ConfigToml {
+        model_context_window: Some(222_222),
+        model_auto_compact_token_limit: Some(99_999),
+        profiles,
+        profile: Some("work".to_string()),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        (
+            config.model_context_window,
+            config.model_auto_compact_token_limit,
+        ),
+        (Some(222_222), Some(99_999))
+    );
 
     Ok(())
 }
