@@ -349,6 +349,23 @@ fn shell_event_with_prefix_rule(
     Ok(ev_function_call(call_id, "shell_command", &args_str))
 }
 
+fn local_shell_event(
+    call_id: &str,
+    command: Vec<String>,
+    timeout_ms: u64,
+    sandbox_permissions: SandboxPermissions,
+) -> Result<Value> {
+    let mut args = json!({
+        "command": command,
+        "timeout_ms": timeout_ms,
+    });
+    if sandbox_permissions.requests_sandbox_override() {
+        args["sandbox_permissions"] = json!(sandbox_permissions);
+    }
+    let args_str = serde_json::to_string(&args)?;
+    Ok(ev_function_call(call_id, "shell", &args_str))
+}
+
 fn exec_command_event(
     call_id: &str,
     cmd: &str,
@@ -2494,6 +2511,7 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(unix)]
+#[serial_test::serial(zsh_fork_approval)]
 async fn env_zsh_script_spawned_by_python_can_request_escalation_under_zsh_fork() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2653,6 +2671,7 @@ async fn env_zsh_script_spawned_by_python_can_request_escalation_under_zsh_fork(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[cfg(unix)]
+#[serial_test::serial(zsh_fork_approval)]
 async fn matched_prefix_rule_runs_unsandboxed_under_zsh_fork() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3294,14 +3313,18 @@ allow_local_binding = true
         .expect("expected runtime managed network proxy addresses");
 
     let call_id_first = "allow-network-first";
-    // Use urllib without overriding proxy settings so managed-network sessions
-    // continue to exercise the env-based proxy routing path under bubblewrap.
-    let fetch_command = r#"python3 -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=30).read().decode(errors='replace'))""#
-        .to_string();
-    let first_event = shell_event(
+    // Call python directly so the test exercises the managed-network proxy
+    // path instead of any shell-command backend differences on the host.
+    let fetch_script = "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=30).read().decode(errors='replace'))";
+    let fetch_command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        fetch_script.to_string(),
+    ];
+    let first_event = local_shell_event(
         call_id_first,
-        &fetch_command,
-        /*timeout_ms*/ 30_000,
+        fetch_command.clone(),
+        30_000,
         SandboxPermissions::UseDefault,
     )?;
 
@@ -3444,10 +3467,10 @@ allow_local_binding = true
     .verify(&test, &first_output)?;
 
     let call_id_second = "allow-network-second";
-    let second_event = shell_event(
+    let second_event = local_shell_event(
         call_id_second,
-        &fetch_command,
-        /*timeout_ms*/ 30_000,
+        fetch_command,
+        30_000,
         SandboxPermissions::UseDefault,
     )?;
 
