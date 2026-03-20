@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::profile::ConfigProfile;
 use anyhow::Result;
 use codex_app_server_protocol::AppConfig;
 use codex_app_server_protocol::AppToolApproval;
@@ -11,7 +12,6 @@ use codex_core::config_loader::LoaderOverrides;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use tempfile::tempdir;
 
 #[test]
@@ -350,26 +350,13 @@ model_auto_compact_token_limit = 65432
         })
         .await
         .expect("config read succeeds");
+    let expected: ProfileV2 = serde_json::from_value(serde_json::to_value(ConfigProfile {
+        model_context_window: Some(123456),
+        model_auto_compact_token_limit: Some(65432),
+        ..Default::default()
+    })?)?;
 
-    assert_eq!(
-        read.config.profiles.get("dev"),
-        Some(&ProfileV2 {
-            model: None,
-            model_provider: None,
-            approval_policy: None,
-            approvals_reviewer: None,
-            service_tier: None,
-            model_context_window: Some(123456),
-            model_auto_compact_token_limit: Some(65432),
-            model_reasoning_effort: None,
-            model_reasoning_summary: None,
-            model_verbosity: None,
-            web_search: None,
-            tools: None,
-            chatgpt_base_url: None,
-            additional: HashMap::new(),
-        })
-    );
+    assert_eq!(read.config.profiles.get("dev"), Some(&expected));
 
     Ok(())
 }
