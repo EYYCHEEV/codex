@@ -124,7 +124,7 @@ fn clear_instruction_messages(model: &mut ModelInfo) {
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
 pub fn model_info_from_slug(slug: &str) -> ModelInfo {
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
-    ModelInfo {
+    let mut model = ModelInfo {
         slug: slug.to_string(),
         display_name: slug.to_string(),
         description: None,
@@ -164,7 +164,19 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         auto_review_model_override: None,
         tool_mode: None,
         multi_agent_version: None,
+    };
+
+    if slug.starts_with("test-") {
+        model.supports_parallel_tool_calls = true;
+        model.experimental_supported_tools = vec![
+            "test_sync_tool".to_string(),
+            "read_file".to_string(),
+            "grep_files".to_string(),
+            "list_dir".to_string(),
+        ];
     }
+
+    model
 }
 
 fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {
