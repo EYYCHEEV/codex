@@ -637,7 +637,7 @@ fn send_cancel_request(port: u16) -> io::Result<()> {
 fn bind_server(port: u16) -> io::Result<Server> {
     let preferred_bind_address = format!("127.0.0.1:{port}");
     let fallback_bind_address = format!("127.0.0.1:{FALLBACK_PORT}");
-    let mut bind_address = preferred_bind_address.clone();
+    let mut requested_port = port;
     let mut cancel_attempted = false;
     let mut attempts = 0;
     let mut using_fallback_port = false;
@@ -645,10 +645,10 @@ fn bind_server(port: u16) -> io::Result<Server> {
     const RETRY_DELAY: Duration = Duration::from_millis(200);
 
     loop {
+        let bind_address = format!("127.0.0.1:{requested_port}");
         match Server::http(&bind_address) {
             Ok(server) => return Ok(server),
             Err(err) => {
-                attempts += 1;
                 let is_addr_in_use = err
                     .downcast_ref::<io::Error>()
                     .map(|io_err| io_err.kind() == io::ErrorKind::AddrInUse)
@@ -657,9 +657,17 @@ fn bind_server(port: u16) -> io::Result<Server> {
                 // If the address is in use, there may be another instance of the login server
                 // running. Attempt to cancel it and retry before falling back.
                 if is_addr_in_use {
+                    if requested_port == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AddrInUse,
+                            format!("Port {bind_address} is already in use"),
+                        ));
+                    }
+
+                    attempts += 1;
                     if !cancel_attempted && !using_fallback_port {
                         cancel_attempted = true;
-                        if let Err(cancel_err) = send_cancel_request(port) {
+                        if let Err(cancel_err) = send_cancel_request(requested_port) {
                             eprintln!("Failed to cancel previous login server: {cancel_err}");
                         }
                     }
@@ -673,16 +681,21 @@ fn bind_server(port: u16) -> io::Result<Server> {
                                 %fallback_bind_address,
                                 "default login callback port is unavailable; falling back to the registered fallback port"
                             );
-                            bind_address = fallback_bind_address.clone();
+                            requested_port = FALLBACK_PORT;
+                            cancel_attempted = false;
                             attempts = 0;
                             using_fallback_port = true;
                             continue;
                         }
 
-                        return Err(io::Error::new(
-                            io::ErrorKind::AddrInUse,
-                            format!("Port {bind_address} is already in use"),
-                        ));
+                        warn!(
+                            requested_port,
+                            "login callback port remained occupied; falling back to an ephemeral port"
+                        );
+                        requested_port = 0;
+                        cancel_attempted = false;
+                        attempts = 0;
+                        using_fallback_port = false;
                     }
 
                     continue;

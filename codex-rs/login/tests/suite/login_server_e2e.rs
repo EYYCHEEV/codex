@@ -680,3 +680,51 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         .expect_err("second login server should report cancellation");
     Ok(())
 }
+
+#[tokio::test]
+async fn falls_back_to_ephemeral_port_when_fixed_port_is_occupied_by_another_process() -> Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let occupied_listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let occupied_port = occupied_listener.local_addr()?.port();
+
+    let (issuer_addr, _issuer_handle) = start_mock_issuer("org-123");
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+
+    let server = run_login_server(ServerOptions {
+        codex_home,
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: occupied_port,
+        open_browser: false,
+        force_state: Some("fallback_state".to_string()),
+        forced_chatgpt_workspace_id: None,
+        codex_streamlined_login: false,
+    })?;
+
+    assert_ne!(server.actual_port, occupied_port);
+    assert!(
+        server
+            .auth_url
+            .contains(format!("localhost%3A{}", server.actual_port).as_str()),
+        "auth URL should use the actual fallback port"
+    );
+
+    let client = reqwest::Client::new();
+    let cancel_url = format!("http://127.0.0.1:{}/cancel", server.actual_port);
+    let resp = client.get(cancel_url).send().await?;
+    assert!(resp.status().is_success());
+
+    let err = server
+        .block_until_done()
+        .await
+        .expect_err("login server should report cancellation");
+    assert_eq!(err.kind(), io::ErrorKind::Interrupted);
+    drop(occupied_listener);
+    Ok(())
+}
