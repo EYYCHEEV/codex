@@ -445,6 +445,10 @@ fn extract_tool_input_for_hooks(payload: &ToolPayload) -> serde_json::Value {
         ToolPayload::LocalShell { params } => serde_json::json!({
             "command": params.command.join(" "),
         }),
+        ToolPayload::ToolSearch { arguments } => serde_json::json!({
+            "query": arguments.query,
+            "limit": arguments.limit,
+        }),
         ToolPayload::Mcp { raw_arguments, .. } => {
             serde_json::from_str(raw_arguments).unwrap_or(serde_json::Value::Null)
         }

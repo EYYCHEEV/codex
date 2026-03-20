@@ -90,7 +90,7 @@ pub(crate) fn model_info_from_slug(slug: &str) -> ModelInfo {
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: true, // this is the fallback model metadata
         supports_search_tool: false,
-    }
+    };
 
     if slug.starts_with("test-") {
         model.supports_parallel_tool_calls = true;

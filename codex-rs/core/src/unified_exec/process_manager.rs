@@ -389,7 +389,7 @@ impl UnifiedExecProcessManager {
                         entry.call_id.clone(),
                         entry.command.clone(),
                         entry.cwd,
-                        Some(entry.process_id),
+                        Some(entry.process_id.to_string()),
                         entry.transcript,
                         text.clone(),
                         exit_code.unwrap_or(-1),

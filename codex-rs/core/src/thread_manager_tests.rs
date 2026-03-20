@@ -191,7 +191,7 @@ fn test_thread_manager_uses_noop_file_watcher() {
     let codex_home = tempfile::tempdir().expect("temp dir");
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
-        crate::built_in_model_providers()["openai"].clone(),
+        crate::built_in_model_providers(None)["openai"].clone(),
         codex_home.path().to_path_buf(),
     );
 
