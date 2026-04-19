@@ -20,13 +20,27 @@ use crate::types::HookEvent;
 use crate::types::HookPayload;
 use crate::types::HookResponse;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct HooksConfig {
     pub legacy_notify_argv: Option<Vec<String>>,
     pub feature_enabled: bool,
+    pub legacy_pre_tool_use_enabled: bool,
     pub config_layer_stack: Option<ConfigLayerStack>,
     pub shell_program: Option<String>,
     pub shell_args: Vec<String>,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            legacy_notify_argv: None,
+            feature_enabled: false,
+            legacy_pre_tool_use_enabled: true,
+            config_layer_stack: None,
+            shell_program: None,
+            shell_args: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -52,6 +66,7 @@ impl Hooks {
             .collect();
         let engine = ClaudeHooksEngine::new(
             config.feature_enabled,
+            config.legacy_pre_tool_use_enabled,
             config.config_layer_stack.as_ref(),
             CommandShell {
                 program: config.shell_program.unwrap_or_default(),

@@ -678,6 +678,9 @@ impl Session {
         let hooks = Hooks::new(HooksConfig {
             legacy_notify_argv: config.notify.clone(),
             feature_enabled: config.features.enabled(Feature::CodexHooks),
+            legacy_pre_tool_use_enabled: super::legacy_pre_tool_use_enabled_for_session(
+                &session_configuration.session_source,
+            ),
             config_layer_stack: Some(config.config_layer_stack.clone()),
             shell_program: Some(hook_shell_program),
             shell_args: hook_shell_argv,

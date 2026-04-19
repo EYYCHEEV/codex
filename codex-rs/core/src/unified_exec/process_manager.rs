@@ -594,10 +594,11 @@ impl UnifiedExecProcessManager {
             output_closed_notify,
             cancellation_token,
         } = entry.process.output_handles();
-        let pause_state = entry
-            .session
-            .upgrade()
-            .map(|session| session.subscribe_out_of_band_elicitation_pause_state());
+        let pause_state = Some(
+            entry
+                .session
+                .subscribe_out_of_band_elicitation_pause_state(),
+        );
 
         Ok(PreparedProcessHandles {
             process: Arc::clone(&entry.process),

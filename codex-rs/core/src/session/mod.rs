@@ -204,6 +204,10 @@ use self::turn_context::TurnSkillsContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
+pub(crate) fn legacy_pre_tool_use_enabled_for_session(session_source: &SessionSource) -> bool {
+    !crate::guardian::is_guardian_reviewer_source(session_source)
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),

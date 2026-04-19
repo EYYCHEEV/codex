@@ -103,7 +103,8 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         CommandShell {
             program: String::new(),
@@ -124,6 +125,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
         permission_mode: "default".to_string(),
         tool_name: "Bash".to_string(),
         matcher_aliases: Vec::new(),
+        allow_canonical_handlers: true,
         tool_use_id: "tool-1".to_string(),
         tool_input: serde_json::json!({ "command": "echo hello" }),
     });
@@ -140,6 +142,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
             permission_mode: "default".to_string(),
             tool_name: "Bash".to_string(),
             matcher_aliases: Vec::new(),
+            allow_canonical_handlers: true,
             tool_use_id: "tool-1".to_string(),
             tool_input: serde_json::json!({ "command": "echo hello" }),
         })
@@ -186,7 +189,8 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         CommandShell {
             program: String::new(),
@@ -211,6 +215,7 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
                 permission_mode: "default".to_string(),
                 tool_name: "Bash".to_string(),
                 matcher_aliases: Vec::new(),
+                allow_canonical_handlers: true,
                 tool_use_id: "tool-1".to_string(),
                 tool_input: serde_json::json!({ "command": "echo hello" }),
             })
@@ -293,7 +298,8 @@ fn discovers_hooks_from_json_and_toml_in_the_same_layer() {
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         CommandShell {
             program: String::new(),
@@ -317,6 +323,7 @@ fn discovers_hooks_from_json_and_toml_in_the_same_layer() {
         permission_mode: "default".to_string(),
         tool_name: "Bash".to_string(),
         matcher_aliases: Vec::new(),
+        allow_canonical_handlers: true,
         tool_use_id: "tool-1".to_string(),
         tool_input: serde_json::json!({ "command": "echo hello" }),
     });
