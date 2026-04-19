@@ -216,6 +216,10 @@ use self::turn_context::TurnSkillsContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
+pub(crate) fn legacy_pre_tool_use_enabled_for_session(session_source: &SessionSource) -> bool {
+    !crate::guardian::is_guardian_reviewer_source(session_source)
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
@@ -1412,8 +1416,11 @@ impl Session {
         // Refresh only the user layer from the incoming snapshot. Preserve thread-local
         // layers such as request/session overrides that were present when this session
         // was created.
-        let config = {
+        let (config, legacy_pre_tool_use_enabled) = {
             let mut state = self.state.lock().await;
+            let legacy_pre_tool_use_enabled = legacy_pre_tool_use_enabled_for_session(
+                &state.session_configuration.session_source,
+            );
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
             config.config_layer_stack = config
                 .config_layer_stack
@@ -1422,7 +1429,7 @@ impl Session {
                 resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
             let config = Arc::new(config);
             state.session_configuration.original_config_do_not_use = Arc::clone(&config);
-            config
+            (config, legacy_pre_tool_use_enabled)
         };
         self.services.skills_manager.clear_cache();
         self.services.plugins_manager.clear_cache();
@@ -1430,6 +1437,7 @@ impl Session {
             config.as_ref(),
             self.services.plugins_manager.as_ref(),
             self.services.user_shell.as_ref(),
+            legacy_pre_tool_use_enabled,
         )
         .await;
 
@@ -3344,6 +3352,7 @@ async fn build_hooks_for_config(
     config: &Config,
     plugins_manager: &PluginsManager,
     user_shell: &crate::shell::Shell,
+    legacy_pre_tool_use_enabled: bool,
 ) -> Hooks {
     let mut hook_shell_argv = user_shell.derive_exec_args("", /*use_login_shell*/ false);
     let hook_shell_program = hook_shell_argv.remove(0);
@@ -3362,6 +3371,7 @@ async fn build_hooks_for_config(
     Hooks::new(HooksConfig {
         legacy_notify_argv: config.notify.clone(),
         feature_enabled: config.features.enabled(Feature::CodexHooks),
+        legacy_pre_tool_use_enabled,
         config_layer_stack: Some(config.config_layer_stack.clone()),
         plugin_hook_sources,
         plugin_hook_load_warnings,

@@ -110,7 +110,8 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         Vec::new(),
         Vec::new(),
@@ -126,6 +127,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
     let listed = crate::list_hooks(crate::HooksConfig {
         legacy_notify_argv: None,
         feature_enabled: true,
+        legacy_pre_tool_use_enabled: true,
         config_layer_stack: Some(config_layer_stack.clone()),
         plugin_hook_sources: Vec::new(),
         plugin_hook_load_warnings: Vec::new(),
@@ -143,6 +145,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
         permission_mode: "default".to_string(),
         tool_name: "Bash".to_string(),
         matcher_aliases: Vec::new(),
+        allow_canonical_handlers: true,
         tool_use_id: "tool-1".to_string(),
         tool_input: serde_json::json!({ "command": "echo hello" }),
     });
@@ -159,6 +162,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
             permission_mode: "default".to_string(),
             tool_name: "Bash".to_string(),
             matcher_aliases: Vec::new(),
+            allow_canonical_handlers: true,
             tool_use_id: "tool-1".to_string(),
             tool_input: serde_json::json!({ "command": "echo hello" }),
         })
@@ -207,7 +211,8 @@ fn unknown_requirement_source_hooks_stay_managed() {
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         Vec::new(),
         Vec::new(),
@@ -219,8 +224,13 @@ fn unknown_requirement_source_hooks_stay_managed() {
 
     assert_eq!(engine.handlers.len(), 1);
     assert_eq!(engine.handlers[0].source, HookSource::Unknown);
-    let discovered =
-        super::discovery::discover_handlers(Some(&config_layer_stack), Vec::new(), Vec::new());
+    let discovered = super::discovery::discover_handlers(
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(discovered.hook_entries.len(), 1);
     assert_eq!(discovered.hook_entries[0].source, HookSource::Unknown);
     assert_eq!(discovered.hook_entries[0].enabled, true);
@@ -280,7 +290,8 @@ fn user_disablement_filters_non_managed_hooks_but_not_managed_hooks() {
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         Vec::new(),
         Vec::new(),
@@ -292,8 +303,13 @@ fn user_disablement_filters_non_managed_hooks_but_not_managed_hooks() {
 
     assert_eq!(engine.handlers.len(), 1);
     assert_eq!(engine.handlers[0].source, HookSource::CloudRequirements);
-    let discovered =
-        super::discovery::discover_handlers(Some(&config_layer_stack), Vec::new(), Vec::new());
+    let discovered = super::discovery::discover_handlers(
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(discovered.hook_entries.len(), 2);
     assert_eq!(discovered.hook_entries[0].key, managed_disabled_key);
     assert_eq!(discovered.hook_entries[0].enabled, true);
@@ -337,7 +353,8 @@ fn user_disablement_does_not_filter_managed_layer_hooks() {
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         Vec::new(),
         Vec::new(),
@@ -352,8 +369,13 @@ fn user_disablement_does_not_filter_managed_layer_hooks() {
         engine.handlers[0].source,
         HookSource::LegacyManagedConfigFile
     );
-    let discovered =
-        super::discovery::discover_handlers(Some(&config_layer_stack), Vec::new(), Vec::new());
+    let discovered = super::discovery::discover_handlers(
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
+        Some(&config_layer_stack),
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(discovered.hook_entries.len(), 1);
     assert_eq!(discovered.hook_entries[0].key, managed_key);
     assert_eq!(discovered.hook_entries[0].enabled, true);
@@ -418,6 +440,8 @@ fn trusted_plugin_hook_stack(
     plugin_hook_sources: &[PluginHookSource],
 ) -> ConfigLayerStack {
     let discovered = super::discovery::discover_handlers(
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         /*config_layer_stack*/ None,
         plugin_hook_sources.to_vec(),
         Vec::new(),
@@ -488,7 +512,8 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         Vec::new(),
         Vec::new(),
@@ -515,6 +540,7 @@ fn requirements_managed_hooks_warn_when_managed_dir_is_missing() {
                 permission_mode: "default".to_string(),
                 tool_name: "Bash".to_string(),
                 matcher_aliases: Vec::new(),
+                allow_canonical_handlers: true,
                 tool_use_id: "tool-1".to_string(),
                 tool_input: serde_json::json!({ "command": "echo hello" }),
             })
@@ -597,7 +623,8 @@ fn discovers_hooks_from_json_and_toml_in_the_same_layer() {
     .expect("config layer stack");
 
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         Vec::new(),
         Vec::new(),
@@ -623,6 +650,7 @@ fn discovers_hooks_from_json_and_toml_in_the_same_layer() {
         permission_mode: "default".to_string(),
         tool_name: "Bash".to_string(),
         matcher_aliases: Vec::new(),
+        allow_canonical_handlers: true,
         tool_use_id: "tool-1".to_string(),
         tool_input: serde_json::json!({ "command": "echo hello" }),
     });
@@ -687,7 +715,8 @@ print(json.dumps({
         &plugin_hook_sources,
     );
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         plugin_hook_sources.clone(),
         Vec::new(),
@@ -706,6 +735,7 @@ print(json.dumps({
         permission_mode: "default".to_string(),
         tool_name: "Bash".to_string(),
         matcher_aliases: Vec::new(),
+        allow_canonical_handlers: true,
         tool_use_id: "tool-1".to_string(),
         tool_input: serde_json::json!({ "command": "echo hello" }),
     });
@@ -715,6 +745,7 @@ print(json.dumps({
     let listed = crate::list_hooks(crate::HooksConfig {
         legacy_notify_argv: None,
         feature_enabled: true,
+        legacy_pre_tool_use_enabled: true,
         config_layer_stack: None,
         plugin_hook_sources,
         plugin_hook_load_warnings: Vec::new(),
@@ -736,6 +767,7 @@ print(json.dumps({
             permission_mode: "default".to_string(),
             tool_name: "Bash".to_string(),
             matcher_aliases: Vec::new(),
+            allow_canonical_handlers: true,
             tool_use_id: "tool-1".to_string(),
             tool_input: serde_json::json!({ "command": "echo hello" }),
         })
@@ -795,7 +827,8 @@ fn plugin_hook_sources_expand_plugin_placeholders() {
         &plugin_hook_sources,
     );
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         Some(&config_layer_stack),
         plugin_hook_sources,
         Vec::new(),
@@ -838,7 +871,8 @@ fn plugin_hook_sources_expand_plugin_placeholders() {
 #[test]
 fn plugin_hook_load_warnings_are_startup_warnings() {
     let engine = ClaudeHooksEngine::new(
-        /*enabled*/ true,
+        /*canonical_enabled*/ true,
+        /*legacy_pre_tool_use_enabled*/ true,
         /*config_layer_stack*/ None,
         Vec::new(),
         vec!["failed plugin hook".to_string()],

@@ -26,10 +26,11 @@ use crate::types::HookEvent;
 use crate::types::HookPayload;
 use crate::types::HookResponse;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct HooksConfig {
     pub legacy_notify_argv: Option<Vec<String>>,
     pub feature_enabled: bool,
+    pub legacy_pre_tool_use_enabled: bool,
     pub config_layer_stack: Option<ConfigLayerStack>,
     pub plugin_hook_sources: Vec<PluginHookSource>,
     pub plugin_hook_load_warnings: Vec<String>,
@@ -41,6 +42,21 @@ pub struct HooksConfig {
 pub struct HookListOutcome {
     pub hooks: Vec<HookListEntry>,
     pub warnings: Vec<String>,
+}
+
+impl Default for HooksConfig {
+    fn default() -> Self {
+        Self {
+            legacy_notify_argv: None,
+            feature_enabled: false,
+            legacy_pre_tool_use_enabled: true,
+            config_layer_stack: None,
+            plugin_hook_sources: Vec::new(),
+            plugin_hook_load_warnings: Vec::new(),
+            shell_program: None,
+            shell_args: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -66,6 +82,7 @@ impl Hooks {
             .collect();
         let engine = ClaudeHooksEngine::new(
             config.feature_enabled,
+            config.legacy_pre_tool_use_enabled,
             config.config_layer_stack.as_ref(),
             config.plugin_hook_sources,
             config.plugin_hook_load_warnings,
@@ -212,6 +229,8 @@ pub fn list_hooks(config: HooksConfig) -> HookListOutcome {
     }
 
     let discovered = crate::engine::discovery::discover_handlers(
+        config.feature_enabled,
+        config.legacy_pre_tool_use_enabled,
         config.config_layer_stack.as_ref(),
         config.plugin_hook_sources,
         config.plugin_hook_load_warnings,

@@ -359,15 +359,20 @@ impl ToolRegistry {
             return Err(err);
         }
 
-        if let Some(pre_tool_use_payload) = handler.pre_tool_use_payload(&invocation)
-            && let Some(message) = run_pre_tool_use_hooks(
-                &invocation.session,
-                &invocation.turn,
-                invocation.call_id.clone(),
-                &pre_tool_use_payload.tool_name,
-                &pre_tool_use_payload.tool_input,
-            )
-            .await
+        let (pre_tool_use_payload, allow_canonical_handlers) =
+            match handler.pre_tool_use_payload(&invocation) {
+                Some(payload) => (payload, true),
+                None => (generic_pre_tool_use_payload(&invocation), false),
+            };
+        if let Some(message) = run_pre_tool_use_hooks(
+            &invocation.session,
+            &invocation.turn,
+            invocation.call_id.clone(),
+            allow_canonical_handlers,
+            &pre_tool_use_payload.tool_name,
+            &pre_tool_use_payload.tool_input,
+        )
+        .await
         {
             let err = FunctionCallError::RespondToModel(message);
             dispatch_trace.record_failed(&err);
@@ -627,6 +632,32 @@ fn hook_tool_kind(tool_input: &HookToolInput) -> HookToolKind {
         HookToolInput::Custom { .. } => HookToolKind::Custom,
         HookToolInput::LocalShell { .. } => HookToolKind::LocalShell,
         HookToolInput::Mcp { .. } => HookToolKind::Mcp,
+    }
+}
+
+fn generic_pre_tool_use_payload(invocation: &ToolInvocation) -> PreToolUsePayload {
+    let tool_input = match &invocation.payload {
+        ToolPayload::Function { arguments } => {
+            serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.clone()))
+        }
+        ToolPayload::ToolSearch { arguments } => serde_json::to_value(arguments)
+            .unwrap_or_else(|_| serde_json::json!({ "query": arguments.query.clone() })),
+        ToolPayload::Custom { input } => Value::String(input.clone()),
+        ToolPayload::LocalShell { params } => serde_json::json!({
+            "command": params.command.clone(),
+            "workdir": params.workdir.clone(),
+            "timeout_ms": params.timeout_ms,
+            "sandbox_permissions": params.sandbox_permissions.clone(),
+            "prefix_rule": params.prefix_rule.clone(),
+            "additional_permissions": params.additional_permissions.clone(),
+            "justification": params.justification.clone(),
+        }),
+        ToolPayload::Mcp { raw_arguments, .. } => serde_json::from_str(raw_arguments)
+            .unwrap_or_else(|_| Value::String(raw_arguments.clone())),
+    };
+    PreToolUsePayload {
+        tool_name: HookToolName::new(invocation.tool_name.display().to_string()),
+        tool_input,
     }
 }
 
