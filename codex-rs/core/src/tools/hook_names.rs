@@ -52,7 +52,14 @@ impl HookToolName {
 
     /// Returns the hook identity historically used for shell-like tools.
     pub(crate) fn bash() -> Self {
-        Self::new("Bash")
+        Self {
+            name: "Bash".to_string(),
+            matcher_aliases: vec![
+                "shell_command".to_string(),
+                "exec_command".to_string(),
+                "local_shell".to_string(),
+            ],
+        }
     }
 
     /// Returns the canonical hook name serialized into hook stdin.

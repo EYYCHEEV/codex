@@ -514,50 +514,54 @@ impl ToolRegistry {
 
         notify_tool_start(&invocation).await;
 
-        if let Some(pre_tool_use_payload) = tool.pre_tool_use_payload(&invocation) {
-            match run_pre_tool_use_hooks(
-                &invocation.session,
-                &invocation.turn,
-                invocation.call_id.clone(),
-                &pre_tool_use_payload.tool_name,
-                &pre_tool_use_payload.tool_input,
-            )
-            .await
-            {
-                PreToolUseHookResult::Blocked(message) => {
-                    let err = FunctionCallError::RespondToModel(message);
+        let (pre_tool_use_payload, allow_canonical_handlers) =
+            match tool.pre_tool_use_payload(&invocation) {
+                Some(payload) => (payload, true),
+                None => (generic_pre_tool_use_payload(&invocation), false),
+            };
+        match run_pre_tool_use_hooks(
+            &invocation.session,
+            &invocation.turn,
+            invocation.call_id.clone(),
+            allow_canonical_handlers,
+            &pre_tool_use_payload.tool_name,
+            &pre_tool_use_payload.tool_input,
+        )
+        .await
+        {
+            PreToolUseHookResult::Blocked(message) => {
+                let err = FunctionCallError::RespondToModel(message);
+                dispatch_trace.record_failed(&err);
+                notify_tool_finish_if_unclaimed(
+                    &invocation,
+                    terminal_outcome_reached.as_deref(),
+                    ToolCallOutcome::Blocked,
+                )
+                .await;
+                return Err(err);
+            }
+            PreToolUseHookResult::Continue {
+                updated_input: Some(updated_input),
+            } => match tool.with_updated_hook_input(invocation.clone(), updated_input) {
+                Ok(updated_invocation) => {
+                    invocation = updated_invocation;
+                }
+                Err(err) => {
                     dispatch_trace.record_failed(&err);
                     notify_tool_finish_if_unclaimed(
                         &invocation,
                         terminal_outcome_reached.as_deref(),
-                        ToolCallOutcome::Blocked,
+                        ToolCallOutcome::Failed {
+                            handler_executed: false,
+                        },
                     )
                     .await;
                     return Err(err);
                 }
-                PreToolUseHookResult::Continue {
-                    updated_input: Some(updated_input),
-                } => match tool.with_updated_hook_input(invocation.clone(), updated_input) {
-                    Ok(updated_invocation) => {
-                        invocation = updated_invocation;
-                    }
-                    Err(err) => {
-                        dispatch_trace.record_failed(&err);
-                        notify_tool_finish_if_unclaimed(
-                            &invocation,
-                            terminal_outcome_reached.as_deref(),
-                            ToolCallOutcome::Failed {
-                                handler_executed: false,
-                            },
-                        )
-                        .await;
-                        return Err(err);
-                    }
-                },
-                PreToolUseHookResult::Continue {
-                    updated_input: None,
-                } => {}
-            }
+            },
+            PreToolUseHookResult::Continue {
+                updated_input: None,
+            } => {}
         }
 
         if let Some(command) = shell_script_for_invocation(&invocation) {
@@ -773,6 +777,21 @@ fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &ToolName) ->
     match payload {
         ToolPayload::Custom { .. } => format!("unsupported custom tool call: {tool_name}"),
         _ => format!("unsupported call: {tool_name}"),
+    }
+}
+
+fn generic_pre_tool_use_payload(invocation: &ToolInvocation) -> PreToolUsePayload {
+    let tool_input = match &invocation.payload {
+        ToolPayload::Function { arguments } => {
+            serde_json::from_str(arguments).unwrap_or_else(|_| Value::String(arguments.clone()))
+        }
+        ToolPayload::ToolSearch { arguments } => serde_json::to_value(arguments)
+            .unwrap_or_else(|_| serde_json::json!({ "query": arguments.query.clone() })),
+        ToolPayload::Custom { input } => Value::String(input.clone()),
+    };
+    PreToolUsePayload {
+        tool_name: HookToolName::new(invocation.tool_name.to_string()),
+        tool_input,
     }
 }
 #[cfg(test)]

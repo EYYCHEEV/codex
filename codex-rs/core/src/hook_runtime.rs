@@ -164,6 +164,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     tool_use_id: String,
+    allow_canonical_handlers: bool,
     tool_name: &HookToolName,
     tool_input: &Value,
 ) -> PreToolUseHookResult {
@@ -178,6 +179,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
         permission_mode: hook_permission_mode(turn_context),
         tool_name: tool_name.name().to_string(),
         matcher_aliases: tool_name.matcher_aliases().to_vec(),
+        allow_canonical_handlers,
         tool_use_id,
         tool_input: tool_input.clone(),
     };
@@ -213,7 +215,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
         ))
     } else {
         PreToolUseHookResult::Blocked(format!(
-            "Tool call blocked by PreToolUse hook: {reason}. Tool: {}",
+            "Tool blocked by PreToolUse hook: {reason}. Tool: {}",
             tool_name.name()
         ))
     }
