@@ -220,6 +220,8 @@ mod tests {
     use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
 
+    use super::super::ConfiguredHandlerBehavior;
+    use super::super::HandlerExecution;
     use super::ConfiguredHandler;
     use super::select_handlers;
     use super::select_handlers_for_matcher_inputs;
@@ -234,6 +236,8 @@ mod tests {
             event_name,
             matcher: matcher.map(str::to_owned),
             command: command.to_string(),
+            execution: HandlerExecution::ShellCommand,
+            behavior: ConfiguredHandlerBehavior::Canonical,
             timeout_sec: 5,
             status_message: None,
             additional_context_limit: Default::default(),

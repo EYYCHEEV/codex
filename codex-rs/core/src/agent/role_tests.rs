@@ -1,5 +1,6 @@
 use super::*;
 use crate::SkillsService;
+use crate::config::CONFIG_TOML_FILE;
 use crate::config::ConfigBuilder;
 use crate::skills_load_input_from_config;
 use codex_config::ConfigLayerStackOrdering;
@@ -263,34 +264,13 @@ async fn apply_role_preserves_existing_service_tier_without_override() {
 }
 
 #[tokio::test]
-async fn apply_role_uses_role_profile_token_limits_instead_of_current_profile() {
+async fn apply_role_uses_role_token_limits_instead_of_current_config() {
     let home = TempDir::new().expect("create temp dir");
     tokio::fs::write(
         home.path().join(CONFIG_TOML_FILE),
         r#"
-profile = "base-profile"
-
-[model_providers.base-provider]
-name = "Base Provider"
-base_url = "https://base.example.com/v1"
-env_key = "BASE_PROVIDER_API_KEY"
-wire_api = "responses"
-
-[model_providers.role-provider]
-name = "Role Provider"
-base_url = "https://role.example.com/v1"
-env_key = "ROLE_PROVIDER_API_KEY"
-wire_api = "responses"
-
-[profiles.base-profile]
-model_provider = "base-provider"
 model_context_window = 111111
 model_auto_compact_token_limit = 77777
-
-[profiles.role-profile]
-model_provider = "role-provider"
-model_context_window = 222222
-model_auto_compact_token_limit = 88888
 "#,
     )
     .await
@@ -301,8 +281,15 @@ model_auto_compact_token_limit = 88888
         .build()
         .await
         .expect("load config");
-    let role_path =
-        write_role_config(&home, "profile-role.toml", "profile = \"role-profile\"").await;
+    let role_path = write_role_config(
+        &home,
+        "token-limit-role.toml",
+        r#"
+model_context_window = 222222
+model_auto_compact_token_limit = 88888
+"#,
+    )
+    .await;
     config.agent_roles.insert(
         "custom".to_string(),
         AgentRoleConfig {
@@ -316,9 +303,6 @@ model_auto_compact_token_limit = 88888
         .await
         .expect("custom role should apply");
 
-    assert_eq!(config.active_profile.as_deref(), Some("role-profile"));
-    assert_eq!(config.model_provider_id, "role-provider");
-    assert_eq!(config.model_provider.name, "Role Provider");
     assert_eq!(config.model_context_window, Some(222222));
     assert_eq!(config.model_auto_compact_token_limit, Some(88888));
 }
