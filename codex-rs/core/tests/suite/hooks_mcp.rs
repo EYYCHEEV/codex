@@ -296,7 +296,7 @@ async fn pre_tool_use_blocks_mcp_tool_before_execution(
     };
     assert!(
         output.contains(&format!(
-            "Tool call blocked by PreToolUse hook: {block_reason}. Tool: {RMCP_ECHO_TOOL_NAME}"
+            "Tool blocked by PreToolUse hook: {block_reason}. Tool: {RMCP_ECHO_TOOL_NAME}"
         )),
         "blocked MCP tool output should surface the hook reason and tool name",
     );
