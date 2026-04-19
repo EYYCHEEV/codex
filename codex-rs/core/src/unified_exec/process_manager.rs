@@ -725,7 +725,7 @@ impl UnifiedExecProcessManager {
                         entry.cwd,
                         Some(entry.process_id.to_string()),
                         entry.transcript,
-                        output.clone(),
+                        text.clone(),
                         exit_code.unwrap_or(-1),
                         Instant::now().saturating_duration_since(entry.started_at),
                     )
@@ -845,7 +845,7 @@ impl UnifiedExecProcessManager {
             process_id,
             hook_command,
             command: command.to_vec(),
-            cwd,
+            cwd: cwd.clone(),
             transcript: Arc::clone(&transcript),
             started_at,
             tty,
