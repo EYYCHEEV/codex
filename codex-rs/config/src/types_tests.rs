@@ -86,3 +86,45 @@ fn memories_config_clamps_rate_limit_remaining_threshold() {
         }
     );
 }
+
+#[test]
+fn deserialize_legacy_pre_tool_use_hook_config() {
+    let cfg: LegacyHooksConfig = toml::from_str(
+        r#"
+            [[pre_tool_use]]
+            matcher = "exec_command"
+            command = ["python3", "/tmp/hook.py"]
+        "#,
+    )
+    .expect("should deserialize legacy pre tool use hooks");
+
+    assert_eq!(
+        cfg,
+        LegacyHooksConfig {
+            pre_tool_use: vec![LegacyPreToolUseHookConfig {
+                matcher: "exec_command".to_string(),
+                command: vec!["python3".to_string(), "/tmp/hook.py".to_string()],
+                timeout_sec: 5,
+                on_failure: HookFailurePolicy::Deny,
+            }],
+        }
+    );
+}
+
+#[test]
+fn deserialize_legacy_pre_tool_use_hook_allows_failure_override() {
+    let cfg: LegacyHooksConfig = toml::from_str(
+        r#"
+            [[pre_tool_use]]
+            matcher = "*"
+            command = ["python3", "/tmp/hook.py"]
+            timeout_sec = 12
+            on_failure = "allow"
+        "#,
+    )
+    .expect("should deserialize legacy pre tool use hooks");
+
+    assert_eq!(cfg.pre_tool_use.len(), 1);
+    assert_eq!(cfg.pre_tool_use[0].timeout_sec, 12);
+    assert_eq!(cfg.pre_tool_use[0].on_failure, HookFailurePolicy::Allow);
+}
