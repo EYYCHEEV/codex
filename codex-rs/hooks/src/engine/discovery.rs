@@ -15,6 +15,7 @@ use codex_config::ManagedHooksRequirementsToml;
 use codex_config::MatcherGroup;
 use codex_config::RequirementSource;
 use codex_config::TomlValue;
+use codex_config::types::LegacyHooksConfig;
 use codex_config::version_for_toml;
 use codex_plugin::PluginHookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -22,6 +23,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::ConfiguredHandler;
+use super::ConfiguredHandlerBehavior;
+use super::HandlerExecution;
 use super::HookListEntry;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
@@ -30,6 +33,7 @@ use crate::events::session_end::SESSION_END_DEFAULT_TIMEOUT_SEC;
 use crate::events::session_end::SESSION_END_MAX_TIMEOUT_SEC;
 use crate::output_spill::AdditionalContextLimit;
 use crate::output_spill::DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT;
+use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
@@ -64,6 +68,8 @@ impl HookDiscoveryPolicy {
 }
 
 pub(crate) fn discover_handlers(
+    canonical_enabled: bool,
+    legacy_pre_tool_use_enabled: bool,
     config_layer_stack: Option<&ConfigLayerStack>,
     plugin_hook_sources: Vec<PluginHookSource>,
     plugin_hook_load_warnings: Vec<String>,
@@ -113,44 +119,61 @@ pub(crate) fn discover_handlers(
             if !policy.allows(&policy_source) {
                 continue;
             }
-            let json_hooks = match layer.hooks_config_folder() {
-                Some(config_folder) if visited_json_hook_folders.insert(config_folder.clone()) => {
-                    load_hooks_json(Some(config_folder.as_path()), &mut warnings)
-                }
-                _ => None,
-            };
-            let toml_hooks = load_toml_hooks_from_layer(layer, &mut warnings);
 
-            if let (Some((json_source_path, json_events)), Some((toml_source_path, toml_events))) =
-                (&json_hooks, &toml_hooks)
-                && !json_events.is_empty()
-                && !toml_events.is_empty()
-            {
-                warnings.push(format!(
-                    "loading hooks from both {} and {}; prefer a single representation for this layer",
-                    json_source_path.display(),
-                    toml_source_path.display()
-                ));
+            if canonical_enabled {
+                let json_hooks = match layer.hooks_config_folder() {
+                    Some(config_folder)
+                        if visited_json_hook_folders.insert(config_folder.clone()) =>
+                    {
+                        load_hooks_json(Some(config_folder.as_path()), &mut warnings)
+                    }
+                    _ => None,
+                };
+                let toml_hooks = load_toml_hooks_from_layer(layer, &mut warnings);
+
+                if let (
+                    Some((json_source_path, json_events)),
+                    Some((toml_source_path, toml_events)),
+                ) = (&json_hooks, &toml_hooks)
+                    && !json_events.is_empty()
+                    && !toml_events.is_empty()
+                {
+                    warnings.push(format!(
+                        "loading hooks from both {} and {}; prefer a single representation for this layer",
+                        json_source_path.display(),
+                        toml_source_path.display()
+                    ));
+                }
+
+                for (source_path, hook_events) in [json_hooks, toml_hooks].into_iter().flatten() {
+                    append_hook_events(
+                        &mut handlers,
+                        &mut hook_entries,
+                        &mut warnings,
+                        &mut display_order,
+                        HookHandlerSource {
+                            path: &source_path,
+                            key_source: source_path.display().to_string(),
+                            source: hook_source,
+                            is_managed,
+                            bypass_hook_trust: policy.bypass_hook_trust,
+                            hook_states: &hook_states,
+                            env: HashMap::new(),
+                            plugin_id: None,
+                        },
+                        hook_events,
+                        policy,
+                    );
+                }
             }
 
-            for (source_path, hook_events) in [json_hooks, toml_hooks].into_iter().flatten() {
-                append_hook_events(
+            if legacy_pre_tool_use_enabled {
+                append_legacy_pre_tool_use_handlers(
                     &mut handlers,
-                    &mut hook_entries,
                     &mut warnings,
                     &mut display_order,
-                    HookHandlerSource {
-                        path: &source_path,
-                        key_source: source_path.display().to_string(),
-                        source: hook_source,
-                        is_managed,
-                        bypass_hook_trust: policy.bypass_hook_trust,
-                        hook_states: &hook_states,
-                        env: HashMap::new(),
-                        plugin_id: None,
-                    },
-                    hook_events,
-                    policy,
+                    layer,
+                    hook_source,
                 );
             }
         }
@@ -438,6 +461,76 @@ fn append_hook_events(
     }
 }
 
+fn append_legacy_pre_tool_use_handlers(
+    handlers: &mut Vec<ConfiguredHandler>,
+    warnings: &mut Vec<String>,
+    display_order: &mut i64,
+    layer: &ConfigLayerEntry,
+    source: HookSource,
+) {
+    let Some(raw_hooks) = layer.config.get("hooks").cloned() else {
+        return;
+    };
+    let source_path = config_toml_source_path(layer);
+    let parsed: LegacyHooksConfig = match raw_hooks.try_into() {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            warnings.push(format!(
+                "failed to parse legacy hooks config {}: {err}",
+                source_path.display()
+            ));
+            return;
+        }
+    };
+    if parsed.pre_tool_use.is_empty() {
+        return;
+    }
+
+    for hook in parsed.pre_tool_use {
+        if hook.command.is_empty() {
+            warnings.push(format!(
+                "skipping empty legacy pre-tool-use command in {}",
+                source_path.display()
+            ));
+            continue;
+        }
+
+        handlers.push(ConfiguredHandler {
+            event_name: HookEventName::PreToolUse,
+            matcher: legacy_tool_matcher_to_regex(&hook.matcher),
+            command: hook.command.join(" "),
+            execution: HandlerExecution::Argv(hook.command),
+            behavior: ConfiguredHandlerBehavior::LegacyPreToolUse {
+                on_failure: hook.on_failure,
+            },
+            timeout_sec: hook.timeout_sec.max(1),
+            status_message: None,
+            source_path: source_path.clone(),
+            source,
+            display_order: *display_order,
+            env: HashMap::new(),
+        });
+        *display_order += 1;
+    }
+}
+
+fn legacy_tool_matcher_to_regex(matcher: &str) -> Option<String> {
+    if matcher.is_empty() || matcher == "*" {
+        return None;
+    }
+
+    let mut pattern = String::from("^");
+    for ch in matcher.chars() {
+        match ch {
+            '*' => pattern.push_str(".*"),
+            '?' => pattern.push('.'),
+            _ => pattern.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    pattern.push('$');
+    Some(pattern)
+}
+
 fn append_matcher_groups(
     handlers: &mut Vec<ConfiguredHandler>,
     hook_entries: &mut Vec<HookListEntry>,
@@ -570,6 +663,8 @@ fn append_matcher_groups(
                             event_name,
                             matcher: matcher.map(ToOwned::to_owned),
                             command,
+                            execution: HandlerExecution::ShellCommand,
+                            behavior: ConfiguredHandlerBehavior::Canonical,
                             timeout_sec,
                             status_message,
                             additional_context_limit: AdditionalContextLimit::from_config(
@@ -727,6 +822,8 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::ConfiguredHandler;
+    use super::ConfiguredHandlerBehavior;
+    use super::HandlerExecution;
     use super::HookListEntry;
     use super::append_matcher_groups;
     use crate::output_spill::AdditionalContextLimit;
@@ -954,6 +1051,8 @@ mod tests {
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: None,
                 command: "echo hello".to_string(),
+                execution: HandlerExecution::ShellCommand,
+                behavior: ConfiguredHandlerBehavior::Canonical,
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),
@@ -990,6 +1089,8 @@ mod tests {
                 event_name: HookEventName::PreToolUse,
                 matcher: Some("^Bash$".to_string()),
                 command: "echo hello".to_string(),
+                execution: HandlerExecution::ShellCommand,
+                behavior: ConfiguredHandlerBehavior::Canonical,
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),

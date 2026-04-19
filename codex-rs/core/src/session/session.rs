@@ -1062,6 +1062,9 @@ impl Session {
                 &config,
                 plugins_manager.as_ref(),
                 resolved_environments.single_local_environment(),
+                super::legacy_pre_tool_use_enabled_for_session(
+                    &session_configuration.session_source,
+                ),
             )
             .await;
             for warning in hooks.startup_warnings() {
