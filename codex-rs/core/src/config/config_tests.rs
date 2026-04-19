@@ -1852,7 +1852,7 @@ fn profile_model_token_limits_override_root_values() -> std::io::Result<()> {
     let config = Config::load_from_base_config_with_overrides(
         cfg,
         ConfigOverrides::default(),
-        codex_home.path().to_path_buf(),
+        AbsolutePathBuf::from_absolute_path(codex_home.path()).map_err(std::io::Error::other)?,
     )?;
 
     assert_eq!(
@@ -1882,7 +1882,7 @@ fn root_model_token_limits_apply_when_profile_values_are_absent() -> std::io::Re
     let config = Config::load_from_base_config_with_overrides(
         cfg,
         ConfigOverrides::default(),
-        codex_home.path().to_path_buf(),
+        AbsolutePathBuf::from_absolute_path(codex_home.path()).map_err(std::io::Error::other)?,
     )?;
 
     assert_eq!(

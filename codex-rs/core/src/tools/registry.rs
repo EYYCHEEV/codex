@@ -288,19 +288,33 @@ impl ToolRegistry {
             return Err(FunctionCallError::Fatal(message));
         }
 
-        if let Some(pre_tool_use_payload) = handler.pre_tool_use_payload(&invocation)
-            && let Some(reason) = run_pre_tool_use_hooks(
-                &invocation.session,
-                &invocation.turn,
-                invocation.call_id.clone(),
-                pre_tool_use_payload.command.clone(),
-            )
-            .await
+        let canonical_pre_tool_use_payload = handler.pre_tool_use_payload(&invocation);
+        let tool_input_for_hooks = extract_tool_input_for_hooks(&invocation.payload);
+        if let Some(reason) = run_pre_tool_use_hooks(
+            &invocation.session,
+            &invocation.turn,
+            invocation.call_id.clone(),
+            display_name.to_string(),
+            canonical_pre_tool_use_payload
+                .as_ref()
+                .map(|_| "Bash".to_string()),
+            canonical_pre_tool_use_payload
+                .as_ref()
+                .map(|payload| payload.command.clone()),
+            tool_input_for_hooks.clone(),
+        )
+        .await
         {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "Command blocked by PreToolUse hook: {reason}. Command: {}",
-                pre_tool_use_payload.command
-            )));
+            return Err(FunctionCallError::RespondToModel(
+                pre_tool_use_blocked_message(
+                    &display_name,
+                    &tool_input_for_hooks,
+                    canonical_pre_tool_use_payload
+                        .as_ref()
+                        .map(|payload| payload.command.as_str()),
+                    &reason,
+                ),
+            ));
         }
 
         let is_mutating = handler.is_mutating(&invocation).await;
@@ -496,6 +510,66 @@ fn unsupported_tool_call_message(payload: &ToolPayload, tool_name: &ToolName) ->
     match payload {
         ToolPayload::Custom { .. } => format!("unsupported custom tool call: {tool_name}"),
         _ => format!("unsupported call: {tool_name}"),
+    }
+}
+
+fn pre_tool_use_blocked_message(
+    tool_name: &str,
+    tool_input: &Value,
+    canonical_command: Option<&str>,
+    reason: &str,
+) -> String {
+    if let Some(command) =
+        canonical_command.or_else(|| tool_input.get("command").and_then(Value::as_str))
+    {
+        format!("Command blocked by PreToolUse hook: {reason}. Command: {command}")
+    } else {
+        format!("Tool blocked by PreToolUse hook: {reason}. Tool: {tool_name}")
+    }
+}
+
+fn extract_tool_input_for_hooks(payload: &ToolPayload) -> Value {
+    match payload {
+        ToolPayload::Function { arguments } => {
+            if let Ok(mut value) = serde_json::from_str::<Value>(arguments) {
+                normalize_command_to_string(&mut value);
+                value
+            } else {
+                Value::Null
+            }
+        }
+        ToolPayload::LocalShell { params } => serde_json::json!({
+            "command": codex_shell_command::parse_command::shlex_join(&params.command),
+        }),
+        ToolPayload::ToolSearch { arguments } => serde_json::json!({
+            "query": arguments.query,
+            "limit": arguments.limit,
+        }),
+        ToolPayload::Mcp { raw_arguments, .. } => {
+            serde_json::from_str(raw_arguments).unwrap_or(Value::Null)
+        }
+        ToolPayload::Custom { input } => Value::String(input.clone()),
+    }
+}
+
+fn normalize_command_to_string(value: &mut Value) {
+    if let Value::Object(object) = value {
+        let cmd_alias = object.get("cmd").and_then(Value::as_str).map(str::to_owned);
+        if !object.contains_key("command")
+            && let Some(cmd_alias) = cmd_alias
+        {
+            object.insert("command".to_string(), Value::String(cmd_alias));
+        }
+        if let Some(command) = object.get_mut("command")
+            && let Value::Array(values) = command
+        {
+            let joined = values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            *command = Value::String(joined);
+        }
     }
 }
 

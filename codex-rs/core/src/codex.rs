@@ -864,6 +864,10 @@ pub(crate) struct Session {
     next_internal_sub_id: AtomicU64,
 }
 
+pub(crate) fn legacy_pre_tool_use_enabled_for_session(session_source: &SessionSource) -> bool {
+    !crate::guardian::is_guardian_reviewer_source(session_source)
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct TurnSkillsContext {
     pub(crate) outcome: Arc<SkillLoadOutcome>,
@@ -2064,6 +2068,9 @@ impl Session {
         let hooks = Hooks::new(HooksConfig {
             legacy_notify_argv: config.notify.clone(),
             feature_enabled: config.features.enabled(Feature::CodexHooks),
+            legacy_pre_tool_use_enabled: legacy_pre_tool_use_enabled_for_session(
+                &session_configuration.session_source,
+            ),
             config_layer_stack: Some(config.config_layer_stack.clone()),
             shell_program: Some(hook_shell_program),
             shell_args: hook_shell_argv,

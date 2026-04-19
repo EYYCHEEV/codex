@@ -12,6 +12,7 @@ use crate::types::AppsConfigToml;
 use crate::types::AuthCredentialsStoreMode;
 use crate::types::FeedbackConfigToml;
 use crate::types::History;
+use crate::types::LegacyHooksConfig;
 use crate::types::MarketplaceConfig;
 use crate::types::McpServerConfig;
 use crate::types::MemoriesToml;
@@ -118,6 +119,11 @@ pub struct ConfigToml {
     /// Optional external command to spawn for end-user notifications.
     #[serde(default)]
     pub notify: Option<Vec<String>>,
+
+    /// Legacy compatibility hooks config. These handlers are translated into
+    /// the canonical hooks runtime at startup.
+    #[serde(default)]
+    pub hooks: LegacyHooksConfig,
 
     /// System instructions.
     pub instructions: Option<String>,

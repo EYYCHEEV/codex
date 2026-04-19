@@ -6,6 +6,7 @@ pub(crate) mod output_parser;
 pub(crate) mod schema_loader;
 
 use codex_config::ConfigLayerStack;
+use codex_config::types::HookFailurePolicy;
 use codex_protocol::protocol::HookRunSummary;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
@@ -27,10 +28,24 @@ pub(crate) struct CommandShell {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HandlerExecution {
+    ShellCommand,
+    Argv(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfiguredHandlerBehavior {
+    Canonical,
+    LegacyPreToolUse { on_failure: HookFailurePolicy },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfiguredHandler {
     pub event_name: codex_protocol::protocol::HookEventName,
     pub matcher: Option<String>,
     pub command: String,
+    pub execution: HandlerExecution,
+    pub behavior: ConfiguredHandlerBehavior,
     pub timeout_sec: u64,
     pub status_message: Option<String>,
     pub source_path: AbsolutePathBuf,
@@ -67,20 +82,17 @@ pub(crate) struct ClaudeHooksEngine {
 
 impl ClaudeHooksEngine {
     pub(crate) fn new(
-        enabled: bool,
+        canonical_enabled: bool,
+        legacy_pre_tool_use_enabled: bool,
         config_layer_stack: Option<&ConfigLayerStack>,
         shell: CommandShell,
     ) -> Self {
-        if !enabled {
-            return Self {
-                handlers: Vec::new(),
-                warnings: Vec::new(),
-                shell,
-            };
-        }
-
         let _ = schema_loader::generated_hook_schemas();
-        let discovered = discovery::discover_handlers(config_layer_stack);
+        let discovered = discovery::discover_handlers(
+            canonical_enabled,
+            legacy_pre_tool_use_enabled,
+            config_layer_stack,
+        );
         Self {
             handlers: discovered.handlers,
             warnings: discovered.warnings,

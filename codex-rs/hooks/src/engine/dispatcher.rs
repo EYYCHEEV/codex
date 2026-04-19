@@ -121,6 +121,8 @@ mod tests {
     use codex_utils_absolute_path::test_support::PathBufExt;
     use codex_utils_absolute_path::test_support::test_path_buf;
 
+    use super::super::ConfiguredHandlerBehavior;
+    use super::super::HandlerExecution;
     use super::ConfiguredHandler;
     use super::select_handlers;
 
@@ -134,6 +136,8 @@ mod tests {
             event_name,
             matcher: matcher.map(str::to_owned),
             command: command.to_string(),
+            execution: HandlerExecution::ShellCommand,
+            behavior: ConfiguredHandlerBehavior::Canonical,
             timeout_sec: 5,
             status_message: None,
             source_path: test_path_buf("/tmp/hooks.json").abs(),

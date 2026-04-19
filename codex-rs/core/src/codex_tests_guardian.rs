@@ -44,6 +44,19 @@ fn expect_text_output(output: &FunctionToolOutput) -> String {
     function_call_output_content_items_to_text(&output.body).unwrap_or_default()
 }
 
+#[test]
+fn guardian_session_source_disables_legacy_pre_tool_use() {
+    let guardian_source =
+        SessionSource::SubAgent(SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()));
+
+    assert!(!crate::codex::legacy_pre_tool_use_enabled_for_session(
+        &guardian_source,
+    ));
+    assert!(crate::codex::legacy_pre_tool_use_enabled_for_session(
+        &SessionSource::Cli,
+    ));
+}
+
 #[tokio::test]
 async fn guardian_allows_shell_additional_permissions_requests_past_policy_validation() {
     let server = start_mock_server().await;

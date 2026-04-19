@@ -9,6 +9,7 @@ use tokio::time::timeout;
 
 use super::CommandShell;
 use super::ConfiguredHandler;
+use super::HandlerExecution;
 
 #[derive(Debug)]
 pub(crate) struct CommandRunResult {
@@ -101,18 +102,31 @@ pub(crate) async fn run_command(
 }
 
 fn build_command(shell: &CommandShell, handler: &ConfiguredHandler) -> Command {
-    let mut command = if shell.program.is_empty() {
-        default_shell_command()
-    } else {
-        Command::new(&shell.program)
-    };
-    if shell.program.is_empty() {
-        command.arg(&handler.command);
-        command
-    } else {
-        command.args(&shell.args);
-        command.arg(&handler.command);
-        command
+    match &handler.execution {
+        HandlerExecution::ShellCommand => {
+            let mut command = if shell.program.is_empty() {
+                default_shell_command()
+            } else {
+                Command::new(&shell.program)
+            };
+            if shell.program.is_empty() {
+                command.arg(&handler.command);
+                command
+            } else {
+                command.args(&shell.args);
+                command.arg(&handler.command);
+                command
+            }
+        }
+        HandlerExecution::Argv(argv) => {
+            let mut command = argv
+                .split_first()
+                .map_or_else(|| Command::new(""), |(program, _)| Command::new(program));
+            if let Some((_, args)) = argv.split_first() {
+                command.args(args);
+            }
+            command
+        }
     }
 }
 

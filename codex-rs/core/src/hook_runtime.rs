@@ -119,7 +119,10 @@ pub(crate) async fn run_pre_tool_use_hooks(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     tool_use_id: String,
-    command: String,
+    tool_name: String,
+    canonical_tool_name: Option<String>,
+    canonical_command: Option<String>,
+    tool_input: Value,
 ) -> Option<String> {
     let request = PreToolUseRequest {
         session_id: sess.conversation_id,
@@ -128,9 +131,11 @@ pub(crate) async fn run_pre_tool_use_hooks(
         transcript_path: sess.hook_transcript_path().await,
         model: turn_context.model_info.slug.clone(),
         permission_mode: hook_permission_mode(turn_context),
-        tool_name: "Bash".to_string(),
+        tool_name,
+        canonical_tool_name,
+        canonical_command,
         tool_use_id,
-        command,
+        tool_input,
     };
     let preview_runs = sess.hooks().preview_pre_tool_use(&request);
     emit_hook_started_events(sess, turn_context, preview_runs).await;

@@ -1,11 +1,11 @@
 use super::*;
-use crate::config::profile::ConfigProfile;
 use anyhow::Result;
 use codex_app_server_protocol::AppConfig;
 use codex_app_server_protocol::AppToolApproval;
 use codex_app_server_protocol::AppsConfig;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ProfileV2;
+use codex_config::profile_toml::ConfigProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;

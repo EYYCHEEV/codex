@@ -280,6 +280,8 @@ mod tests {
     use super::UserPromptSubmitHandlerData;
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
+    use crate::engine::ConfiguredHandlerBehavior;
+    use crate::engine::HandlerExecution;
     use crate::engine::command_runner::CommandRunResult;
 
     #[test]
@@ -416,6 +418,8 @@ mod tests {
             event_name: HookEventName::UserPromptSubmit,
             matcher: None,
             command: "echo hook".to_string(),
+            execution: HandlerExecution::ShellCommand,
+            behavior: ConfiguredHandlerBehavior::Canonical,
             timeout_sec: 5,
             status_message: None,
             source_path: test_path_buf("/tmp/hooks.json").abs(),
