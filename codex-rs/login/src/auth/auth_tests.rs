@@ -34,13 +34,29 @@ const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 #[tokio::test]
 async fn refresh_without_id_token() {
     let codex_home = tempdir().unwrap();
-    let fake_jwt = write_auth_file(
-        AuthFileParams {
-            openai_api_key: None,
-            chatgpt_plan_type: Some("pro".to_string()),
-            chatgpt_account_id: None,
-        },
+    let fake_jwt = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("pro".to_string()),
+        chatgpt_account_id: Some("workspace-a".to_string()),
+    })
+    .expect("failed to create JWT");
+    let auth_dot_json = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(TokenData {
+            id_token: crate::token_data::parse_chatgpt_jwt_claims(&fake_jwt)
+                .expect("JWT should parse"),
+            access_token: "test-access-token".to_string(),
+            refresh_token: "test-refresh-token".to_string(),
+            account_id: Some("stale-workspace".to_string()),
+        }),
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+    };
+    save_auth(
         codex_home.path(),
+        &auth_dot_json,
+        AuthCredentialsStoreMode::File,
     )
     .expect("failed to write auth file");
 
@@ -61,6 +77,118 @@ async fn refresh_without_id_token() {
     assert_eq!(tokens.id_token.raw_jwt, fake_jwt);
     assert_eq!(tokens.access_token, "new-access-token");
     assert_eq!(tokens.refresh_token, "new-refresh-token");
+    assert_eq!(
+        tokens.id_token.chatgpt_account_id.as_deref(),
+        Some("workspace-a")
+    );
+    assert_eq!(tokens.account_id.as_deref(), Some("workspace-a"));
+}
+
+#[tokio::test]
+async fn refresh_with_new_id_token_updates_account_id() {
+    let codex_home = tempdir().unwrap();
+    let initial_jwt = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("pro".to_string()),
+        chatgpt_account_id: Some("workspace-a".to_string()),
+    })
+    .expect("failed to create initial JWT");
+    let refreshed_jwt = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("pro".to_string()),
+        chatgpt_account_id: Some("workspace-b".to_string()),
+    })
+    .expect("failed to create refreshed JWT");
+    let auth_dot_json = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(TokenData {
+            id_token: crate::token_data::parse_chatgpt_jwt_claims(&initial_jwt)
+                .expect("JWT should parse"),
+            access_token: "test-access-token".to_string(),
+            refresh_token: "test-refresh-token".to_string(),
+            account_id: Some("workspace-a".to_string()),
+        }),
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+    };
+    save_auth(
+        codex_home.path(),
+        &auth_dot_json,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("failed to write auth file");
+
+    let storage = create_auth_storage(
+        codex_home.path().to_path_buf(),
+        AuthCredentialsStoreMode::File,
+    );
+    let updated = super::persist_tokens(
+        &storage,
+        Some(refreshed_jwt.clone()),
+        Some("new-access-token".to_string()),
+        Some("new-refresh-token".to_string()),
+    )
+    .expect("update_tokens should succeed");
+
+    let tokens = updated.tokens.expect("tokens should exist");
+    assert_eq!(tokens.id_token.raw_jwt, refreshed_jwt);
+    assert_eq!(tokens.access_token, "new-access-token");
+    assert_eq!(tokens.refresh_token, "new-refresh-token");
+    assert_eq!(
+        tokens.id_token.chatgpt_account_id.as_deref(),
+        Some("workspace-b")
+    );
+    assert_eq!(tokens.account_id.as_deref(), Some("workspace-b"));
+}
+
+#[test]
+fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
+    let codex_home = tempdir().unwrap();
+    let fake_jwt = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("pro".to_string()),
+        chatgpt_account_id: Some("workspace-a".to_string()),
+    })
+    .expect("failed to create JWT");
+    let auth_dot_json = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(TokenData {
+            id_token: crate::token_data::parse_chatgpt_jwt_claims(&fake_jwt)
+                .expect("JWT should parse"),
+            access_token: "test-access-token".to_string(),
+            refresh_token: "test-refresh-token".to_string(),
+            account_id: Some("stale-workspace".to_string()),
+        }),
+        last_refresh: Some(Utc::now()),
+        agent_identity: None,
+    };
+    save_auth(
+        codex_home.path(),
+        &auth_dot_json,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("failed to write auth file");
+
+    let auth = super::load_auth(
+        codex_home.path(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+    )
+    .expect("load_auth should succeed")
+    .expect("auth should exist");
+    assert_eq!(auth.get_account_id().as_deref(), Some("workspace-a"));
+
+    let repaired = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)
+        .expect("load_auth_dot_json should succeed")
+        .expect("auth.json should exist");
+    let tokens = repaired.tokens.expect("tokens should exist");
+    assert_eq!(
+        tokens.id_token.chatgpt_account_id.as_deref(),
+        Some("workspace-a")
+    );
+    assert_eq!(tokens.account_id.as_deref(), Some("workspace-a"));
 }
 
 #[test]
