@@ -15,8 +15,8 @@ use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_login::RefreshTokenError;
 use codex_login::load_auth_dot_json;
 use codex_login::save_auth;
-use codex_login::token_data::IdTokenInfo;
 use codex_login::token_data::TokenData;
+use codex_login::token_data::parse_chatgpt_jwt_claims;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::auth::RefreshTokenFailedReason;
 use core_test_support::skip_if_no_network;
@@ -198,7 +198,9 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
 
     let ctx = RefreshTokenTestContext::new(&server).await?;
     let initial_last_refresh = Utc::now() - Duration::days(1);
-    let initial_tokens = build_tokens(INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    let mut initial_tokens =
+        build_tokens_for_account("workspace-a", INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    initial_tokens.account_id = Some("stale-workspace".to_string());
     let initial_auth = AuthDotJson {
         auth_mode: Some(AuthMode::Chatgpt),
         openai_api_key: None,
@@ -228,6 +230,7 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
     let refreshed_tokens = TokenData {
         access_token: "new-access-token".to_string(),
         refresh_token: "new-refresh-token".to_string(),
+        account_id: Some("workspace-a".to_string()),
         ..initial_tokens.clone()
     };
     let stored = ctx.load_auth()?;
@@ -257,6 +260,69 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
 }
 
 #[serial_test::serial(auth_env)]
+#[tokio::test]
+async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id_token": chatgpt_id_token("workspace-b"),
+            "access_token": "new-access-token",
+            "refresh_token": "new-refresh-token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ctx = RefreshTokenTestContext::new(&server)?;
+    let initial_last_refresh = Utc::now() - Duration::days(1);
+    let initial_tokens =
+        build_tokens_for_account("workspace-a", INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
+    let initial_auth = AuthDotJson {
+        auth_mode: Some(AuthMode::Chatgpt),
+        openai_api_key: None,
+        tokens: Some(initial_tokens.clone()),
+        last_refresh: Some(initial_last_refresh),
+        agent_identity: None,
+    };
+    ctx.write_auth(&initial_auth)?;
+
+    ctx.auth_manager
+        .refresh_token_from_authority()
+        .await
+        .context("refresh should succeed")?;
+
+    let refreshed_tokens =
+        build_tokens_for_account("workspace-b", "new-access-token", "new-refresh-token");
+    let stored = ctx.load_auth()?;
+    let tokens = stored.tokens.as_ref().context("tokens should exist")?;
+    assert_eq!(tokens, &refreshed_tokens);
+    let refreshed_at = stored
+        .last_refresh
+        .as_ref()
+        .context("last_refresh should be recorded")?;
+    assert!(
+        *refreshed_at >= initial_last_refresh,
+        "last_refresh should advance"
+    );
+
+    let cached_auth = ctx
+        .auth_manager
+        .auth()
+        .await
+        .context("auth should be cached")?;
+    let cached = cached_auth
+        .get_token_data()
+        .context("token data should be cached")?;
+    assert_eq!(cached, refreshed_tokens);
+
+    server.verify().await;
+    Ok(())
+}
+
+#[serial_test::serial(auth_refresh)]
 #[tokio::test]
 async fn refresh_token_refreshes_when_auth_is_unchanged() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -513,8 +579,8 @@ async fn refresh_token_errors_on_account_mismatch() -> Result<()> {
     };
     ctx.write_auth(&initial_auth).await?;
 
-    let mut disk_tokens = build_tokens("disk-access-token", "disk-refresh-token");
-    disk_tokens.account_id = Some("other-account".to_string());
+    let disk_tokens =
+        build_tokens_for_account("other-account", "disk-access-token", "disk-refresh-token");
     let disk_auth = AuthDotJson {
         auth_mode: Some(AuthMode::Chatgpt),
         openai_api_key: None,
@@ -1257,8 +1323,8 @@ async fn unauthorized_recovery_errors_on_account_mismatch() -> Result<()> {
     };
     ctx.write_auth(&initial_auth).await?;
 
-    let mut disk_tokens = build_tokens("disk-access-token", "disk-refresh-token");
-    disk_tokens.account_id = Some("other-account".to_string());
+    let disk_tokens =
+        build_tokens_for_account("other-account", "disk-access-token", "disk-refresh-token");
     let disk_auth = AuthDotJson {
         auth_mode: Some(AuthMode::Chatgpt),
         openai_api_key: None,
@@ -1452,23 +1518,39 @@ fn jwt_with_payload(payload: serde_json::Value) -> String {
     format!("{header_b64}.{payload_b64}.{signature_b64}")
 }
 
-fn minimal_jwt() -> String {
-    jwt_with_payload(json!({ "sub": "user-123" }))
-}
-
 fn access_token_with_expiration(expires_at: chrono::DateTime<Utc>) -> String {
     jwt_with_payload(json!({ "sub": "user-123", "exp": expires_at.timestamp() }))
 }
 
-fn build_tokens(access_token: &str, refresh_token: &str) -> TokenData {
-    let id_token = IdTokenInfo {
-        raw_jwt: minimal_jwt(),
-        ..Default::default()
+fn chatgpt_id_token(account_id: &str) -> String {
+    jwt_with_payload(json!({
+        "email": "user@example.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_user_id": "user-123",
+            "user_id": "user-123"
+        }
+    }))
+}
+
+fn build_tokens_for_account(
+    account_id: &str,
+    access_token: &str,
+    refresh_token: &str,
+) -> TokenData {
+    let raw_jwt = chatgpt_id_token(account_id);
+    let id_token = match parse_chatgpt_jwt_claims(&raw_jwt) {
+        Ok(id_token) => id_token,
+        Err(err) => panic!("chatgpt test JWT should parse: {err}"),
     };
     TokenData {
         id_token,
         access_token: access_token.to_string(),
         refresh_token: refresh_token.to_string(),
-        account_id: Some("account-id".to_string()),
+        account_id: Some(account_id.to_string()),
     }
+}
+
+fn build_tokens(access_token: &str, refresh_token: &str) -> TokenData {
+    build_tokens_for_account("account-id", access_token, refresh_token)
 }
