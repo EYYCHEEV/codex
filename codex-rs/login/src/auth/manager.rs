@@ -195,7 +195,7 @@ impl From<RefreshTokenError> for std::io::Error {
 impl CodexAuth {
     fn from_auth_dot_json(
         codex_home: &Path,
-        auth_dot_json: AuthDotJson,
+        mut auth_dot_json: AuthDotJson,
         auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> std::io::Result<Self> {
         let auth_mode = auth_dot_json.resolved_mode();
@@ -216,6 +216,16 @@ impl CodexAuth {
         }
 
         let storage_mode = auth_dot_json.storage_mode(auth_credentials_store_mode);
+        let storage = create_auth_storage(codex_home.to_path_buf(), storage_mode);
+        if auth_mode == ApiAuthMode::Chatgpt
+            && normalize_managed_chatgpt_account_id(&mut auth_dot_json)
+            && let Err(err) = storage.save(&auth_dot_json)
+        {
+            tracing::warn!(
+                ?err,
+                "failed to persist normalized managed ChatGPT account_id"
+            );
+        }
         let state = ChatgptAuthState {
             auth_dot_json: Arc::new(Mutex::new(Some(auth_dot_json))),
             client,
@@ -465,6 +475,22 @@ impl ChatgptAuth {
     fn client(&self) -> &CodexHttpClient {
         &self.state.client
     }
+}
+
+fn sync_chatgpt_account_id(tokens: &mut TokenData) {
+    tokens.account_id = tokens.id_token.chatgpt_account_id.clone();
+}
+
+fn normalize_managed_chatgpt_account_id(auth_dot_json: &mut AuthDotJson) -> bool {
+    let Some(tokens) = auth_dot_json.tokens.as_mut() else {
+        return false;
+    };
+    let expected_account_id = tokens.id_token.chatgpt_account_id.clone();
+    if tokens.account_id == expected_account_id {
+        return false;
+    }
+    sync_chatgpt_account_id(tokens);
+    true
 }
 
 pub const OPENAI_API_KEY_ENV_VAR: &str = "OPENAI_API_KEY";
@@ -735,6 +761,7 @@ fn persist_tokens(
     if let Some(id_token) = id_token {
         tokens.id_token = parse_chatgpt_jwt_claims(&id_token).map_err(std::io::Error::other)?;
     }
+    sync_chatgpt_account_id(tokens);
     if let Some(access_token) = access_token {
         tokens.access_token = access_token;
     }
