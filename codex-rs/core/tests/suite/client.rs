@@ -66,11 +66,13 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_failed;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::strip_metadata_from_json;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::responses_metadata as test_responses_metadata;
@@ -83,6 +85,7 @@ use dunce::canonicalize as normalize_path;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::ffi::OsString;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::sync::Arc;
@@ -640,22 +643,7 @@ fn write_auth_json(
     access_token: &str,
     account_id: Option<&str>,
 ) -> String {
-    use base64::Engine as _;
-
-    let header = json!({ "alg": "none", "typ": "JWT" });
-    let payload = json!({
-        "email": "user@example.com",
-        "https://api.openai.com/auth": {
-            "chatgpt_plan_type": chatgpt_plan_type,
-            "chatgpt_account_id": account_id.unwrap_or("acc-123")
-        }
-    });
-
-    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
-    let header_b64 = b64(&serde_json::to_vec(&header).unwrap());
-    let payload_b64 = b64(&serde_json::to_vec(&payload).unwrap());
-    let signature_b64 = b64(b"sig");
-    let fake_jwt = format!("{header_b64}.{payload_b64}.{signature_b64}");
+    let fake_jwt = fake_chatgpt_id_token(chatgpt_plan_type, account_id.unwrap_or("acc-123"));
 
     let mut tokens = json!({
         "id_token": fake_jwt,
@@ -680,6 +668,54 @@ fn write_auth_json(
     .unwrap();
 
     fake_jwt
+}
+
+#[expect(clippy::unwrap_used)]
+fn fake_chatgpt_id_token(chatgpt_plan_type: &str, account_id: &str) -> String {
+    use base64::Engine as _;
+
+    let header = json!({ "alg": "none", "typ": "JWT" });
+    let payload = json!({
+        "email": "user@example.com",
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": chatgpt_plan_type,
+            "chatgpt_account_id": account_id
+        }
+    });
+
+    let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+    let header_b64 = b64(&serde_json::to_vec(&header).unwrap());
+    let payload_b64 = b64(&serde_json::to_vec(&payload).unwrap());
+    let signature_b64 = b64(b"sig");
+    format!("{header_b64}.{payload_b64}.{signature_b64}")
+}
+
+struct EnvGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: String) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: tests that mutate this env var run under a serial_test lock.
+        unsafe {
+            std::env::set_var(key, &value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: the serial_test lock ensures restoration happens before another test mutates it.
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 }
 
 struct ProviderAuthCommandFixture {
@@ -1427,6 +1463,103 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
     assert_eq!(request.body_json()["store"], false);
 }
 
+#[serial_test::serial(refresh_token_url_override)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let _refresh_url_guard = EnvGuard::set(
+        codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        format!("{}/oauth/token", server.uri()),
+    );
+
+    let responses_mock = mount_response_sequence(
+        &server,
+        vec![
+            ResponseTemplate::new(401).set_body_string("unauthorized"),
+            ResponseTemplate::new(401).set_body_string("unauthorized"),
+            sse_response(sse(vec![
+                ev_response_created("resp1"),
+                ev_completed("resp1"),
+            ])),
+        ],
+    )
+    .await;
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id_token": fake_chatgpt_id_token("pro", "workspace-b"),
+            "access_token": "refreshed-access-token",
+            "refresh_token": "refreshed-refresh-token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new().unwrap();
+    write_auth_json(
+        &codex_home,
+        /*openai_api_key*/ None,
+        "pro",
+        "initial-access-token",
+        Some("workspace-a"),
+    );
+    let auth = match CodexAuth::from_auth_storage(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
+    )
+    .await
+    {
+        Ok(Some(auth)) => auth,
+        Ok(None) => panic!("No CodexAuth found in codex_home"),
+        Err(err) => panic!("Failed to load CodexAuth: {err}"),
+    };
+    let provider = ModelProviderInfo {
+        base_url: Some(format!("{}/v1", server.uri())),
+        supports_websockets: false,
+        ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
+    };
+    let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
+        auth,
+        codex_home.path().to_path_buf(),
+    );
+
+    send_responses_request(&codex_home, provider, auth_manager).await;
+
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        requests[0].header("authorization"),
+        Some("Bearer initial-access-token".to_string())
+    );
+    assert_eq!(
+        requests[0].header("chatgpt-account-id"),
+        Some("workspace-a".to_string())
+    );
+    assert_eq!(
+        requests[1].header("authorization"),
+        Some("Bearer initial-access-token".to_string())
+    );
+    assert_eq!(
+        requests[1].header("chatgpt-account-id"),
+        Some("workspace-a".to_string())
+    );
+    assert_eq!(
+        requests[2].header("authorization"),
+        Some("Bearer refreshed-access-token".to_string())
+    );
+    assert_eq!(
+        requests[2].header("chatgpt-account-id"),
+        Some("workspace-b".to_string())
+    );
+
+    server.verify().await;
+}
+
 /// Issues one streamed Responses request through a provider configured with command-backed auth.
 ///
 /// The caller owns the server-side assertions, so this helper only validates that the request
@@ -1459,7 +1592,18 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
 #[expect(clippy::unwrap_used)]
 async fn send_request_with_provider(provider: ModelProviderInfo) {
     let codex_home = TempDir::new().unwrap();
-    let mut config = load_default_config_for_test(&codex_home).await;
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("unused-api-key"));
+    send_responses_request(&codex_home, provider, auth_manager).await;
+}
+
+#[expect(clippy::expect_used)]
+async fn send_responses_request(
+    codex_home: &TempDir,
+    provider: ModelProviderInfo,
+    auth_manager: Arc<AuthManager>,
+) {
+    let mut config = load_default_config_for_test(codex_home).await;
     config.model_provider_id = provider.name.clone();
     config.model_provider = provider.clone();
     let effort = config.model_reasoning_effort.clone();
@@ -1483,9 +1627,7 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
         SessionSource::Exec,
     );
     let client = ModelClient::new(
-        Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
-            "unused-api-key",
-        ))),
+        Some(auth_manager),
         AgentIdentityAuthPolicy::JwtOnly,
         thread_id,
         provider,
@@ -1529,11 +1671,17 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
         .await
         .expect("responses stream to start");
 
+    let mut saw_completed = false;
     while let Some(event) = stream.next().await {
-        if let Ok(ResponseEvent::Completed { .. }) = event {
+        if let ResponseEvent::Completed { .. } =
+            event.expect("responses stream event should succeed")
+        {
+            saw_completed = true;
             break;
         }
     }
+
+    assert!(saw_completed, "responses stream should complete");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
