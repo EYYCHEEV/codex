@@ -148,7 +148,12 @@ pub fn write_chatgpt_auth(
     fixture: ChatGptAuthFixture,
     cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
 ) -> Result<()> {
-    let id_token_raw = encode_id_token(&fixture.claims)?;
+    let mut claims = fixture.claims;
+    if claims.chatgpt_account_id.is_none() {
+        claims.chatgpt_account_id = fixture.account_id.clone();
+    }
+
+    let id_token_raw = encode_id_token(&claims)?;
     let id_token = parse_chatgpt_jwt_claims(&id_token_raw).context("parse id token")?;
     let tokens = TokenData {
         id_token,
@@ -176,4 +181,44 @@ pub fn write_chatgpt_auth(
         AuthKeyringBackendKind::default(),
     )
     .context("write auth.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_login::CodexAuth;
+    use std::fs;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn write_chatgpt_auth_backfills_jwt_account_id_from_fixture_account_id() -> Result<()> {
+        let codex_home = std::env::temp_dir().join(format!(
+            "app-test-support-auth-fixture-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir_all(&codex_home)?;
+        write_chatgpt_auth(
+            &codex_home,
+            ChatGptAuthFixture::new("access-token")
+                .account_id("workspace-a")
+                .plan_type("pro"),
+            AuthCredentialsStoreMode::File,
+        )?;
+
+        let auth = CodexAuth::from_auth_storage(&codex_home, AuthCredentialsStoreMode::File)?
+            .expect("expected auth");
+        assert_eq!(auth.get_account_id().as_deref(), Some("workspace-a"));
+        assert_eq!(
+            auth.get_token_data()?
+                .id_token
+                .chatgpt_account_id
+                .as_deref(),
+            Some("workspace-a")
+        );
+        fs::remove_dir_all(&codex_home)?;
+
+        Ok(())
+    }
 }
