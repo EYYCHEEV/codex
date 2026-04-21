@@ -102,7 +102,7 @@ fn remote_control_auth_dot_json(account_id: Option<&str>) -> AuthDotJson {
         "https://api.openai.com/auth": {
             "chatgpt_user_id": "user-12345",
             "user_id": "user-12345",
-            "chatgpt_account_id": "account_id"
+            "chatgpt_account_id": account_id
         }
     });
     let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
