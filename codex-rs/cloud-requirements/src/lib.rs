@@ -974,11 +974,14 @@ mod tests {
         auth_mode: Option<&str>,
     ) -> serde_json::Value {
         let header = json!({ "alg": "none", "typ": "JWT" });
-        let auth_payload = json!({
+        let mut auth_payload = json!({
             "chatgpt_plan_type": plan_type,
             "chatgpt_user_id": chatgpt_user_id,
             "user_id": chatgpt_user_id,
         });
+        if let Some(account_id) = account_id {
+            auth_payload["chatgpt_account_id"] = serde_json::Value::String(account_id.to_string());
+        }
         let payload = json!({
             "email": "user@example.com",
             "https://api.openai.com/auth": auth_payload,
@@ -1045,6 +1048,28 @@ mod tests {
     async fn auth_manager_with_plan(plan_type: &str) -> Arc<AuthManager> {
         auth_manager_with_plan_and_identity(plan_type, Some("user-12345"), Some("account-12345"))
             .await
+    }
+
+    #[test]
+    fn chatgpt_auth_json_backfills_jwt_account_id_from_fixture_account_id() {
+        let auth_json = chatgpt_auth_json(
+            "business",
+            Some("user-12345"),
+            Some("account-12345"),
+            "test-access-token",
+            "test-refresh-token",
+        );
+        let auth_payload = &auth_json["tokens"]["id_token"];
+        let jwt = auth_payload.as_str().expect("jwt string");
+        let payload = jwt.split('.').nth(1).expect("jwt payload");
+        let payload_bytes = URL_SAFE_NO_PAD.decode(payload).expect("decode payload");
+        let payload_json: serde_json::Value =
+            serde_json::from_slice(&payload_bytes).expect("payload json");
+
+        assert_eq!(
+            payload_json["https://api.openai.com/auth"]["chatgpt_account_id"].as_str(),
+            Some("account-12345")
+        );
     }
 
     fn parse_for_fetch(contents: Option<&str>) -> Option<ConfigRequirementsToml> {
