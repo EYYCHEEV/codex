@@ -302,11 +302,8 @@ impl CodexAuth {
 
         let storage_mode = auth_dot_json.storage_mode(auth_credentials_store_mode);
         let client = create_default_auth_client(&refresh_token_endpoint(), auth_route_config)?;
-        let storage = create_auth_storage(
-            codex_home.to_path_buf(),
-            storage_mode,
-            keyring_backend_kind,
-        );
+        let storage =
+            create_auth_storage(codex_home.to_path_buf(), storage_mode, keyring_backend_kind);
         if auth_mode == ApiAuthMode::Chatgpt
             && normalize_managed_chatgpt_account_id(&mut auth_dot_json)
             && let Err(err) = storage.save(&auth_dot_json)
