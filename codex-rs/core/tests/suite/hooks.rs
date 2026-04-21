@@ -18,6 +18,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::SandboxPermissions;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -30,6 +31,7 @@ use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::user_input::UserInput;
+use codex_shell_command::parse_command::shlex_join;
 use codex_thread_store::InMemoryThreadStore;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::TestTargetOs;
@@ -593,6 +595,23 @@ statusMessage = "running pre tool use hook"
     fs::write(&script_path, script).context("write TOML pre tool use hook script")?;
     fs::write(home.join("config.toml"), config_toml).context("write config.toml hooks")?;
     Ok(())
+}
+
+fn local_shell_event(
+    call_id: &str,
+    command: Vec<String>,
+    timeout_ms: u64,
+    sandbox_permissions: SandboxPermissions,
+) -> Result<Value> {
+    let mut args = serde_json::json!({
+        "command": command,
+        "timeout_ms": timeout_ms,
+    });
+    if sandbox_permissions.requests_sandbox_override() {
+        args["sandbox_permissions"] = serde_json::json!(sandbox_permissions);
+    }
+    let args_str = serde_json::to_string(&args)?;
+    Ok(ev_function_call(call_id, "shell", &args_str))
 }
 
 fn write_permission_request_hook(
@@ -2849,7 +2868,11 @@ async fn permission_request_hook_sees_raw_exec_command_input() -> Result<()> {
 
 #[tokio::test]
 async fn permission_request_hook_allows_network_approval_without_prompt() -> Result<()> {
-    let command = r#"python3 -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=2).read().decode(errors='replace'))""#;
+    let command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=2).read().decode(errors='replace'))".to_string(),
+    ];
     run_network_permission_hook_test(
         "allow",
         PERMISSION_REQUEST_ALLOW_REASON,
@@ -2863,7 +2886,11 @@ async fn permission_request_hook_allows_network_approval_without_prompt() -> Res
 #[tokio::test]
 async fn permission_request_hook_denies_network_approval_with_custom_message() -> Result<()> {
     let denial = "network access denied by the integration-test hook";
-    let command = r#"python3 -c "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); opener.open('http://codex-network-test.invalid', timeout=2).read()""#;
+    let command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); opener.open('http://codex-network-test.invalid', timeout=2).read()".to_string(),
+    ];
     run_network_permission_hook_test(
         "deny",
         denial,
@@ -2878,7 +2905,7 @@ async fn run_network_permission_hook_test(
     hook_mode: &'static str,
     hook_reason: &'static str,
     call_id: &'static str,
-    command: &'static str,
+    command: Vec<String>,
     expected_denial: Option<&'static str>,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -2898,13 +2925,12 @@ mode = "limited"
 allow_local_binding = true
 "#,
     )?;
-    let args = serde_json::json!({ "command": command });
     let responses = mount_sse_sequence(
         &server,
         vec![
             sse(vec![
                 ev_response_created("resp-network-hook-1"),
-                ev_function_call(call_id, "shell_command", &serde_json::to_string(&args)?),
+                local_shell_event(call_id, command.clone(), 2_000, Default::default())?,
                 ev_completed("resp-network-hook-1"),
             ]),
             sse(vec![
@@ -2980,7 +3006,7 @@ allow_local_binding = true
 
     assert_single_permission_request_hook_input(
         test.codex_home_path(),
-        command,
+        &shlex_join(&command),
         Some("network-access http://codex-network-test.invalid:80"),
     )?;
     let requests = responses.requests();
