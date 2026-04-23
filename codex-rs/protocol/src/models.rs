@@ -1276,6 +1276,7 @@ pub struct SearchToolCallParams {
 /// `arguments` field should deserialize to this struct.
 #[derive(Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 pub struct ShellCommandToolCallParams {
+    #[serde(alias = "cmd")]
     pub command: String,
     pub workdir: Option<String>,
 
