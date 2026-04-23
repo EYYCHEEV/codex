@@ -127,11 +127,6 @@ pub struct ConfigToml {
     #[serde(default)]
     pub notify: Option<Vec<String>>,
 
-    /// Legacy compatibility hooks config. These handlers are translated into
-    /// the canonical hooks runtime at startup.
-    #[serde(default)]
-    pub hooks: LegacyHooksConfig,
-
     /// System instructions.
     pub instructions: Option<String>,
 
@@ -340,7 +335,11 @@ pub struct ConfigToml {
     pub skills: Option<SkillsConfig>,
 
     /// Lifecycle hooks configured inline in TOML.
-    pub hooks: Option<HookEventsToml>,
+    ///
+    /// This accepts both the canonical inline hook event tables and the fork's
+    /// legacy `[[hooks.pre_tool_use]]` compatibility shape so both can coexist
+    /// in the same config layer.
+    pub hooks: Option<ConfigHooksToml>,
 
     /// User-level plugin config entries keyed by plugin name.
     #[serde(default)]
@@ -419,6 +418,14 @@ pub struct ConfigToml {
 pub struct AutoReviewToml {
     /// Additional policy instructions inserted into the guardian prompt.
     pub policy: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+pub struct ConfigHooksToml {
+    #[serde(flatten)]
+    pub hook_events: HookEventsToml,
+    #[serde(flatten)]
+    pub legacy: LegacyHooksConfig,
 }
 
 impl From<ConfigToml> for UserSavedConfig {
@@ -871,3 +878,7 @@ pub fn validate_oss_provider(provider: &str) -> std::io::Result<()> {
         )),
     }
 }
+
+#[cfg(test)]
+#[path = "config_toml_tests.rs"]
+mod tests;
