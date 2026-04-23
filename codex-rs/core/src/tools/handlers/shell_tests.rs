@@ -233,7 +233,7 @@ async fn shell_pre_tool_use_payload_uses_joined_command() {
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("shell"),
             tool_input: json!({ "command": "bash -lc 'printf hi'" }),
         })
     );
@@ -260,7 +260,34 @@ async fn shell_command_pre_tool_use_payload_uses_raw_command() {
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("shell_command"),
+            tool_input: json!({ "command": "printf shell command" }),
+        })
+    );
+}
+
+#[tokio::test]
+async fn shell_command_pre_tool_use_payload_normalizes_cmd_alias() {
+    let payload = ToolPayload::Function {
+        arguments: json!({ "cmd": "printf shell command" }).to_string(),
+    };
+    let (session, turn) = make_session_and_context().await;
+    let handler = ShellCommandHandler {
+        backend: super::ShellCommandBackend::Classic,
+    };
+
+    assert_eq!(
+        handler.pre_tool_use_payload(&ToolInvocation {
+            session: session.into(),
+            turn: turn.into(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
+            call_id: "call-42b".to_string(),
+            tool_name: codex_tools::ToolName::plain("shell_command"),
+            payload,
+        }),
+        Some(crate::tools::registry::PreToolUsePayload {
+            tool_name: HookToolName::shell("shell_command"),
             tool_input: json!({ "command": "printf shell command" }),
         })
     );
@@ -292,7 +319,7 @@ async fn build_post_tool_use_payload_uses_tool_output_wire_value() {
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
         Some(crate::tools::registry::PostToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("shell_command"),
             tool_use_id: "call-42".to_string(),
             tool_input: json!({ "command": "printf shell command" }),
             tool_response: json!("shell output"),
