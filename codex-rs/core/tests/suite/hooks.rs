@@ -3120,7 +3120,7 @@ async fn pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
     let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PreToolUse");
-    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
+    assert_eq!(hook_inputs[0]["tool_name"], "shell_command");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
     let transcript_path = hook_inputs[0]["transcript_path"]
@@ -4005,7 +4005,7 @@ async fn pre_tool_use_merges_hooks_json_and_config_toml() -> Result<()> {
     .collect::<Vec<_>>();
     let expected_hook_inputs = vec![serde_json::json!({
         "hook_event_name": "PreToolUse",
-        "tool_name": "Bash",
+        "tool_name": "shell_command",
         "tool_use_id": call_id,
         "tool_input": {
             "command": command,
@@ -4730,7 +4730,7 @@ async fn post_tool_use_records_additional_context_for_shell_command() -> Result<
     let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PostToolUse");
-    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
+    assert_eq!(hook_inputs[0]["tool_name"], "shell_command");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
     assert_eq!(
@@ -5093,14 +5093,14 @@ async fn post_tool_use_blocks_when_exec_session_completes_via_write_stdin() -> R
 
     let pre_hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(pre_hook_inputs.len(), 1);
-    assert_eq!(pre_hook_inputs[0]["tool_name"], "Bash");
+    assert_eq!(pre_hook_inputs[0]["tool_name"], "exec_command");
     assert_eq!(pre_hook_inputs[0]["tool_use_id"], start_call_id);
     assert_eq!(pre_hook_inputs[0]["tool_input"]["command"], command);
 
     let post_hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(post_hook_inputs.len(), 1);
     assert_eq!(post_hook_inputs[0]["hook_event_name"], "PostToolUse");
-    assert_eq!(post_hook_inputs[0]["tool_name"], "Bash");
+    assert_eq!(post_hook_inputs[0]["tool_name"], "exec_command");
     assert_eq!(post_hook_inputs[0]["tool_use_id"], start_call_id);
     assert_eq!(post_hook_inputs[0]["tool_input"]["command"], command);
     assert!(
