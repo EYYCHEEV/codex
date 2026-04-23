@@ -295,6 +295,42 @@ async fn shell_command_pre_tool_use_payload_normalizes_cmd_alias() {
 }
 
 #[tokio::test]
+async fn shell_command_pre_tool_use_payload_normalizes_command_array() {
+    let payload = ToolPayload::Function {
+        arguments: json!({
+            "command": [
+                "python3",
+                "-c",
+                "from pathlib import Path; Path('tool_ran.txt').write_text('ran')",
+            ],
+        })
+        .to_string(),
+    };
+    let (session, turn) = make_session_and_context().await;
+    let handler = ShellCommandHandler {
+        backend: super::ShellCommandBackend::Classic,
+    };
+
+    assert_eq!(
+        handler.pre_tool_use_payload(&ToolInvocation {
+            session: session.into(),
+            turn: turn.into(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
+            call_id: "call-42c".to_string(),
+            tool_name: codex_tools::ToolName::plain("shell_command"),
+            payload,
+        }),
+        Some(crate::tools::registry::PreToolUsePayload {
+            tool_name: HookToolName::shell("shell_command"),
+            tool_input: json!({
+                "command": "python3 -c \"from pathlib import Path; Path('tool_ran.txt').write_text('ran')\"",
+            }),
+        })
+    );
+}
+
+#[tokio::test]
 async fn build_post_tool_use_payload_uses_tool_output_wire_value() {
     let payload = ToolPayload::Function {
         arguments: json!({ "command": "printf shell command" }).to_string(),
