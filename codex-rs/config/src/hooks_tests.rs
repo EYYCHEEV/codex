@@ -153,6 +153,7 @@ command = "python3 /tmp/pre.py"
                     trusted_hash: Some("sha256:abc123".to_string()),
                 },
             )]),
+            legacy: Default::default(),
         }
     );
 }
