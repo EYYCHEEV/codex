@@ -255,7 +255,7 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("exec_command"),
             tool_input: serde_json::json!({ "command": "printf exec command" }),
         })
     );
@@ -309,7 +309,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
         Some(crate::tools::registry::PostToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("exec_command"),
             tool_use_id: "call-43".to_string(),
             tool_input: serde_json::json!({ "command": "echo three" }),
             tool_response: serde_json::json!("three"),
@@ -341,7 +341,7 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
         Some(crate::tools::registry::PostToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("exec_command"),
             tool_use_id: "call-44".to_string(),
             tool_input: serde_json::json!({ "command": "echo three" }),
             tool_response: serde_json::json!("three"),
@@ -400,7 +400,7 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
         Some(crate::tools::registry::PostToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("exec_command"),
             tool_use_id: "exec-call-45".to_string(),
             tool_input: serde_json::json!({ "command": "sleep 1; echo finished" }),
             tool_response: serde_json::json!("finished\n"),
@@ -452,13 +452,13 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         payloads,
         [
             Some(crate::tools::registry::PostToolUsePayload {
-                tool_name: HookToolName::bash(),
+                tool_name: HookToolName::shell("exec_command"),
                 tool_use_id: "exec-call-b".to_string(),
                 tool_input: serde_json::json!({ "command": "sleep 1; echo beta" }),
                 tool_response: serde_json::json!("beta\n"),
             }),
             Some(crate::tools::registry::PostToolUsePayload {
-                tool_name: HookToolName::bash(),
+                tool_name: HookToolName::shell("exec_command"),
                 tool_use_id: "exec-call-a".to_string(),
                 tool_input: serde_json::json!({ "command": "sleep 2; echo alpha" }),
                 tool_response: serde_json::json!("alpha\n"),
