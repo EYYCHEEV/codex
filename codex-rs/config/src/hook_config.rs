@@ -7,6 +7,8 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::types::LegacyHooksConfig;
+
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HooksFile {
     #[serde(default)]
@@ -17,6 +19,8 @@ pub struct HooksFile {
 pub struct HooksToml {
     #[serde(flatten)]
     pub events: HookEventsToml,
+    #[serde(flatten)]
+    pub legacy: LegacyHooksConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, HookStateToml>,
 }
