@@ -507,7 +507,7 @@ model_auto_compact_token_limit = 65432
 "#,
     )?;
 
-    let service = ConfigService::new_with_defaults(tmp.path().to_path_buf());
+    let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let read = service
         .read(ConfigReadParams {
             include_layers: false,
