@@ -308,7 +308,7 @@ async fn shell_command_pre_tool_use_payload_uses_raw_command() {
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("shell_command"),
             tool_input: json!({ "command": "printf shell command" }),
         })
     );
@@ -341,7 +341,7 @@ async fn build_post_tool_use_payload_uses_tool_output_wire_value() {
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
         Some(crate::tools::registry::PostToolUsePayload {
-            tool_name: HookToolName::bash(),
+            tool_name: HookToolName::shell("shell_command"),
             tool_use_id: "call-42".to_string(),
             tool_input: json!({ "command": "printf shell command" }),
             tool_response: json!("shell output"),
