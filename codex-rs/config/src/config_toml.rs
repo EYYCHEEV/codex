@@ -464,6 +464,10 @@ pub struct ConfigToml {
     pub skills: Option<SkillsConfig>,
 
     /// Lifecycle hooks configured inline in TOML plus user-level overrides.
+    ///
+    /// This accepts both the canonical inline hook event tables and the fork's
+    /// legacy `[[hooks.pre_tool_use]]` compatibility shape so both can coexist
+    /// in the same config layer.
     pub hooks: Option<HooksToml>,
 
     /// User-level plugin config entries keyed by plugin name.
@@ -1060,3 +1064,7 @@ command = "   "
         );
     }
 }
+
+#[cfg(test)]
+#[path = "config_toml_tests.rs"]
+mod config_toml_tests;
