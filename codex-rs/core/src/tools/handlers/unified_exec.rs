@@ -94,8 +94,14 @@ fn post_unified_exec_tool_use_payload(
         result.event_call_id.clone()
     };
     let tool_response = result.post_tool_use_response(&tool_use_id, &invocation.payload)?;
+    let hook_tool_name =
+        if invocation.tool_name.namespace.is_none() && invocation.tool_name.name == "write_stdin" {
+            HookToolName::shell("exec_command")
+        } else {
+            HookToolName::shell(invocation.tool_name.display())
+        };
     Some(PostToolUsePayload {
-        tool_name: HookToolName::bash(),
+        tool_name: hook_tool_name,
         tool_use_id,
         tool_input: serde_json::json!({ "command": command }),
         tool_response,

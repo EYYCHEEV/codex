@@ -171,7 +171,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
 
     if should_block {
         block_reason.map(|reason| {
-            if (tool_name.name() == "Bash" || tool_name.name() == "apply_patch")
+            if (tool_name.is_shell_family() || tool_name.name() == "apply_patch")
                 && let Some(command) = tool_input.get("command").and_then(Value::as_str)
             {
                 format!("Command blocked by PreToolUse hook: {reason}. Command: {command}")

@@ -128,7 +128,7 @@ impl ToolHandler for ExecCommandHandler {
         parse_arguments::<ExecCommandArgs>(arguments)
             .ok()
             .map(|args| PreToolUsePayload {
-                tool_name: HookToolName::bash(),
+                tool_name: HookToolName::shell(invocation.tool_name.display()),
                 tool_input: serde_json::json!({ "command": args.cmd }),
             })
     }
