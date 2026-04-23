@@ -1,11 +1,11 @@
 use super::*;
-use crate::config::profile::ConfigProfile;
 use anyhow::Result;
 use codex_app_server_protocol::AppConfig;
 use codex_app_server_protocol::AppToolApproval;
 use codex_app_server_protocol::AppsConfig;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ProfileV2;
+use codex_config::profile_toml::ConfigProfile;
 use codex_core::config_loader::CloudRequirementsLoader;
 use codex_core::config_loader::FeatureRequirementsToml;
 use codex_core::config_loader::LoaderOverrides;
@@ -342,7 +342,7 @@ model_auto_compact_token_limit = 65432
 "#,
     )?;
 
-    let service = ConfigService::new_with_defaults(tmp.path().to_path_buf());
+    let service = ConfigManager::without_managed_config_for_tests(tmp.path().to_path_buf());
     let read = service
         .read(ConfigReadParams {
             include_layers: false,
