@@ -30,6 +30,58 @@ use crate::mcp::CallToolResult;
 
 type CommitID = String;
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ShellCommandInput {
+    String(String),
+    Array(Vec<String>),
+}
+
+fn deserialize_shell_command_input<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let input = ShellCommandInput::deserialize(deserializer)?;
+    Ok(match input {
+        ShellCommandInput::String(command) => command,
+        ShellCommandInput::Array(parts) => join_shell_command_parts(&parts),
+    })
+}
+
+fn join_shell_command_parts(parts: &[String]) -> String {
+    parts
+        .iter()
+        .map(|part| {
+            if part.is_empty() {
+                "\"\"".to_string()
+            } else if part.chars().all(is_safe_shell_command_char) {
+                part.clone()
+            } else {
+                format!("\"{}\"", escape_shell_command_part(part))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_safe_shell_command_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':')
+}
+
+fn escape_shell_command_part(part: &str) -> String {
+    let mut escaped = String::with_capacity(part.len());
+    for ch in part.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '$' => escaped.push_str("\\$"),
+            '`' => escaped.push_str("\\`"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Details of a ghost commit created from a repository state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct GhostCommit {
@@ -987,6 +1039,7 @@ pub struct ShellToolCallParams {
 #[derive(Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 pub struct ShellCommandToolCallParams {
     #[serde(alias = "cmd")]
+    #[serde(deserialize_with = "deserialize_shell_command_input")]
     pub command: String,
     pub workdir: Option<String>,
 
