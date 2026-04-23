@@ -369,7 +369,7 @@ async fn shell_command_pre_tool_use_payload_normalizes_command_array() {
         Some(crate::tools::registry::PreToolUsePayload {
             tool_name: HookToolName::shell("shell_command"),
             tool_input: json!({
-                "command": "python3 -c \"from pathlib import Path; Path('tool_ran.txt').write_text('ran')\"",
+                "command": "python3 -c from pathlib import Path; Path('tool_ran.txt').write_text('ran')",
             }),
         })
     );
