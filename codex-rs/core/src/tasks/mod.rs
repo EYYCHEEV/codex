@@ -319,6 +319,21 @@ impl Session {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();
+        let reserved_turn_state = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(active_turn) => {
+                    debug_assert!(active_turn.tasks.is_empty());
+                    active_turn.preparing_turn_context = Some(Arc::clone(&turn_context));
+                    Arc::clone(&active_turn.turn_state)
+                }
+                None => {
+                    let active_turn = active.get_or_insert_with(ActiveTurn::preparing);
+                    active_turn.preparing_turn_context = Some(Arc::clone(&turn_context));
+                    Arc::clone(&active_turn.turn_state)
+                }
+            }
+        };
         let started_at = Instant::now();
         let turn_started_at_unix_ms = turn_context
             .turn_timing_state
@@ -349,12 +364,7 @@ impl Session {
         }
         let queued_response_items = self.take_queued_response_items_for_next_turn().await;
         let mailbox_items = self.get_pending_input().await;
-        let turn_state = {
-            let mut active = self.active_turn.lock().await;
-            let turn = active.get_or_insert_with(ActiveTurn::default);
-            debug_assert!(turn.tasks.is_empty());
-            Arc::clone(&turn.turn_state)
-        };
+        let turn_state = Arc::clone(&reserved_turn_state);
         {
             let mut turn_state = turn_state.lock().await;
             turn_state.token_usage_at_turn_start = token_usage_at_turn_start;
@@ -370,8 +380,12 @@ impl Session {
 
         let turn_extension_data = Arc::clone(&turn_context.extension_data);
         let mut active = self.active_turn.lock().await;
-        let turn = active.get_or_insert_with(ActiveTurn::default);
+        let turn = active.get_or_insert_with(|| {
+            ActiveTurn::preparing_with_turn_state(Arc::clone(&reserved_turn_state))
+        });
+        debug_assert!(Arc::ptr_eq(&turn.turn_state, &reserved_turn_state));
         debug_assert!(turn.tasks.is_empty());
+        turn.preparing_turn_context = Some(Arc::clone(&turn_context));
         let done_clone = Arc::clone(&done);
         let session_ctx = Arc::new(SessionTaskContext::new(
             Arc::clone(self),
@@ -479,7 +493,7 @@ impl Session {
             if active_turn.is_some() {
                 return;
             }
-            *active_turn = Some(ActiveTurn::default());
+            active_turn.get_or_insert_with(ActiveTurn::preparing);
         }
 
         let turn_context = self.new_default_turn_with_sub_id(sub_id).await;

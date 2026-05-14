@@ -1814,10 +1814,17 @@ impl Session {
 
     pub(crate) async fn turn_context_for_sub_id(&self, sub_id: &str) -> Option<Arc<TurnContext>> {
         let active = self.active_turn.lock().await;
-        active
-            .as_ref()
-            .and_then(|turn| turn.tasks.get(sub_id))
-            .map(|task| Arc::clone(&task.turn_context))
+        active.as_ref().and_then(|turn| {
+            turn.tasks
+                .get(sub_id)
+                .map(|task| Arc::clone(&task.turn_context))
+                .or_else(|| {
+                    turn.preparing_turn_context
+                        .as_ref()
+                        .filter(|turn_context| turn_context.sub_id == sub_id)
+                        .cloned()
+                })
+        })
     }
 
     async fn active_turn_context_and_cancellation_token(
@@ -3193,14 +3200,14 @@ impl Session {
     ) -> Result<(), Vec<ResponseInputItem>> {
         let mut active = self.active_turn.lock().await;
         match active.as_mut() {
-            Some(at) => {
+            Some(at) if !at.tasks.is_empty() || at.is_preparing() => {
                 let mut ts = at.turn_state.lock().await;
                 for item in input {
                     ts.push_pending_input(item);
                 }
                 Ok(())
             }
-            None => Err(input),
+            Some(_) | None => Err(input),
         }
     }
 

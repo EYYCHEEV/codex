@@ -131,9 +131,13 @@ pub(crate) async fn execute_user_shell_command(
         &turn_context.shell_environment_policy,
         Some(session.conversation_id),
     );
-    if exec_env_map.contains_key(PROXY_ACTIVE_ENV_KEY) {
+    let mut shell_environment_overrides = turn_context.shell_environment_policy.r#set.clone();
+    if exec_env_map.contains_key(PROXY_ACTIVE_ENV_KEY)
+        || shell_environment_overrides.contains_key(PROXY_ACTIVE_ENV_KEY)
+    {
         for key in PROXY_ENV_KEYS {
             exec_env_map.remove(*key);
+            shell_environment_overrides.remove(*key);
         }
         #[cfg(target_os = "macos")]
         if exec_env_map
@@ -144,13 +148,22 @@ pub(crate) async fn execute_user_shell_command(
         {
             exec_env_map.remove(PROXY_GIT_SSH_COMMAND_ENV_KEY);
         }
+        #[cfg(target_os = "macos")]
+        if shell_environment_overrides
+            .get(PROXY_GIT_SSH_COMMAND_ENV_KEY)
+            .is_some_and(|value| {
+                value.starts_with(codex_network_proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER)
+            })
+        {
+            shell_environment_overrides.remove(PROXY_GIT_SSH_COMMAND_ENV_KEY);
+        }
     }
     let exec_command = maybe_wrap_shell_lc_with_snapshot(
         &display_command,
         session_shell.as_ref(),
         #[allow(deprecated)]
         &turn_context.cwd,
-        &turn_context.shell_environment_policy.r#set,
+        &shell_environment_overrides,
         &exec_env_map,
     );
 
