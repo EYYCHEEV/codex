@@ -306,14 +306,6 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
         return command.to_vec();
     }
 
-    let Some(snapshot) = shell_snapshot else {
-        return command.to_vec();
-    };
-
-    if !snapshot.exists() {
-        return command.to_vec();
-    }
-
     if command.len() < 3 {
         return command.to_vec();
     }
@@ -324,6 +316,14 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
     let flag = command[1].as_str();
     if flag != "-lc" && !(brokered && flag == "-c") {
         return command.to_vec();
+    }
+
+    let Some(snapshot) = shell_snapshot else {
+        return maybe_wrap_shell_lc_with_proxy_env(command, env);
+    };
+
+    if !snapshot.exists() {
+        return maybe_wrap_shell_lc_with_proxy_env(command, env);
     }
 
     let snapshot_path = snapshot.to_string_lossy();
@@ -474,10 +474,11 @@ unset __CODEX_SNAPSHOT_ORIGINAL_ENV_SET __CODEX_SNAPSHOT_ORIGINAL_ENV \
     } else {
         String::new()
     };
+    let original_script = script_with_proxy_env_restore(&command[2], env);
     let original_script = if !inner_brokered_credential_exports.is_empty() {
-        format!("{inner_brokered_credential_exports}\n{}", command[2])
+        format!("{inner_brokered_credential_exports}\n{original_script}")
     } else {
-        command[2].clone()
+        original_script
     };
     let runtime_path_prepend_exports =
         runtime_path_prepends.shell_exports_after_snapshot(explicit_env_overrides);
@@ -579,6 +580,51 @@ fn build_brokered_credential_exports(env: &HashMap<String, String>, remove_copie
     format!(
         "case $- in\n  *x*) __CODEX_SNAPSHOT_BROKER_XTRACE=1; set +x ;;\n  *) __CODEX_SNAPSHOT_BROKER_XTRACE= ;;\nesac\n{exports}\nif [ -n \"$__CODEX_SNAPSHOT_BROKER_XTRACE\" ]; then\n  unset __CODEX_SNAPSHOT_BROKER_XTRACE\n  set -x\nelse\n  unset __CODEX_SNAPSHOT_BROKER_XTRACE\nfi"
     )
+}
+
+fn maybe_wrap_shell_lc_with_proxy_env(
+    command: &[String],
+    env: &HashMap<String, String>,
+) -> Vec<String> {
+    let restores = proxy_env_restore_commands(env);
+    if restores.is_empty() {
+        return command.to_vec();
+    }
+
+    let mut rewritten = command.to_vec();
+    rewritten[2] = format!("{restores}\n\n{}", command[2]);
+    rewritten
+}
+
+fn script_with_proxy_env_restore(script: &str, env: &HashMap<String, String>) -> String {
+    let restores = proxy_env_restore_commands(env);
+    if restores.is_empty() {
+        script.to_string()
+    } else {
+        format!("{restores}\n\n{script}")
+    }
+}
+
+fn proxy_env_restore_commands(env: &HashMap<String, String>) -> String {
+    if !env.contains_key(PROXY_ACTIVE_ENV_KEY) {
+        return String::new();
+    }
+
+    let mut keys = PROXY_ENV_KEYS
+        .iter()
+        .copied()
+        .filter(|key| is_valid_shell_variable_name(key))
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+
+    keys.into_iter()
+        .map(|key| match env.get(key) {
+            Some(value) => format!("export {key}='{}'", shell_single_quote(value)),
+            None => format!("unset {key}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn build_override_exports(
