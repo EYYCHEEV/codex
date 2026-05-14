@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use super::estimate_model_visible_tool_tokens;
 use super::trim_function_call_history_to_fit_context_window;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
@@ -31,11 +32,13 @@ pub(super) async fn run_remote_compact_attempt(
     let turn_context = &step_context.turn;
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
+    let tools = step_context.tool_router.model_visible_specs();
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
             &mut history,
             turn_context.as_ref(),
             &base_instructions,
+            estimate_model_visible_tool_tokens(&tools),
         );
     if rewritten_outputs > 0 {
         info!(
@@ -59,10 +62,9 @@ pub(super) async fn run_remote_compact_attempt(
         .is_enabled()
         .then(|| history.raw_items().to_vec());
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = &step_context.tool_router;
     let prompt = Prompt {
         input: prompt_input,
-        tools: tool_router.model_visible_specs(),
+        tools,
         parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,
         output_schema: None,

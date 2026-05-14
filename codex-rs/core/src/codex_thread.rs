@@ -22,6 +22,8 @@ use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
+#[cfg(test)]
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AdditionalContextEntry;
@@ -100,6 +102,28 @@ pub enum TryStartTurnIfIdleRejectionReason {
     /// Another turn or task is active, or the idle reservation was lost before
     /// the automatic turn could start.
     Busy,
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+fn pending_message_input_item(message: &ResponseItem) -> CodexResult<ResponseInputItem> {
+    let ResponseItem::Message {
+        role,
+        content,
+        phase,
+        ..
+    } = message
+    else {
+        return Err(CodexErr::InvalidRequest(
+            "append_message only supports message response items".to_string(),
+        ));
+    };
+
+    Ok(ResponseInputItem::Message {
+        role: role.clone(),
+        content: content.clone(),
+        phase: phase.clone(),
+    })
 }
 
 /// Rejection returned when an extension asks to start automatic idle work but
@@ -511,6 +535,28 @@ impl CodexThread {
         self.session
             .inject_no_new_turn(vec![item], /*current_turn_context*/ None)
             .await;
+    }
+
+    /// Append a prebuilt message to the thread history without treating it as a user turn.
+    ///
+    /// If the thread already has an active turn, the message is queued as pending input for that
+    /// turn. Otherwise it is recorded directly without starting a model turn.
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) async fn append_message(&self, message: ResponseItem) -> CodexResult<String> {
+        let submission_id = uuid::Uuid::new_v4().to_string();
+        let pending_item = pending_message_input_item(&message)?;
+        if let Err(items) = self
+            .codex
+            .session
+            .inject_response_items(vec![pending_item])
+            .await
+        {
+            debug_assert_eq!(items.len(), 1);
+            self.inject_response_items(vec![message]).await?;
+        }
+
+        Ok(submission_id)
     }
 
     /// Record raw Responses API items without starting a new turn.

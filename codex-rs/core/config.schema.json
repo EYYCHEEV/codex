@@ -1259,6 +1259,24 @@
         }
       ]
     },
+    "HookFailurePolicy": {
+      "oneOf": [
+        {
+          "description": "Fail closed and block the tool call.",
+          "enum": [
+            "deny"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Fail open and allow the tool call to continue.",
+          "enum": [
+            "allow"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "HookHandlerConfig": {
       "oneOf": [
         {
@@ -1345,6 +1363,7 @@
       "type": "object"
     },
     "HooksToml": {
+      "description": "Compatibility config for the fork's legacy `[[hooks.pre_tool_use]]` TOML contract. The canonical hooks runtime translates these handlers into the official hook engine instead of maintaining a second executor path.",
       "properties": {
         "PermissionRequest": {
           "default": [],
@@ -1423,6 +1442,13 @@
           },
           "type": "array"
         },
+        "pre_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/LegacyPreToolUseHookConfig"
+          },
+          "type": "array"
+        },
         "state": {
           "additionalProperties": {
             "$ref": "#/definitions/HookStateToml"
@@ -1448,6 +1474,43 @@
     },
     "LegacyAppPathString": {
       "type": "string"
+    },
+    "LegacyPreToolUseHookConfig": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "default": [],
+          "description": "Command argv to execute directly.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "matcher": {
+          "description": "Wildcard matcher for tool names (for example `\"shell*\"`, `\"exec_command\"`, or `\"*\"`).",
+          "type": "string"
+        },
+        "on_failure": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HookFailurePolicy"
+            }
+          ],
+          "default": "deny",
+          "description": "Whether runtime failures deny or allow the tool call."
+        },
+        "timeout_sec": {
+          "default": 5,
+          "description": "Timeout in seconds. Defaults to `5` to preserve the legacy contract.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "matcher"
+      ],
+      "type": "object"
     },
     "MarketplaceConfig": {
       "additionalProperties": false,
@@ -5491,7 +5554,7 @@
           "$ref": "#/definitions/HooksToml"
         }
       ],
-      "description": "Lifecycle hooks configured inline in TOML plus user-level overrides."
+      "description": "Lifecycle hooks configured inline in TOML plus user-level overrides.\n\nThis accepts both the canonical inline hook event tables and the fork's legacy `[[hooks.pre_tool_use]]` compatibility shape so both can coexist in the same config layer."
     },
     "include_apps_instructions": {
       "description": "Whether to inject the `<apps_instructions>` developer block.",

@@ -240,14 +240,6 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
         return command.to_vec();
     }
 
-    let Some(snapshot) = shell_snapshot else {
-        return command.to_vec();
-    };
-
-    if !snapshot.exists() {
-        return command.to_vec();
-    }
-
     if command.len() < 3 {
         return command.to_vec();
     }
@@ -257,10 +249,19 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
         return command.to_vec();
     }
 
+    let Some(snapshot) = shell_snapshot else {
+        return maybe_wrap_shell_lc_with_proxy_env(command, env);
+    };
+
+    if !snapshot.exists() {
+        return maybe_wrap_shell_lc_with_proxy_env(command, env);
+    }
+
     let snapshot_path = snapshot.to_string_lossy();
     let shell_path = session_shell.shell_path.to_string_lossy();
     let original_shell = shell_single_quote(&command[0]);
-    let original_script = shell_single_quote(&command[2]);
+    let original_script = script_with_proxy_env_restore(&command[2], env);
+    let original_script = shell_single_quote(&original_script);
     let snapshot_path = shell_single_quote(snapshot_path.as_ref());
     let trailing_args = command[3..]
         .iter()
@@ -295,6 +296,51 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
     };
 
     vec![shell_path.to_string(), "-c".to_string(), rewritten_script]
+}
+
+fn maybe_wrap_shell_lc_with_proxy_env(
+    command: &[String],
+    env: &HashMap<String, String>,
+) -> Vec<String> {
+    let restores = proxy_env_restore_commands(env);
+    if restores.is_empty() {
+        return command.to_vec();
+    }
+
+    let mut rewritten = command.to_vec();
+    rewritten[2] = format!("{restores}\n\n{}", command[2]);
+    rewritten
+}
+
+fn script_with_proxy_env_restore(script: &str, env: &HashMap<String, String>) -> String {
+    let restores = proxy_env_restore_commands(env);
+    if restores.is_empty() {
+        script.to_string()
+    } else {
+        format!("{restores}\n\n{script}")
+    }
+}
+
+fn proxy_env_restore_commands(env: &HashMap<String, String>) -> String {
+    if !env.contains_key(PROXY_ACTIVE_ENV_KEY) {
+        return String::new();
+    }
+
+    let mut keys = PROXY_ENV_KEYS
+        .iter()
+        .copied()
+        .filter(|key| is_valid_shell_variable_name(key))
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+
+    keys.into_iter()
+        .map(|key| match env.get(key) {
+            Some(value) => format!("export {key}='{}'", shell_single_quote(value)),
+            None => format!("unset {key}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn build_override_exports(
