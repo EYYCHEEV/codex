@@ -2665,11 +2665,45 @@ impl Session {
 
     pub(crate) async fn turn_context_for_sub_id(&self, sub_id: &str) -> Option<Arc<TurnContext>> {
         let active = self.active_turn.lock().await;
-        active
-            .as_ref()
-            .and_then(|turn| turn.task.as_ref())
-            .filter(|task| task.turn_context.sub_id == sub_id)
-            .map(|task| Arc::clone(&task.turn_context))
+        active.as_ref().and_then(|turn| {
+            turn.task
+                .as_ref()
+                .filter(|task| task.turn_context.sub_id == sub_id)
+                .map(|task| Arc::clone(&task.turn_context))
+                .or_else(|| {
+                    turn.preparing_turn_context
+                        .as_ref()
+                        .filter(|turn_context| turn_context.sub_id == sub_id)
+                        .cloned()
+                })
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn inject_response_items(
+        &self,
+        input: Vec<ResponseItemEnvelope>,
+    ) -> Result<(), Vec<ResponseItemEnvelope>> {
+        self.input_queue
+            .inject_response_items(&self.active_turn, input)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn queue_response_items_for_next_turn(
+        &self,
+        input: Vec<ResponseItemEnvelope>,
+    ) {
+        self.input_queue
+            .queue_response_items_for_next_turn(input)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
+        self.input_queue
+            .has_queued_response_items_for_next_turn()
+            .await
     }
 
     async fn active_turn_context_and_cancellation_token(
@@ -3315,8 +3349,11 @@ impl Session {
     )> {
         let active = self.active_turn.lock().await;
         let active = active.as_ref()?;
-        let task = active.task.as_ref()?;
-        let turn_context = Arc::clone(&task.turn_context);
+        let turn_context = active
+            .task
+            .as_ref()
+            .map(|task| Arc::clone(&task.turn_context))
+            .or_else(|| active.preparing_turn_context.clone())?;
         let settings = turn_context.next_step_settings.load_full();
         let strict_auto_review = active.turn_state.lock().await.strict_auto_review_enabled();
         let environments = self.services.turn_environments.snapshot_now();

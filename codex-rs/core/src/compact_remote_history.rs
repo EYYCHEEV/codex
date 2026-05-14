@@ -11,6 +11,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
+use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
 
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
@@ -69,14 +70,16 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
     history: &mut ContextManager,
     turn_context: &TurnContext,
     base_instructions: &BaseInstructions,
+    additional_prompt_tokens: i64,
 ) -> (usize, i64) {
     let Some(context_window) = turn_context.model_context_window() else {
         return (0, 0);
     };
     // Keep the unclamped total so replacing an item cannot lose an overflow hidden by i64
     // saturation in the normal history estimator.
-    let base_tokens =
-        i128::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i128::MAX);
+    let base_tokens = i128::try_from(approx_token_count(&base_instructions.text))
+        .unwrap_or(i128::MAX)
+        .saturating_add(i128::from(additional_prompt_tokens));
     let original_items = history.annotated_items();
     let mut estimated_tokens = history_item_groups(original_items.iter().map(|item| &item.item))
         .map(|group| group.estimated_token_count())
@@ -183,6 +186,12 @@ fn truncated_output_payload(output: &FunctionCallOutputPayload) -> FunctionCallO
         body: FunctionCallOutputBody::Text(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.to_string()),
         success: output.success,
     }
+}
+
+pub(crate) fn estimate_model_visible_tool_tokens(tools: &[ToolSpec]) -> i64 {
+    serde_json::to_string(tools).map_or(i64::MAX, |serialized| {
+        i64::try_from(approx_token_count(&serialized)).unwrap_or(i64::MAX)
+    })
 }
 
 #[cfg(test)]

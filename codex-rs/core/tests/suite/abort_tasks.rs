@@ -22,6 +22,7 @@ use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use regex_lite::Regex;
 use serde_json::json;
 
@@ -61,12 +62,22 @@ async fn interrupt_long_running_tool_emits_turn_aborted() {
         .unwrap();
 
     // Wait until the exec begins to avoid a race, then interrupt.
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandBegin(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::ExecCommandBegin(_)),
+        Duration::from_secs(30),
+    )
+    .await;
 
     codex.submit(Op::Interrupt).await.unwrap();
 
     // Expect TurnAborted soon after.
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnAborted(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnAborted(_)),
+        Duration::from_secs(30),
+    )
+    .await;
     codex.submit(Op::CleanBackgroundTerminals).await.unwrap();
 }
 
@@ -246,12 +257,22 @@ async fn interrupt_tool_records_history_entries() {
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandBegin(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::ExecCommandBegin(_)),
+        Duration::from_secs(30),
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
     codex.submit(Op::Interrupt).await.unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnAborted(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnAborted(_)),
+        Duration::from_secs(30),
+    )
+    .await;
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -261,7 +282,12 @@ async fn interrupt_tool_records_history_entries() {
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnComplete(_)),
+        Duration::from_secs(30),
+    )
+    .await;
 
     let requests = response_mock.requests();
     assert!(
@@ -339,12 +365,22 @@ async fn interrupt_persists_turn_aborted_marker_in_next_request() {
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandBegin(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::ExecCommandBegin(_)),
+        Duration::from_secs(30),
+    )
+    .await;
 
     tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
     codex.submit(Op::Interrupt).await.unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnAborted(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnAborted(_)),
+        Duration::from_secs(30),
+    )
+    .await;
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -354,7 +390,12 @@ async fn interrupt_persists_turn_aborted_marker_in_next_request() {
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnComplete(_)),
+        Duration::from_secs(30),
+    )
+    .await;
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2, "expected two calls to the responses API");
