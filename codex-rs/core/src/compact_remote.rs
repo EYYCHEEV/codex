@@ -38,6 +38,9 @@ use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
+use codex_tools::ToolSpec;
+use codex_utils_output_truncation::approx_token_count;
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -195,11 +198,19 @@ async fn run_remote_compact_task_inner_impl(
         .await;
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
+    let tools = built_tools(
+        sess.as_ref(),
+        turn_context.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await?
+    .model_visible_specs();
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
             &mut history,
             turn_context.as_ref(),
             &base_instructions,
+            estimate_model_visible_tool_tokens(&tools),
         );
     if rewritten_outputs > 0 {
         info!(
@@ -224,15 +235,9 @@ async fn run_remote_compact_task_inner_impl(
     // request, whose prompt will repeat current developer/context prefix items.
     let trace_input_history = history.raw_items().to_vec();
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = built_tools(
-        sess.as_ref(),
-        step_context.as_ref(),
-        &CancellationToken::new(),
-    )
-    .await?;
     let prompt = Prompt {
         input: prompt_input,
-        tools: tool_router.model_visible_specs(),
+        tools,
         parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,
         output_schema: None,
@@ -378,20 +383,31 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
     history: &mut ContextManager,
     turn_context: &TurnContext,
     base_instructions: &BaseInstructions,
+    additional_prompt_tokens: i64,
 ) -> (usize, i64) {
     let Some(context_window) = turn_context.model_context_window() else {
         return (0, 0);
     };
     let mut rewritten_outputs = 0usize;
     let mut estimated_deleted_tokens = 0i64;
-    let item_count = history.raw_items().len();
 
+    let estimate_compact_prompt_tokens = |history: &ContextManager| {
+        let base_tokens =
+            i64::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i64::MAX);
+        history
+            .clone()
+            .for_prompt(&turn_context.model_info.input_modalities)
+            .iter()
+            .map(estimate_serialized_prompt_tokens)
+            .fold(
+                base_tokens.saturating_add(additional_prompt_tokens),
+                i64::saturating_add,
+            )
+    };
+
+    let item_count = history.raw_items().len();
     for index in (0..item_count).rev() {
-        let Some(estimated_tokens_before) =
-            history.estimate_token_count_with_base_instructions(base_instructions)
-        else {
-            break;
-        };
+        let estimated_tokens_before = estimate_compact_prompt_tokens(history);
         if estimated_tokens_before <= context_window {
             break;
         }
@@ -405,9 +421,7 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
         let mut items = history.raw_items().to_vec();
         items[index] = rewritten_item;
         history.replace(items);
-        let estimated_tokens_after = history
-            .estimate_token_count_with_base_instructions(base_instructions)
-            .unwrap_or_default();
+        let estimated_tokens_after = estimate_compact_prompt_tokens(history);
         rewritten_outputs += 1;
         estimated_deleted_tokens = estimated_deleted_tokens
             .saturating_add(estimated_tokens_before.saturating_sub(estimated_tokens_after));
@@ -465,4 +479,14 @@ fn truncated_output_payload(output: &FunctionCallOutputPayload) -> FunctionCallO
         body: FunctionCallOutputBody::Text(CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE.to_string()),
         success: output.success,
     }
+}
+
+pub(crate) fn estimate_model_visible_tool_tokens(tools: &[ToolSpec]) -> i64 {
+    estimate_serialized_prompt_tokens(tools)
+}
+
+fn estimate_serialized_prompt_tokens<T: Serialize + ?Sized>(value: &T) -> i64 {
+    serde_json::to_string(value).map_or(i64::MAX, |serialized| {
+        i64::try_from(approx_token_count(&serialized)).unwrap_or(i64::MAX)
+    })
 }

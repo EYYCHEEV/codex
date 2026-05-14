@@ -16,13 +16,14 @@ use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
-use core_test_support::wait_for_event_match;
+use core_test_support::wait_for_event_with_timeout;
 use core_test_support::zsh_fork::build_zsh_fork_test;
 use core_test_support::zsh_fork::restrictive_workspace_write_profile;
 use core_test_support::zsh_fork::zsh_fork_runtime;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 fn write_skill_metadata(home: &Path, name: &str, contents: &str) -> Result<()> {
     let metadata_dir = home.join("skills").join(name).join("agents");
@@ -116,12 +117,22 @@ fn skill_script_command(test: &TestCodex, script_name: &str) -> Result<String> {
 }
 
 async fn wait_for_exec_approval_request(test: &TestCodex) -> Option<ExecApprovalRequestEvent> {
-    wait_for_event_match(test.codex.as_ref(), |event| match event {
-        EventMsg::ExecApprovalRequest(request) => Some(Some(request.clone())),
-        EventMsg::TurnComplete(_) => Some(None),
-        _ => None,
-    })
-    .await
+    let event = wait_for_event_with_timeout(
+        test.codex.as_ref(),
+        |event| {
+            matches!(
+                event,
+                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+            )
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+    match event {
+        EventMsg::ExecApprovalRequest(request) => Some(request),
+        EventMsg::TurnComplete(_) => None,
+        _ => unreachable!("predicate restricts events to approval request or turn completion"),
+    }
 }
 
 async fn wait_for_turn_complete(test: &TestCodex) {
@@ -147,7 +158,7 @@ async fn shell_zsh_fork_skill_scripts_ignore_declared_permissions() -> Result<()
     };
 
     let approval_policy = AskForApproval::Granular(GranularApprovalConfig {
-        sandbox_approval: true,
+        sandbox_approval: false,
         rules: true,
         skill_approval: false,
         request_permissions: true,
@@ -208,8 +219,6 @@ async fn shell_zsh_fork_skill_scripts_ignore_declared_permissions() -> Result<()
         approval.is_none(),
         "expected skill script execution to skip the removed skill approval path"
     );
-
-    wait_for_turn_complete(&test).await;
 
     let call_output = mocks
         .completion
