@@ -1,6 +1,7 @@
 use crate::state::ActiveTurn;
 use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::user_input::UserInput;
@@ -29,6 +30,7 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     mailbox_tx: watch::Sender<()>,
     mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
+    queued_response_items_for_next_turn: Mutex<Vec<ResponseInputItem>>,
 }
 
 impl InputQueue {
@@ -37,6 +39,7 @@ impl InputQueue {
         Self {
             mailbox_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            queued_response_items_for_next_turn: Mutex::new(Vec::new()),
         }
     }
 
@@ -78,6 +81,27 @@ impl InputQueue {
             .drain(..)
             .map(TurnInput::InterAgentCommunication)
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn queue_response_items_for_next_turn(&self, input: Vec<ResponseInputItem>) {
+        self.queued_response_items_for_next_turn
+            .lock()
+            .await
+            .extend(input);
+    }
+
+    pub(crate) async fn take_queued_response_items_for_next_turn(&self) -> Vec<ResponseInputItem> {
+        std::mem::take(&mut *self.queued_response_items_for_next_turn.lock().await)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
+        !self
+            .queued_response_items_for_next_turn
+            .lock()
+            .await
+            .is_empty()
     }
 
     pub(crate) async fn turn_state_for_sub_id(
@@ -164,6 +188,34 @@ impl InputQueue {
         turn_state: &Mutex<TurnState>,
     ) -> Vec<TurnInput> {
         turn_state.lock().await.pending_input.items.split_off(0)
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    #[cfg(test)]
+    pub(crate) async fn inject_response_items(
+        &self,
+        active_turn: &Mutex<Option<ActiveTurn>>,
+        input: Vec<ResponseInputItem>,
+    ) -> Result<(), Vec<ResponseInputItem>> {
+        let mut active = active_turn.lock().await;
+        match active.as_mut() {
+            Some(active_turn) if active_turn.task.is_some() || active_turn.is_preparing() => {
+                self.extend_pending_input_for_turn_state(
+                    active_turn.turn_state.as_ref(),
+                    input
+                        .into_iter()
+                        .map(ResponseItem::from)
+                        .map(TurnInput::ResponseItem)
+                        .collect(),
+                )
+                .await;
+                Ok(())
+            }
+            Some(_) | None => Err(input),
+        }
     }
 
     #[expect(
