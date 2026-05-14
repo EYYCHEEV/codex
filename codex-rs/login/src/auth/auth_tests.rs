@@ -142,8 +142,8 @@ async fn refresh_with_new_id_token_updates_account_id() {
     assert_eq!(tokens.account_id.as_deref(), Some("workspace-b"));
 }
 
-#[test]
-fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
+#[tokio::test]
+async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
     let codex_home = tempdir().unwrap();
     let fake_jwt = fake_jwt_for_auth_file_params(&AuthFileParams {
         openai_api_key: None,
@@ -175,7 +175,9 @@ fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
     )
+    .await
     .expect("load_auth should succeed")
     .expect("auth should exist");
     assert_eq!(auth.get_account_id().as_deref(), Some("workspace-a"));
