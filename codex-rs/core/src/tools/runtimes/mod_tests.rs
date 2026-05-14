@@ -27,6 +27,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use pretty_assertions::assert_eq;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -803,6 +804,69 @@ async fn snapshot_wrapper_replays_dummy_and_preserves_unbrokered_credentials() -
         format!("{dummy}\nghp_snapshot_only\ngithub.example.com")
     );
     Ok(())
+}
+
+#[test]
+fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_after_final_shell_startup() {
+    let dir = tempdir().expect("create temp dir");
+    let snapshot_path = dir.path().join("snapshot.sh");
+    std::fs::write(
+        &snapshot_path,
+        "# Snapshot file\nexport HTTP_PROXY='http://snapshot.proxy:8080'\n",
+    )
+    .expect("write snapshot");
+    let final_shell_path = dir.path().join("final-shell");
+    std::fs::write(
+        &final_shell_path,
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"-c\" ]; then\n\
+         \texport HTTP_PROXY='http://startup.proxy:8080'\n\
+         \tshift\n\
+         \texec /bin/sh -c \"$@\"\n\
+         fi\n\
+         exit 2\n",
+    )
+    .expect("write final shell");
+    let mut permissions = std::fs::metadata(&final_shell_path)
+        .expect("stat final shell")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&final_shell_path, permissions).expect("chmod final shell");
+
+    let (session_shell, shell_snapshot) =
+        shell_with_snapshot(ShellType::Sh, "/bin/sh", snapshot_path.abs());
+    let command = vec![
+        final_shell_path.to_string_lossy().into_owned(),
+        "-lc".to_string(),
+        "printf '%s' \"$HTTP_PROXY\"".to_string(),
+    ];
+    let env = HashMap::from([
+        (PROXY_ACTIVE_ENV_KEY.to_string(), "1".to_string()),
+        (
+            "HTTP_PROXY".to_string(),
+            "http://127.0.0.1:4321".to_string(),
+        ),
+    ]);
+    let rewritten = maybe_wrap_shell_lc_with_snapshot(
+        &command,
+        &session_shell,
+        Some(&shell_snapshot),
+        &HashMap::new(),
+        &env,
+        &RuntimePathPrepends::default(),
+    );
+    let output = Command::new(&rewritten[0])
+        .args(&rewritten[1..])
+        .env(PROXY_ACTIVE_ENV_KEY, "1")
+        .env("HTTP_PROXY", "http://127.0.0.1:4321")
+        .output()
+        .expect("run rewritten command");
+
+    assert!(output.status.success(), "command failed: {output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "http://127.0.0.1:4321"
+    );
 }
 
 #[cfg(target_os = "macos")]
