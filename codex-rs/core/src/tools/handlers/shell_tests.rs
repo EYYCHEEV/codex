@@ -235,7 +235,7 @@ async fn local_shell_pre_tool_use_payload_uses_joined_command() {
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
-            tool_name: HookToolName::shell("shell"),
+            tool_name: HookToolName::shell("local_shell"),
             tool_input: json!({ "command": "bash -lc 'printf hi'" }),
         })
     );
@@ -273,9 +273,7 @@ async fn shell_command_pre_tool_use_payload_normalizes_cmd_alias() {
         arguments: json!({ "cmd": "printf shell command" }).to_string(),
     };
     let (session, turn) = make_session_and_context().await;
-    let handler = ShellCommandHandler {
-        backend: super::ShellCommandBackend::Classic,
-    };
+    let handler = ShellCommandHandler::from(codex_tools::ShellCommandBackendConfig::Classic);
 
     assert_eq!(
         handler.pre_tool_use_payload(&ToolInvocation {
@@ -285,6 +283,7 @@ async fn shell_command_pre_tool_use_payload_normalizes_cmd_alias() {
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-42b".to_string(),
             tool_name: codex_tools::ToolName::plain("shell_command"),
+            source: ToolCallSource::Direct,
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {
@@ -307,9 +306,7 @@ async fn shell_command_pre_tool_use_payload_normalizes_command_array() {
         .to_string(),
     };
     let (session, turn) = make_session_and_context().await;
-    let handler = ShellCommandHandler {
-        backend: super::ShellCommandBackend::Classic,
-    };
+    let handler = ShellCommandHandler::from(codex_tools::ShellCommandBackendConfig::Classic);
 
     assert_eq!(
         handler.pre_tool_use_payload(&ToolInvocation {
@@ -319,6 +316,7 @@ async fn shell_command_pre_tool_use_payload_normalizes_command_array() {
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-42c".to_string(),
             tool_name: codex_tools::ToolName::plain("shell_command"),
+            source: ToolCallSource::Direct,
             payload,
         }),
         Some(crate::tools::registry::PreToolUsePayload {

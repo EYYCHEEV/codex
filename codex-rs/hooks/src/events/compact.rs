@@ -420,8 +420,8 @@ mod tests {
     use super::parse_pre_completed;
     use super::post_command_input_json;
     use super::pre_command_input_json;
-    use crate::engine::ConfiguredHandlerBehavior;
     use crate::engine::ConfiguredHandler;
+    use crate::engine::ConfiguredHandlerBehavior;
     use crate::engine::HandlerExecution;
     use crate::engine::command_runner::CommandRunResult;
 

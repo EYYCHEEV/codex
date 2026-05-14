@@ -248,7 +248,10 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         let session_shell = ctx.session.user_shell();
         let managed_network =
             managed_network_for_sandbox_permissions(req.network.as_ref(), req.sandbox_permissions);
-        let env = exec_env_for_sandbox_permissions(&req.env, req.sandbox_permissions);
+        let mut env = exec_env_for_sandbox_permissions(&req.env, req.sandbox_permissions);
+        if let Some(network) = managed_network {
+            network.apply_to_env(&mut env);
+        }
         let command = maybe_wrap_shell_lc_with_snapshot(
             &req.command,
             session_shell.as_ref(),

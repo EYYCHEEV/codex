@@ -477,9 +477,11 @@ fn parse_completed_canonical(
         turn_id,
         status,
         entries,
-        should_block,
-        block_reason,
-        additional_contexts_for_model,
+        PreToolUseHandlerData {
+            should_block,
+            block_reason,
+            additional_contexts_for_model,
+        },
     )
 }
 
@@ -572,9 +574,11 @@ fn parse_completed_legacy(
         turn_id,
         status,
         entries,
-        should_block,
-        block_reason,
-        Vec::new(),
+        PreToolUseHandlerData {
+            should_block,
+            block_reason,
+            additional_contexts_for_model: Vec::new(),
+        },
     )
 }
 
@@ -584,23 +588,14 @@ fn build_completed(
     turn_id: Option<String>,
     status: HookRunStatus,
     entries: Vec<HookOutputEntry>,
-    should_block: bool,
-    block_reason: Option<String>,
-    additional_contexts_for_model: Vec<String>,
+    data: PreToolUseHandlerData,
 ) -> dispatcher::ParsedHandler<PreToolUseHandlerData> {
     let completed = HookCompletedEvent {
         turn_id,
         run: dispatcher::completed_summary(handler, &run_result, status, entries),
     };
 
-    dispatcher::ParsedHandler {
-        completed,
-        data: PreToolUseHandlerData {
-            should_block,
-            block_reason,
-            additional_contexts_for_model,
-        },
-    }
+    dispatcher::ParsedHandler { completed, data }
 }
 
 fn apply_legacy_failure_policy(
@@ -762,7 +757,7 @@ mod tests {
     #[test]
     fn deprecated_block_decision_with_additional_context_blocks_processing() {
         let parsed = parse_completed(
-            &handler(),
+            &canonical_handler(),
             run_result(
                 Some(0),
                 r#"{"decision":"block","reason":"do not run that","hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"remember this"}}"#,
@@ -976,6 +971,7 @@ mod tests {
             PreToolUseHandlerData {
                 should_block: true,
                 block_reason: Some("legacy ask should still block".to_string()),
+                additional_contexts_for_model: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -996,6 +992,7 @@ mod tests {
                 block_reason: Some(
                     "Hook failed (fail-closed): Hook failed: legacy hook exploded".to_string()
                 ),
+                additional_contexts_for_model: Vec::new(),
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);

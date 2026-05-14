@@ -48,7 +48,7 @@ impl ToolHandler for SpawnAgentsOnCsvHandler {
             }
         };
 
-        handle(session, turn, arguments).await
+        Box::pin(handle(session, turn, arguments)).await
     }
 }
 
@@ -189,13 +189,13 @@ pub async fn handle(
                 "failed to transition agent job {job_id} to running: {err}"
             ))
         })?;
-    if let Err(err) = run_agent_job_loop(
+    if let Err(err) = Box::pin(run_agent_job_loop(
         session.clone(),
         turn.clone(),
         db.clone(),
         job_id.clone(),
         options,
-    )
+    ))
     .await
     {
         let error_message = format!("job runner failed: {err}");

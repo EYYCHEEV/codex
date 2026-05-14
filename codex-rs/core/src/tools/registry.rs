@@ -656,7 +656,7 @@ fn generic_pre_tool_use_payload(invocation: &ToolInvocation) -> PreToolUsePayloa
             .unwrap_or_else(|_| Value::String(raw_arguments.clone())),
     };
     PreToolUsePayload {
-        tool_name: HookToolName::new(invocation.tool_name.display().to_string()),
+        tool_name: HookToolName::new(invocation.tool_name.display()),
         tool_input,
     }
 }
