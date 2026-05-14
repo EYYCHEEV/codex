@@ -276,7 +276,7 @@ async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Re
         .mount(&server)
         .await;
 
-    let ctx = RefreshTokenTestContext::new(&server)?;
+    let ctx = RefreshTokenTestContext::new(&server).await?;
     let initial_last_refresh = Utc::now() - Duration::days(1);
     let initial_tokens =
         build_tokens_for_account("workspace-a", INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
@@ -287,7 +287,7 @@ async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Re
         last_refresh: Some(initial_last_refresh),
         agent_identity: None,
     };
-    ctx.write_auth(&initial_auth)?;
+    ctx.write_auth(&initial_auth).await?;
 
     ctx.auth_manager
         .refresh_token_from_authority()
