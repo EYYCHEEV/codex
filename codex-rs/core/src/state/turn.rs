@@ -30,6 +30,14 @@ use codex_protocol::protocol::TokenUsage;
 pub(crate) struct ActiveTurn {
     pub(crate) tasks: IndexMap<String, RunningTask>,
     pub(crate) turn_state: Arc<Mutex<TurnState>>,
+    pub(crate) preparing_turn_context: Option<Arc<TurnContext>>,
+    phase: ActiveTurnPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveTurnPhase {
+    Preparing,
+    Running,
 }
 
 /// Whether mailbox deliveries should still be folded into the current turn.
@@ -58,6 +66,8 @@ impl Default for ActiveTurn {
         Self {
             tasks: IndexMap::new(),
             turn_state: Arc::new(Mutex::new(TurnState::default())),
+            preparing_turn_context: None,
+            phase: ActiveTurnPhase::Running,
         }
     }
 }
@@ -87,8 +97,30 @@ pub(crate) struct RemovedTask {
 }
 
 impl ActiveTurn {
+    pub(crate) fn preparing() -> Self {
+        Self {
+            phase: ActiveTurnPhase::Preparing,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn preparing_with_turn_state(turn_state: Arc<Mutex<TurnState>>) -> Self {
+        Self {
+            tasks: IndexMap::new(),
+            turn_state,
+            preparing_turn_context: None,
+            phase: ActiveTurnPhase::Preparing,
+        }
+    }
+
+    pub(crate) fn is_preparing(&self) -> bool {
+        self.phase == ActiveTurnPhase::Preparing
+    }
+
     pub(crate) fn add_task(&mut self, task: RunningTask) {
         let sub_id = task.turn_context.sub_id.clone();
+        self.phase = ActiveTurnPhase::Running;
+        self.preparing_turn_context = None;
         self.tasks.insert(sub_id, task);
     }
 

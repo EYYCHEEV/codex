@@ -1843,10 +1843,17 @@ impl Session {
 
     pub(crate) async fn turn_context_for_sub_id(&self, sub_id: &str) -> Option<Arc<TurnContext>> {
         let active = self.active_turn.lock().await;
-        active
-            .as_ref()
-            .and_then(|turn| turn.tasks.get(sub_id))
-            .map(|task| Arc::clone(&task.turn_context))
+        active.as_ref().and_then(|turn| {
+            turn.tasks
+                .get(sub_id)
+                .map(|task| Arc::clone(&task.turn_context))
+                .or_else(|| {
+                    turn.preparing_turn_context
+                        .as_ref()
+                        .filter(|turn_context| turn_context.sub_id == sub_id)
+                        .cloned()
+                })
+        })
     }
 
     async fn active_turn_context_and_cancellation_token(

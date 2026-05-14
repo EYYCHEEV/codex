@@ -32,7 +32,10 @@ use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
+use codex_tools::ToolSpec;
+use codex_utils_output_truncation::approx_token_count;
 use futures::TryFutureExt;
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
@@ -153,10 +156,14 @@ async fn run_remote_compact_task_inner_impl(
         .await;
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
+    let tools = built_tools(sess.as_ref(), turn_context.as_ref(), &CancellationToken::new())
+        .await?
+        .model_visible_specs();
     let deleted_items = trim_function_call_history_to_fit_context_window(
         &mut history,
         turn_context.as_ref(),
         &base_instructions,
+        estimate_model_visible_tool_tokens(&tools),
     );
     if deleted_items > 0 {
         info!(
@@ -170,15 +177,9 @@ async fn run_remote_compact_task_inner_impl(
     // whose prompt will repeat current developer/context prefix items.
     let trace_input_history = history.raw_items().to_vec();
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = built_tools(
-        sess.as_ref(),
-        turn_context.as_ref(),
-        &CancellationToken::new(),
-    )
-    .await?;
     let prompt = Prompt {
         input: prompt_input,
-        tools: tool_router.model_visible_specs(),
+        tools,
         parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,
         personality: turn_context.personality,
@@ -358,16 +359,28 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
     history: &mut ContextManager,
     turn_context: &TurnContext,
     base_instructions: &BaseInstructions,
+    additional_prompt_tokens: i64,
 ) -> usize {
     let mut deleted_items = 0usize;
     let Some(context_window) = turn_context.model_context_window() else {
         return deleted_items;
     };
 
-    while history
-        .estimate_token_count_with_base_instructions(base_instructions)
-        .is_some_and(|estimated_tokens| estimated_tokens > context_window)
-    {
+    let estimate_compact_prompt_tokens = |history: &ContextManager| {
+        let base_tokens =
+            i64::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i64::MAX);
+        history
+            .clone()
+            .for_prompt(&turn_context.model_info.input_modalities)
+            .iter()
+            .map(estimate_serialized_prompt_tokens)
+            .fold(
+                base_tokens.saturating_add(additional_prompt_tokens),
+                i64::saturating_add,
+            )
+    };
+
+    while estimate_compact_prompt_tokens(history) > context_window {
         let Some(last_item) = history.raw_items().last() else {
             break;
         };
@@ -381,4 +394,14 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
     }
 
     deleted_items
+}
+
+pub(crate) fn estimate_model_visible_tool_tokens(tools: &[ToolSpec]) -> i64 {
+    estimate_serialized_prompt_tokens(tools)
+}
+
+fn estimate_serialized_prompt_tokens<T: Serialize + ?Sized>(value: &T) -> i64 {
+    serde_json::to_string(value).map_or(i64::MAX, |serialized| {
+        i64::try_from(approx_token_count(&serialized)).unwrap_or(i64::MAX)
+    })
 }

@@ -8269,7 +8269,7 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             mcp_servers: Constrained::allow_any(HashMap::new()),
             mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
                 Default::default(),
-                LOCAL_DEV_BUILD_VERSION,
+                env!("CARGO_PKG_VERSION"),
             ),
             mcp_oauth_callback_port: None,
             mcp_oauth_callback_url: None,
@@ -8748,7 +8748,7 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
@@ -8916,7 +8916,7 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,
@@ -9069,7 +9069,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         mcp_servers: Constrained::allow_any(HashMap::new()),
         mcp_oauth_credentials_store_mode: resolve_mcp_oauth_credentials_store_mode(
             Default::default(),
-            LOCAL_DEV_BUILD_VERSION,
+            env!("CARGO_PKG_VERSION"),
         ),
         mcp_oauth_callback_port: None,
         mcp_oauth_callback_url: None,

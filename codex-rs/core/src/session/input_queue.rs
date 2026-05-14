@@ -191,7 +191,7 @@ impl InputQueue {
     ) -> Result<(), Vec<ResponseInputItem>> {
         let mut active = active_turn.lock().await;
         match active.as_mut() {
-            Some(active_turn) => {
+            Some(active_turn) if !active_turn.tasks.is_empty() || active_turn.is_preparing() => {
                 self.extend_pending_input_for_turn_state(
                     active_turn.turn_state.as_ref(),
                     input
@@ -202,7 +202,7 @@ impl InputQueue {
                 .await;
                 Ok(())
             }
-            None => Err(input),
+            Some(_) | None => Err(input),
         }
     }
 
