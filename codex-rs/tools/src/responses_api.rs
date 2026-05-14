@@ -94,6 +94,9 @@ pub fn coalesce_loadable_tool_specs(
                         LoadableToolSpec::Function(_) | LoadableToolSpec::Namespace(_) => None,
                     })
                 {
+                    if should_update_namespace_description(existing_namespace, &namespace) {
+                        existing_namespace.description = namespace.description;
+                    }
                     existing_namespace.tools.append(&mut namespace.tools);
                 } else {
                     coalesced_specs.push(LoadableToolSpec::Namespace(namespace));
@@ -102,6 +105,19 @@ pub fn coalesce_loadable_tool_specs(
         }
     }
     coalesced_specs
+}
+
+fn should_update_namespace_description(
+    existing: &ResponsesApiNamespace,
+    incoming: &ResponsesApiNamespace,
+) -> bool {
+    let incoming_description = incoming.description.trim();
+    if incoming_description.is_empty() {
+        return false;
+    }
+
+    existing.description.trim().is_empty()
+        || existing.description == default_namespace_description(&existing.name)
 }
 
 pub fn mcp_tool_to_responses_api_tool(

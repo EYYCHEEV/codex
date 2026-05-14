@@ -31,6 +31,14 @@ use codex_protocol::protocol::TokenUsage;
 pub(crate) struct ActiveTurn {
     pub(crate) task: Option<RunningTask>,
     pub(crate) turn_state: Arc<Mutex<TurnState>>,
+    pub(crate) preparing_turn_context: Option<Arc<TurnContext>>,
+    phase: ActiveTurnPhase,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveTurnPhase {
+    Preparing,
+    Running,
 }
 
 /// Whether mailbox deliveries should still be folded into the current turn.
@@ -59,6 +67,8 @@ impl Default for ActiveTurn {
         Self {
             task: None,
             turn_state: Arc::new(Mutex::new(TurnState::default())),
+            preparing_turn_context: None,
+            phase: ActiveTurnPhase::Running,
         }
     }
 }
@@ -81,6 +91,35 @@ pub(crate) struct RunningTask {
     pub(crate) _agent_execution_guard: Option<AgentExecutionGuard>,
     // Timer recorded when the task drops to capture the full turn duration.
     pub(crate) _timer: Option<codex_otel::Timer>,
+}
+
+impl ActiveTurn {
+    pub(crate) fn preparing() -> Self {
+        Self {
+            phase: ActiveTurnPhase::Preparing,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn preparing_with_turn_state(turn_state: Arc<Mutex<TurnState>>) -> Self {
+        Self {
+            task: None,
+            turn_state,
+            preparing_turn_context: None,
+            phase: ActiveTurnPhase::Preparing,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_preparing(&self) -> bool {
+        self.phase == ActiveTurnPhase::Preparing
+    }
+
+    pub(crate) fn add_task(&mut self, task: RunningTask) {
+        self.phase = ActiveTurnPhase::Running;
+        self.preparing_turn_context = None;
+        self.task = Some(task);
+    }
 }
 
 /// Mutable state for a single turn.

@@ -368,9 +368,7 @@ fn terminate_process_on_network_denial(
     tokio::spawn(async move {
         let denied = tokio::select! {
             _ = network_cancelled.cancelled() => true,
-            _ = process_exited.cancelled() => {
-                wait_for_late_network_denial(Some(network_cancelled.clone())).await
-            }
+            _ = process_exited.cancelled() => wait_for_late_network_denial(Some(network_cancelled.clone())).await,
         };
         if !denied {
             return;
