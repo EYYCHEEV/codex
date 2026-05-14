@@ -34,6 +34,7 @@ use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::models::ActivePermissionProfile;
@@ -1106,12 +1107,33 @@ async fn user_shell_commands_do_not_inherit_managed_network_proxy() -> anyhow::R
         &permission_profile,
     )?;
 
+    let shell_home = tempfile::tempdir().expect("create shell home");
+    let shell_home_path = shell_home.path().display().to_string();
     let (session, rx) = make_session_with_config_and_rx(move |config| {
         config
             .permissions
             .set_permission_profile(permission_profile)
             .expect("test setup should allow permission profile");
         config.permissions.network = Some(network_spec);
+        config.permissions.shell_environment_policy.inherit = ShellEnvironmentPolicyInherit::Core;
+        config.permissions.shell_environment_policy.r#set.insert(
+            codex_network_proxy::PROXY_ACTIVE_ENV_KEY.to_string(),
+            "1".to_string(),
+        );
+        config.permissions.shell_environment_policy.r#set.insert(
+            "HTTP_PROXY".to_string(),
+            "http://127.0.0.1:7897".to_string(),
+        );
+        config
+            .permissions
+            .shell_environment_policy
+            .r#set
+            .insert("HOME".to_string(), shell_home_path.clone());
+        config
+            .permissions
+            .shell_environment_policy
+            .r#set
+            .insert("ZDOTDIR".to_string(), shell_home_path);
     })
     .await?;
 
@@ -8312,6 +8334,60 @@ async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
         sess.input_queue.get_pending_input(&sess.active_turn).await,
         vec![TurnInput::ResponseInputItem(queued_item)]
     );
+}
+
+#[tokio::test]
+async fn preparing_active_turn_accepts_injected_response_items() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let pending_item = ResponseInputItem::Message {
+        role: "assistant".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "queued while turn is preparing".to_string(),
+        }],
+        phase: None,
+    };
+    let turn_state = {
+        let mut active = sess.active_turn.lock().await;
+        let active_turn = ActiveTurn::preparing();
+        let turn_state = Arc::clone(&active_turn.turn_state);
+        *active = Some(active_turn);
+        turn_state
+    };
+
+    sess.inject_response_items(vec![pending_item.clone()])
+        .await
+        .expect("preparing turn should accept pending input");
+
+    assert_eq!(
+        turn_state.lock().await.take_pending_input(),
+        vec![pending_item]
+    );
+}
+
+#[tokio::test]
+async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let queued_item = ResponseInputItem::Message {
+        role: "assistant".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "queued before wake".to_string(),
+        }],
+        phase: None,
+    };
+    sess.queue_response_items_for_next_turn(vec![queued_item])
+        .await;
+    *sess.active_turn.lock().await = Some(ActiveTurn::preparing());
+
+    sess.maybe_start_turn_for_pending_work_with_sub_id("duplicate-wake".to_string())
+        .await;
+
+    {
+        let active = sess.active_turn.lock().await;
+        let active_turn = active.as_ref().expect("preparing turn should remain");
+        assert!(active_turn.is_preparing());
+        assert!(active_turn.task.is_none());
+    }
+    assert!(sess.has_queued_response_items_for_next_turn().await);
 }
 
 #[tokio::test]

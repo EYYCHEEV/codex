@@ -69,6 +69,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use dunce::canonicalize as normalize_path;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
@@ -922,7 +923,12 @@ async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
         "initial-access-token",
         Some("workspace-a"),
     );
-    let auth = match CodexAuth::from_auth_storage(codex_home.path(), AuthCredentialsStoreMode::File)
+    let auth = match CodexAuth::from_auth_storage(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        /*chatgpt_base_url*/ None,
+    )
+    .await
     {
         Ok(Some(auth)) => auth,
         Ok(None) => panic!("No CodexAuth found in codex_home"),
@@ -1071,7 +1077,9 @@ async fn send_responses_request(
 
     let mut saw_completed = false;
     while let Some(event) = stream.next().await {
-        if let ResponseEvent::Completed { .. } = event.expect("responses stream event should succeed") {
+        if let ResponseEvent::Completed { .. } =
+            event.expect("responses stream event should succeed")
+        {
             saw_completed = true;
             break;
         }
@@ -1699,7 +1707,7 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
         std::fs::create_dir_all(&skill_dir).expect("create skill dir");
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            format!("---\nname: s{index:02}\ndescription: d\n---\n\n# body\n"),
+            format!("---\nname: aa-s{index:02}\ndescription: d\n---\n\n# body\n"),
         )
         .expect("write skill");
     }
@@ -1738,7 +1746,12 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnComplete(_)),
+        tokio::time::Duration::from_secs(30),
+    )
+    .await;
 
     let request = resp_mock.single_request();
     let developer_messages = request.message_input_texts("developer");
@@ -1754,7 +1767,7 @@ async fn skills_use_aliases_in_developer_message_under_budget_pressure() {
         "expected root alias for {expected_root_str}: {developer_messages:?}"
     );
     assert!(
-        developer_text.contains("- s00: d (file: r0/s00/SKILL.md)"),
+        developer_text.contains("- aa-s00: (file: r0/s00/SKILL.md)"),
         "expected skill path to use root alias: {developer_messages:?}"
     );
     assert!(

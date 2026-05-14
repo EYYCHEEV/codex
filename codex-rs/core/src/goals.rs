@@ -833,10 +833,13 @@ impl Session {
 
     async fn active_turn_context(&self) -> Option<Arc<TurnContext>> {
         let active = self.active_turn.lock().await;
-        active
-            .as_ref()
-            .and_then(|active_turn| active_turn.task.as_ref())
-            .map(|task| Arc::clone(&task.turn_context))
+        active.as_ref().and_then(|active_turn| {
+            active_turn
+                .task
+                .as_ref()
+                .map(|task| Arc::clone(&task.turn_context))
+                .or_else(|| active_turn.preparing_turn_context.clone())
+        })
     }
 
     async fn mark_thread_goal_turn_started(

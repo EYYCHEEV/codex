@@ -319,6 +319,21 @@ impl Session {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();
+        let reserved_turn_state = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(active_turn) => {
+                    debug_assert!(active_turn.task.is_none());
+                    active_turn.preparing_turn_context = Some(Arc::clone(&turn_context));
+                    Arc::clone(&active_turn.turn_state)
+                }
+                None => {
+                    let active_turn = active.get_or_insert_with(ActiveTurn::preparing);
+                    active_turn.preparing_turn_context = Some(Arc::clone(&turn_context));
+                    Arc::clone(&active_turn.turn_state)
+                }
+            }
+        };
         let started_at = Instant::now();
         let turn_started_at_unix_ms = turn_context
             .turn_timing_state
@@ -352,12 +367,7 @@ impl Session {
             .take_queued_response_items_for_next_turn()
             .await;
         let mailbox_items = self.input_queue.get_pending_input(&self.active_turn).await;
-        let turn_state = {
-            let mut active = self.active_turn.lock().await;
-            let turn = active.get_or_insert_with(ActiveTurn::default);
-            debug_assert!(turn.task.is_none());
-            Arc::clone(&turn.turn_state)
-        };
+        let turn_state = Arc::clone(&reserved_turn_state);
         turn_state.lock().await.token_usage_at_turn_start = token_usage_at_turn_start.clone();
         let mut pending_items = queued_response_items
             .into_iter()
@@ -372,8 +382,12 @@ impl Session {
 
         let turn_extension_data = Arc::clone(&turn_context.extension_data);
         let mut active = self.active_turn.lock().await;
-        let turn = active.get_or_insert_with(ActiveTurn::default);
+        let turn = active.get_or_insert_with(|| {
+            ActiveTurn::preparing_with_turn_state(Arc::clone(&reserved_turn_state))
+        });
+        debug_assert!(Arc::ptr_eq(&turn.turn_state, &reserved_turn_state));
         debug_assert!(turn.task.is_none());
+        turn.preparing_turn_context = Some(Arc::clone(&turn_context));
         let done_clone = Arc::clone(&done);
         let session_ctx = Arc::new(SessionTaskContext::new(
             Arc::clone(self),
@@ -447,7 +461,7 @@ impl Session {
             turn_extension_data,
             _timer: timer,
         };
-        turn.task = Some(running_task);
+        turn.add_task(running_task);
     }
 
     /// Starts a regular turn when the session is idle and pending work is waiting.
@@ -485,7 +499,7 @@ impl Session {
             if active_turn.is_some() {
                 return;
             }
-            *active_turn = Some(ActiveTurn::default());
+            active_turn.get_or_insert_with(ActiveTurn::preparing);
         }
 
         let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
