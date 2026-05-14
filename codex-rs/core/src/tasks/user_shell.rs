@@ -134,15 +134,19 @@ pub(crate) async fn execute_user_shell_command(
         &turn_context.shell_environment_policy,
         Some(session.thread_id),
     );
-    if exec_env_map.contains_key(PROXY_ACTIVE_ENV_KEY) {
+    let mut shell_environment_overrides = turn_context.shell_environment_policy.r#set.clone();
+    if exec_env_map.contains_key(PROXY_ACTIVE_ENV_KEY)
+        || shell_environment_overrides.contains_key(PROXY_ACTIVE_ENV_KEY)
+    {
         strip_managed_proxy_env(&mut exec_env_map);
+        strip_managed_proxy_env(&mut shell_environment_overrides);
     }
     let exec_command = prepare_user_shell_exec_command(
         &display_command,
         session_shell.as_ref(),
         #[allow(deprecated)]
         &turn_context.cwd,
-        &turn_context.shell_environment_policy.r#set,
+        &shell_environment_overrides,
         &mut exec_env_map,
     );
 

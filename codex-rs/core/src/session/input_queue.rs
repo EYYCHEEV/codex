@@ -169,6 +169,32 @@ impl InputQueue {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
+    pub(crate) async fn inject_response_items(
+        &self,
+        active_turn: &Mutex<Option<ActiveTurn>>,
+        input: Vec<ResponseInputItem>,
+    ) -> Result<(), Vec<ResponseInputItem>> {
+        let mut active = active_turn.lock().await;
+        match active.as_mut() {
+            Some(active_turn) if active_turn.task.is_some() || active_turn.is_preparing() => {
+                self.extend_pending_input_for_turn_state(
+                    active_turn.turn_state.as_ref(),
+                    input
+                        .into_iter()
+                        .map(TurnInput::ResponseInputItem)
+                        .collect(),
+                )
+                .await;
+                Ok(())
+            }
+            Some(_) | None => Err(input),
+        }
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
     pub(crate) async fn get_pending_input(
         &self,
         active_turn: &Mutex<Option<ActiveTurn>>,

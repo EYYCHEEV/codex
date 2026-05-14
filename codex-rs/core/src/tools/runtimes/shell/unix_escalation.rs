@@ -127,7 +127,12 @@ pub(super) async fn try_run_zsh_fork(
         sandbox_permissions,
         ..req.clone()
     };
+    let sandbox_network =
+        managed_network_for_sandbox_permissions(req.network.as_ref(), req.sandbox_permissions);
     let mut env = exec_env_for_sandbox_permissions(&req.env, req.sandbox_permissions);
+    if let Some(network) = sandbox_network.as_ref() {
+        network.apply_to_env(&mut env);
+    }
     prepend_zsh_fork_bin_to_path(&mut env, shell_zsh_path);
     let command =
         build_sandbox_command(command, &req.cwd, &env, req.additional_permissions.clone())?;
@@ -136,11 +141,7 @@ pub(super) async fn try_run_zsh_fork(
         capture_policy: ExecCapturePolicy::ShellTool,
     };
     let sandbox_exec_request = attempt
-        .env_for(
-            command,
-            options,
-            managed_network_for_sandbox_permissions(req.network.as_ref(), req.sandbox_permissions),
-        )
+        .env_for(command, options, sandbox_network)
         .map_err(|err| ToolError::Codex(err.into()))?;
     let crate::sandboxing::ExecRequest {
         command,
@@ -804,6 +805,9 @@ impl ShellCommandExecutor for CoreShellCommandExecutor {
             if let Some(value) = env_overlay.get(var) {
                 exec_env.insert(var.to_string(), value.clone());
             }
+        }
+        if let Some(network) = self.network.as_ref() {
+            network.apply_to_env(&mut exec_env);
         }
 
         let result = crate::sandboxing::execute_exec_request_with_after_spawn(

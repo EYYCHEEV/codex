@@ -109,6 +109,8 @@ async fn exec_command_with_tty(
     );
     let context =
         UnifiedExecContext::new(Arc::clone(session), Arc::clone(turn), "call".to_string());
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    super::async_watcher::start_streaming_output(&process, &context, Arc::clone(&transcript));
     let started_at = Instant::now();
     let process_started_alive = !process.has_exited() && process.exit_code().is_none();
     if process_started_alive {
@@ -122,7 +124,7 @@ async fn exec_command_with_tty(
             command: command.clone(),
             hook_command: cmd.to_string(),
             cwd: cwd.clone(),
-            transcript: Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
+            transcript: Arc::clone(&transcript),
             started_at,
             tty,
             network_approval: None,
@@ -134,6 +136,17 @@ async fn exec_command_with_tty(
             .await
             .processes
             .insert(process_id, entry);
+        super::async_watcher::spawn_exit_watcher(
+            Arc::clone(&process),
+            Arc::clone(session),
+            Arc::clone(turn),
+            context.call_id.clone(),
+            command.clone(),
+            cwd.clone(),
+            process_id,
+            transcript,
+            started_at,
+        );
     }
 
     let OutputHandles {
