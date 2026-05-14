@@ -8,6 +8,7 @@ use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;
 use crate::compact::compaction_status_from_result;
+use crate::compact_remote::estimate_model_visible_tool_tokens;
 use crate::compact_remote::process_compacted_history;
 use crate::compact_remote::should_keep_compacted_history_item;
 use crate::compact_remote::trim_function_call_history_to_fit_context_window;
@@ -200,11 +201,19 @@ async fn run_remote_compact_task_inner_impl(
 
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
+    let tools = built_tools(
+        sess.as_ref(),
+        turn_context.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await?
+    .model_visible_specs();
     let (rewritten_outputs, estimated_deleted_tokens) =
         trim_function_call_history_to_fit_context_window(
             &mut history,
             turn_context.as_ref(),
             &base_instructions,
+            estimate_model_visible_tool_tokens(&tools),
         );
     if rewritten_outputs > 0 {
         info!(
@@ -227,17 +236,11 @@ async fn run_remote_compact_task_inner_impl(
 
     let trace_input_history = history.raw_items().to_vec();
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = built_tools(
-        sess.as_ref(),
-        turn_context.as_ref(),
-        &CancellationToken::new(),
-    )
-    .await?;
     let mut input = prompt_input.clone();
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
         input,
-        tools: tool_router.model_visible_specs(),
+        tools,
         parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
         base_instructions,
         output_schema: None,
