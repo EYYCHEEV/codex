@@ -758,7 +758,9 @@ impl MessageProcessor {
         outgoing
             .register_request_context(request_context.clone())
             .await;
-        request_fut.instrument(request_context.span()).await;
+        Box::pin(request_fut)
+            .instrument(request_context.span())
+            .await;
     }
 
     pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
