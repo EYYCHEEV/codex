@@ -1256,6 +1256,10 @@ mod tests {
         }
     }
 
+    fn handler() -> ConfiguredHandler {
+        canonical_handler()
+    }
+
     fn legacy_handler(on_failure: HookFailurePolicy) -> ConfiguredHandler {
         ConfiguredHandler {
             event_name: HookEventName::PreToolUse,
