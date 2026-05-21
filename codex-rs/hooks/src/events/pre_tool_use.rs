@@ -1124,6 +1124,8 @@ mod tests {
             PreToolUseHandlerData {
                 should_block: true,
                 block_reason: Some("legacy ask should still block".to_string()),
+                additional_contexts_for_model: Vec::new(),
+                updated_input: None,
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -1144,6 +1146,8 @@ mod tests {
                 block_reason: Some(
                     "Hook failed (fail-closed): Hook failed: legacy hook exploded".to_string()
                 ),
+                additional_contexts_for_model: Vec::new(),
+                updated_input: None,
             }
         );
         assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
@@ -1228,6 +1232,10 @@ mod tests {
             display_order: 0,
             env: std::collections::HashMap::new(),
         }
+    }
+
+    fn handler() -> ConfiguredHandler {
+        canonical_handler()
     }
 
     fn legacy_handler(on_failure: HookFailurePolicy) -> ConfiguredHandler {
