@@ -690,7 +690,9 @@ impl MessageProcessor {
         outgoing
             .register_request_context(request_context.clone())
             .await;
-        request_fut.instrument(request_context.span()).await;
+        Box::pin(request_fut)
+            .instrument(request_context.span())
+            .await;
     }
 
     pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
@@ -879,15 +881,14 @@ impl MessageProcessor {
             rpc_gate,
             async move {
                 let processor_for_request = Arc::clone(&processor);
-                let result = processor_for_request
-                    .handle_initialized_client_request(
-                        connection_request_id,
-                        codex_request,
-                        request_context,
-                        app_server_client_name,
-                        client_version,
-                    )
-                    .await;
+                let result = Box::pin(processor_for_request.handle_initialized_client_request(
+                    connection_request_id,
+                    codex_request,
+                    request_context,
+                    app_server_client_name,
+                    client_version,
+                ))
+                .await;
                 if let Err(error) = result {
                     processor.outgoing.send_error(error_request_id, error).await;
                 }
