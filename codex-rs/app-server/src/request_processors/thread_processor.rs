@@ -372,13 +372,13 @@ impl ThreadRequestProcessor {
         app_server_client_version: Option<String>,
         request_context: RequestContext,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_start_inner(
+        Box::pin(self.thread_start_inner(
             request_id,
             params,
             app_server_client_name,
             app_server_client_version,
             request_context,
-        )
+        ))
         .await
         .map(|()| None)
     }
@@ -867,7 +867,7 @@ impl ThreadRequestProcessor {
         let config_manager = self.config_manager.clone();
         let outgoing = Arc::clone(&listener_task_context.outgoing);
         let error_request_id = request_id.clone();
-        let thread_start_task = async move {
+        let thread_start_task = Box::pin(async move {
             if let Err(error) = Self::thread_start_task(
                 listener_task_context,
                 config_manager,
@@ -888,7 +888,7 @@ impl ThreadRequestProcessor {
             {
                 outgoing.send_error(error_request_id, error).await;
             }
-        };
+        });
         self.background_tasks
             .spawn(thread_start_task.instrument(request_context.span()));
         Ok(())
