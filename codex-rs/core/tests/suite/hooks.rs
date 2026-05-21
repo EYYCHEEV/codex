@@ -60,6 +60,7 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::test_target_os;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::sync::Arc;
@@ -603,6 +604,7 @@ fn local_shell_event(
     timeout_ms: u64,
     sandbox_permissions: SandboxPermissions,
 ) -> Result<Value> {
+    let command = shlex_join(&command);
     let mut args = serde_json::json!({
         "command": command,
         "timeout_ms": timeout_ms,
@@ -611,7 +613,7 @@ fn local_shell_event(
         args["sandbox_permissions"] = serde_json::json!(sandbox_permissions);
     }
     let args_str = serde_json::to_string(&args)?;
-    Ok(ev_function_call(call_id, "shell", &args_str))
+    Ok(ev_function_call(call_id, "shell_command", &args_str))
 }
 
 fn write_permission_request_hook(
@@ -2412,9 +2414,11 @@ async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt() -> Resu
         })
         .await?;
 
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::AgentMessageContentDelta(_))
-    })
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::AgentMessageContentDelta(_)),
+        Duration::from_secs(30),
+    )
     .await;
 
     for text in ["accepted queued prompt", "blocked queued prompt"] {
