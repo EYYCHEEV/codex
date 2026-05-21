@@ -254,7 +254,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
             permission_mode: "default".to_string(),
             tool_name: "Bash".to_string(),
             matcher_aliases: Vec::new(),
-        allow_canonical_handlers: true,
+            allow_canonical_handlers: true,
             tool_use_id: "tool-1".to_string(),
             tool_input: serde_json::json!({ "command": "echo hello" }),
         })
@@ -328,7 +328,7 @@ async fn requirements_managed_hooks_execute_windows_command_override() {
             permission_mode: "default".to_string(),
             tool_name: "Bash".to_string(),
             matcher_aliases: Vec::new(),
-        allow_canonical_handlers: true,
+            allow_canonical_handlers: true,
             tool_use_id: "tool-1".to_string(),
             tool_input: serde_json::json!({ "command": "echo hello" }),
         })
@@ -1271,7 +1271,7 @@ print(json.dumps({
             permission_mode: "default".to_string(),
             tool_name: "Bash".to_string(),
             matcher_aliases: Vec::new(),
-        allow_canonical_handlers: true,
+            allow_canonical_handlers: true,
             tool_use_id: "tool-1".to_string(),
             tool_input: serde_json::json!({ "command": "echo hello" }),
         })
