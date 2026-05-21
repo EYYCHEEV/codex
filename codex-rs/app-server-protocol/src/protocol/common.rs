@@ -116,6 +116,27 @@ macro_rules! experimental_type_entry {
     };
 }
 
+fn method_name_from_variant(variant: &str) -> String {
+    let mut chars = variant.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+
+    let mut method = String::with_capacity(variant.len());
+    method.extend(first.to_lowercase());
+    method.push_str(chars.as_str());
+    method
+}
+
+macro_rules! protocol_method_name {
+    ($variant:ident, $wire:literal) => {
+        $wire.to_string()
+    };
+    ($variant:ident) => {
+        method_name_from_variant(stringify!($variant))
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientRequestSerializationScope {
     Global(&'static str),
@@ -1337,15 +1358,9 @@ macro_rules! server_request_definitions {
             }
 
             pub fn method(&self) -> String {
-                serde_json::to_value(self)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("method")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| "<unknown>".to_string())
+                match self {
+                    $(Self::$variant { .. } => protocol_method_name!($variant $(, $wire)?),)*
+                }
             }
         }
 
@@ -2855,6 +2870,16 @@ mod tests {
             serde_json::to_value(&request)?,
         );
         Ok(())
+    }
+
+    #[test]
+    fn client_request_method_uses_wire_name_without_payload_serialization() {
+        let request = ClientRequest::ThreadStart {
+            request_id: RequestId::Integer(1),
+            params: v2::ThreadStartParams::default(),
+        };
+
+        assert_eq!(request.method_name(), "thread/start");
     }
 
     #[test]
