@@ -838,25 +838,47 @@ impl MessageProcessor {
         let rpc_gate = Arc::clone(&session.rpc_gate);
         let processor = Arc::clone(self);
         let span = request_context.span();
-        let request = QueuedInitializedRequest::new(
-            rpc_gate,
-            async move {
-                let processor_for_request = Arc::clone(&processor);
-                let result = Box::pin(processor_for_request.handle_initialized_client_request(
-                    connection_request_id,
-                    codex_request,
-                    request_context,
-                    app_server_client_name,
-                    client_version,
-                    client_mcp_extensions,
-                ))
-                .await;
-                if let Err(error) = result {
-                    processor.outgoing.send_error(error_request_id, error).await;
+        let request = match codex_request {
+            ClientRequest::ThreadStart { params, .. } => QueuedInitializedRequest::new(
+                rpc_gate,
+                async move {
+                    let result = processor
+                        .thread_processor
+                        .thread_start(
+                            connection_request_id,
+                            params,
+                            app_server_client_name,
+                            client_version,
+                            client_mcp_extensions,
+                            request_context,
+                        )
+                        .await;
+                    if let Err(error) = result {
+                        processor.outgoing.send_error(error_request_id, error).await;
+                    }
                 }
-            }
-            .instrument(span),
-        );
+                .instrument(span),
+            ),
+            codex_request => QueuedInitializedRequest::new(
+                rpc_gate,
+                async move {
+                    let processor_for_request = Arc::clone(&processor);
+                    let result = Box::pin(processor_for_request.handle_initialized_client_request(
+                        connection_request_id,
+                        codex_request,
+                        request_context,
+                        app_server_client_name,
+                        client_version,
+                        client_mcp_extensions,
+                    ))
+                    .await;
+                    if let Err(error) = result {
+                        processor.outgoing.send_error(error_request_id, error).await;
+                    }
+                }
+                .instrument(span),
+            ),
+        };
 
         if let Some(scope) = serialization_scope {
             let (key, access) = RequestSerializationQueueKey::from_scope(connection_id, scope);
