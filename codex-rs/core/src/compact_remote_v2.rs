@@ -185,9 +185,13 @@ async fn run_remote_compact_task_inner_impl(
 
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
-    let tools = built_tools(sess.as_ref(), turn_context.as_ref(), &CancellationToken::new())
-        .await?
-        .model_visible_specs();
+    let tools = built_tools(
+        sess.as_ref(),
+        turn_context.as_ref(),
+        &CancellationToken::new(),
+    )
+    .await?
+    .model_visible_specs();
     let deleted_items = trim_function_call_history_to_fit_context_window(
         &mut history,
         turn_context.as_ref(),
