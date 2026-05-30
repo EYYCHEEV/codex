@@ -4566,7 +4566,7 @@ async fn pre_tool_use_blocks_local_function_tool_before_execution() -> Result<()
         .expect("blocked local function tool output string");
     assert!(
         output.contains(&format!(
-            "Tool call blocked by PreToolUse hook: {reason}. Tool: test_sync_tool"
+            "Tool blocked by PreToolUse hook: {reason}. Tool: test_sync_tool"
         )),
         "blocked local function output should surface the hook reason and tool name",
     );
