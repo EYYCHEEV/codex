@@ -348,7 +348,7 @@ where
     use tokio::time::timeout;
     loop {
         // Allow enough time for hook-heavy integration tests under local load.
-        let ev = timeout(wait_time.max(Duration::from_secs(30)), codex.next_event())
+        let ev = timeout(wait_time.max(Duration::from_secs(120)), codex.next_event())
             .await
             .expect("timeout waiting for event")
             .expect("stream ended unexpectedly");
