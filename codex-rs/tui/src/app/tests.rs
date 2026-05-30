@@ -1163,6 +1163,7 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 model: None,
                 reasoning_effort: None,
                 agents_states: HashMap::new(),
+                agents_metadata: HashMap::new(),
             },
         }),
     ));
@@ -1206,6 +1207,7 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                         message: None,
                     },
                 )]),
+                agents_metadata: HashMap::new(),
             },
         }),
     ));
@@ -5414,6 +5416,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                             model: None,
                             reasoning_effort: None,
                             agents_states: HashMap::new(),
+                            agents_metadata: HashMap::new(),
                         },
                     },
                 ),
