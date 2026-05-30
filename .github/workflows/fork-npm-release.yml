@@ -111,7 +111,13 @@ jobs:
           fi
 
       - name: Update npm
-        run: npm install -g npm@latest
+        run: |
+          set -euo pipefail
+          npm_prefix="${RUNNER_TEMP}/npm-global"
+          mkdir -p "${npm_prefix}"
+          npm config set prefix "${npm_prefix}"
+          echo "${npm_prefix}/bin" >> "${GITHUB_PATH}"
+          npm install -g npm@latest
 
       - name: Download npm tarballs from release
         env:
