@@ -51,6 +51,7 @@ export type { ChatgptAuthTokensRefreshParams } from "./ChatgptAuthTokensRefreshP
 export type { ChatgptAuthTokensRefreshReason } from "./ChatgptAuthTokensRefreshReason";
 export type { ChatgptAuthTokensRefreshResponse } from "./ChatgptAuthTokensRefreshResponse";
 export type { CodexErrorInfo } from "./CodexErrorInfo";
+export type { CollabAgentMetadata } from "./CollabAgentMetadata";
 export type { CollabAgentState } from "./CollabAgentState";
 export type { CollabAgentStatus } from "./CollabAgentStatus";
 export type { CollabAgentTool } from "./CollabAgentTool";
@@ -350,6 +351,7 @@ export type { ProcessExitedNotification } from "./ProcessExitedNotification";
 export type { ProcessOutputDeltaNotification } from "./ProcessOutputDeltaNotification";
 export type { ProcessOutputStream } from "./ProcessOutputStream";
 export type { ProcessTerminalSize } from "./ProcessTerminalSize";
+export type { ProfileV2 } from "./ProfileV2";
 export type { RateLimitReachedType } from "./RateLimitReachedType";
 export type { RateLimitResetCredit } from "./RateLimitResetCredit";
 export type { RateLimitResetCreditStatus } from "./RateLimitResetCreditStatus";

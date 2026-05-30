@@ -359,6 +359,9 @@ pub enum ThreadItem {
         reasoning_effort: Option<ReasoningEffort>,
         /// Last known status of the target agents, when available.
         agents_states: HashMap<String, CollabAgentState>,
+        /// Human-friendly metadata for target agents, keyed by receiver thread ID.
+        #[serde(default)]
+        agents_metadata: HashMap<String, CollabAgentMetadata>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -893,6 +896,7 @@ impl From<CoreTurnItem> for ThreadItem {
                     .into_iter()
                     .map(|(thread_id, status)| (thread_id.to_string(), status.into()))
                     .collect(),
+                agents_metadata: HashMap::new(),
             },
             CoreTurnItem::SubAgentActivity(activity) => ThreadItem::SubAgentActivity {
                 id: activity.id,
@@ -1193,6 +1197,16 @@ pub enum CollabAgentStatus {
 pub struct CollabAgentState {
     pub status: CollabAgentStatus,
     pub message: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct CollabAgentMetadata {
+    #[serde(default)]
+    pub agent_nickname: Option<String>,
+    #[serde(default)]
+    pub agent_role: Option<String>,
 }
 
 impl From<CoreAgentStatus> for CollabAgentState {

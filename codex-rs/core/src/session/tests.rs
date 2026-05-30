@@ -10625,7 +10625,8 @@ async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
         }],
         phase: None,
     };
-    sess.queue_response_items_for_next_turn(vec![queued_item])
+    sess.input_queue
+        .queue_response_items_for_next_turn(vec![queued_item])
         .await;
     *sess.active_turn.lock().await = Some(ActiveTurn::preparing());
 
@@ -10638,7 +10639,11 @@ async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
         assert!(active_turn.is_preparing());
         assert!(active_turn.task.is_none());
     }
-    assert!(sess.has_queued_response_items_for_next_turn().await);
+    assert!(
+        sess.input_queue
+            .has_queued_response_items_for_next_turn()
+            .await
+    );
 }
 
 #[tokio::test]

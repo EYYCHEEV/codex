@@ -162,6 +162,25 @@
         }
       ]
     },
+    "CollabAgentMetadata": {
+      "properties": {
+        "agentNickname": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentRole": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "CollabAgentState": {
       "properties": {
         "message": {
@@ -1144,6 +1163,14 @@
         },
         {
           "properties": {
+            "agentsMetadata": {
+              "additionalProperties": {
+                "$ref": "#/definitions/CollabAgentMetadata"
+              },
+              "default": {},
+              "description": "Human-friendly metadata for target agents, keyed by receiver thread ID.",
+              "type": "object"
+            },
             "agentsStates": {
               "additionalProperties": {
                 "$ref": "#/definitions/CollabAgentState"
