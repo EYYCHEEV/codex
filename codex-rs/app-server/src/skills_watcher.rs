@@ -41,6 +41,9 @@ impl SkillsWatcher {
         codex_home: &AbsolutePathBuf,
         outgoing: Arc<OutgoingMessageSender>,
     ) -> Arc<Self> {
+        #[cfg(test)]
+        let file_watcher = Arc::new(FileWatcher::noop());
+        #[cfg(not(test))]
         let file_watcher = match FileWatcher::new() {
             Ok(file_watcher) => Arc::new(file_watcher),
             Err(err) => {
