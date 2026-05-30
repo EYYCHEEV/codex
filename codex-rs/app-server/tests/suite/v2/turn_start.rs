@@ -3301,6 +3301,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             model: Some(REQUESTED_MODEL.to_string()),
             reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
             agents_states: HashMap::new(),
+            agents_metadata: HashMap::new(),
         }
     );
 
@@ -3329,6 +3330,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         model,
         reasoning_effort,
         agents_states,
+        agents_metadata,
     } = spawn_completed
     else {
         unreachable!("loop ensures we break on collab agent tool call items");
@@ -3345,6 +3347,17 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
     assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
     assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
+    let agent_metadata = agents_metadata
+        .get(&receiver_thread_id)
+        .expect("spawn completion should include child agent metadata");
+    assert!(
+        agent_metadata
+            .agent_nickname
+            .as_deref()
+            .is_some_and(|nickname| !nickname.is_empty()),
+        "child agent metadata should include a nickname"
+    );
+    assert_eq!(agent_metadata.agent_role, None);
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");
@@ -3690,6 +3703,7 @@ config_file = "./custom-role.toml"
         model,
         reasoning_effort,
         agents_states,
+        agents_metadata,
     } = spawn_completed
     else {
         unreachable!("loop ensures we break on collab agent tool call items");
@@ -3706,6 +3720,17 @@ config_file = "./custom-role.toml"
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
     assert_eq!(model, Some(ROLE_MODEL.to_string()));
     assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
+    let agent_metadata = agents_metadata
+        .get(&receiver_thread_id)
+        .expect("spawn completion should include child agent metadata");
+    assert!(
+        agent_metadata
+            .agent_nickname
+            .as_deref()
+            .is_some_and(|nickname| !nickname.is_empty()),
+        "child agent metadata should include a nickname"
+    );
+    assert_eq!(agent_metadata.agent_role.as_deref(), Some("custom"));
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");
