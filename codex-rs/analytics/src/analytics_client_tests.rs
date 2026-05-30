@@ -3694,6 +3694,7 @@ async fn turn_event_counts_completed_tool_items() {
             model: Some("gpt-5".to_string()),
             reasoning_effort: None,
             agents_states: Default::default(),
+            agents_metadata: Default::default(),
         },
         ThreadItem::WebSearch {
             id: "web-1".to_string(),
