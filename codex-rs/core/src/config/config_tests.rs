@@ -6079,29 +6079,34 @@ async fn unselected_profile_sandbox_mode_is_ignored() -> std::io::Result<()> {
 #[tokio::test]
 async fn profile_model_token_limits_override_root_values() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-    let mut profiles = HashMap::new();
-    profiles.insert(
-        "work".to_string(),
-        ConfigProfile {
-            model_context_window: Some(111_111),
-            model_auto_compact_token_limit: Some(88_888),
-            ..Default::default()
-        },
-    );
-    let cfg = ConfigToml {
-        model_context_window: Some(222_222),
-        model_auto_compact_token_limit: Some(99_999),
-        profiles,
-        profile: Some("work".to_string()),
-        ..Default::default()
-    };
-
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
+    let base_config = codex_home.path().join(CONFIG_TOML_FILE);
+    let selected_config = codex_home.path().join("work.config.toml");
+    tokio::fs::write(
+        &base_config,
+        r#"
+model_context_window = 222222
+model_auto_compact_token_limit = 99999
+"#,
     )
     .await?;
+    tokio::fs::write(
+        &selected_config,
+        r#"
+model_context_window = 111111
+model_auto_compact_token_limit = 88888
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(selected_config.abs()),
+            user_config_profile: Some("work".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await?;
 
     assert_eq!(
         (
@@ -6117,22 +6122,27 @@ async fn profile_model_token_limits_override_root_values() -> std::io::Result<()
 #[tokio::test]
 async fn root_model_token_limits_apply_when_profile_values_are_absent() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
-    let mut profiles = HashMap::new();
-    profiles.insert("work".to_string(), ConfigProfile::default());
-    let cfg = ConfigToml {
-        model_context_window: Some(222_222),
-        model_auto_compact_token_limit: Some(99_999),
-        profiles,
-        profile: Some("work".to_string()),
-        ..Default::default()
-    };
-
-    let config = Config::load_from_base_config_with_overrides(
-        cfg,
-        ConfigOverrides::default(),
-        codex_home.abs(),
+    let base_config = codex_home.path().join(CONFIG_TOML_FILE);
+    let selected_config = codex_home.path().join("work.config.toml");
+    tokio::fs::write(
+        &base_config,
+        r#"
+model_context_window = 222222
+model_auto_compact_token_limit = 99999
+"#,
     )
     .await?;
+    tokio::fs::write(&selected_config, "").await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .loader_overrides(LoaderOverrides {
+            user_config_path: Some(selected_config.abs()),
+            user_config_profile: Some("work".parse().expect("profile-v2 name")),
+            ..LoaderOverrides::without_managed_config_for_tests()
+        })
+        .build()
+        .await?;
 
     assert_eq!(
         (

@@ -436,11 +436,6 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let sender_thread_id = ThreadId::new();
     let spawned_thread_id = ThreadId::new();
-    chat.set_collab_agent_metadata(
-        spawned_thread_id,
-        Some("Robie".to_string()),
-        Some("explorer".to_string()),
-    );
 
     chat.handle_server_notification(
         ServerNotification::ItemStarted(ItemStartedNotification {
@@ -457,6 +452,7 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 agents_states: HashMap::new(),
+                agents_metadata: HashMap::new(),
             },
         }),
         /*replay_kind*/ None,
@@ -480,6 +476,13 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                     AppServerCollabAgentState {
                         status: AppServerCollabAgentStatus::PendingInit,
                         message: None,
+                    },
+                )]),
+                agents_metadata: HashMap::from([(
+                    spawned_thread_id.to_string(),
+                    AppServerCollabAgentMetadata {
+                        agent_nickname: Some("Robie".to_string()),
+                        agent_role: Some("explorer".to_string()),
                     },
                 )]),
             },
@@ -920,16 +923,6 @@ async fn live_app_server_collab_wait_items_render_history() {
         ThreadId::from_string("019cff70-2599-75e2-af72-b958ce5dc1cc").expect("valid thread id");
     let other_receiver_thread_id =
         ThreadId::from_string("019cff70-2599-75e2-af72-b96db334332d").expect("valid thread id");
-    chat.set_collab_agent_metadata(
-        receiver_thread_id,
-        Some("Robie".to_string()),
-        Some("explorer".to_string()),
-    );
-    chat.set_collab_agent_metadata(
-        other_receiver_thread_id,
-        Some("Ada".to_string()),
-        Some("reviewer".to_string()),
-    );
 
     chat.handle_server_notification(
         ServerNotification::ItemStarted(ItemStartedNotification {
@@ -949,6 +942,22 @@ async fn live_app_server_collab_wait_items_render_history() {
                 model: None,
                 reasoning_effort: None,
                 agents_states: HashMap::new(),
+                agents_metadata: HashMap::from([
+                    (
+                        receiver_thread_id.to_string(),
+                        AppServerCollabAgentMetadata {
+                            agent_nickname: Some("Robie".to_string()),
+                            agent_role: Some("explorer".to_string()),
+                        },
+                    ),
+                    (
+                        other_receiver_thread_id.to_string(),
+                        AppServerCollabAgentMetadata {
+                            agent_nickname: Some("Ada".to_string()),
+                            agent_role: Some("reviewer".to_string()),
+                        },
+                    ),
+                ]),
             },
         }),
         /*replay_kind*/ None,
@@ -984,6 +993,22 @@ async fn live_app_server_collab_wait_items_render_history() {
                         AppServerCollabAgentState {
                             status: AppServerCollabAgentStatus::Running,
                             message: None,
+                        },
+                    ),
+                ]),
+                agents_metadata: HashMap::from([
+                    (
+                        receiver_thread_id.to_string(),
+                        AppServerCollabAgentMetadata {
+                            agent_nickname: Some("Robie".to_string()),
+                            agent_role: Some("explorer".to_string()),
+                        },
+                    ),
+                    (
+                        other_receiver_thread_id.to_string(),
+                        AppServerCollabAgentMetadata {
+                            agent_nickname: Some("Ada".to_string()),
+                            agent_role: Some("reviewer".to_string()),
                         },
                     ),
                 ]),
@@ -1023,6 +1048,7 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 agents_states: HashMap::new(),
+                agents_metadata: HashMap::new(),
             },
         }),
         /*replay_kind*/ None,
@@ -1047,6 +1073,13 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                     AppServerCollabAgentState {
                         status: AppServerCollabAgentStatus::PendingInit,
                         message: None,
+                    },
+                )]),
+                agents_metadata: HashMap::from([(
+                    spawned_thread_id.to_string(),
+                    AppServerCollabAgentMetadata {
+                        agent_nickname: Some("Robie".to_string()),
+                        agent_role: Some("explorer".to_string()),
                     },
                 )]),
             },

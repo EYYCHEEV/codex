@@ -945,25 +945,25 @@ fn token_usage_info_from_app_server(token_usage: ThreadTokenUsage) -> TokenUsage
 }
 
 impl ChatWidget {
-    /// Stores or overwrites the cached nickname and role for a collab agent thread.
+    /// Merges the cached nickname and role for a collab agent thread.
     ///
     /// Called by `App::upsert_agent_picker_thread` and `App::replace_chat_widget` to keep the
     /// rendering metadata in sync with the navigation cache. Must be called before any
-    /// notification referencing this thread is processed, otherwise the rendered item will fall
-    /// back to showing the raw thread id.
+    /// notification referencing this thread is processed, otherwise the rendered item falls back
+    /// to item-level metadata or the raw thread id.
     pub(crate) fn set_collab_agent_metadata(
         &mut self,
         thread_id: ThreadId,
         agent_nickname: Option<String>,
         agent_role: Option<String>,
     ) {
-        self.collab_agent_metadata.insert(
-            thread_id,
-            AgentMetadata {
-                agent_nickname,
-                agent_role,
-            },
-        );
+        let entry = self.collab_agent_metadata.entry(thread_id).or_default();
+        if agent_nickname.is_some() {
+            entry.agent_nickname = agent_nickname;
+        }
+        if agent_role.is_some() {
+            entry.agent_role = agent_role;
+        }
     }
 
     /// Returns the cached metadata for a thread, defaulting to empty if none has been registered.
