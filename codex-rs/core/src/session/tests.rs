@@ -9107,8 +9107,10 @@ async fn preparing_active_turn_accepts_injected_response_items() {
         .expect("preparing turn should accept pending input");
 
     assert_eq!(
-        turn_state.lock().await.take_pending_input(),
-        vec![pending_item]
+        sess.input_queue
+            .take_pending_input_for_turn_state(turn_state.as_ref())
+            .await,
+        vec![TurnInput::ResponseInputItem(pending_item)]
     );
 }
 
@@ -9122,7 +9124,8 @@ async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
         }],
         phase: None,
     };
-    sess.queue_response_items_for_next_turn(vec![queued_item])
+    sess.input_queue
+        .queue_response_items_for_next_turn(vec![queued_item])
         .await;
     *sess.active_turn.lock().await = Some(ActiveTurn::preparing());
 
@@ -9135,7 +9138,11 @@ async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
         assert!(active_turn.is_preparing());
         assert!(active_turn.task.is_none());
     }
-    assert!(sess.has_queued_response_items_for_next_turn().await);
+    assert!(
+        sess.input_queue
+            .has_queued_response_items_for_next_turn()
+            .await
+    );
 }
 
 #[tokio::test]
