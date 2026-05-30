@@ -304,6 +304,7 @@ impl ChatWidget {
                 model,
                 reasoning_effort,
                 agents_states,
+                agents_metadata,
             } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
                 id,
                 tool,
@@ -314,6 +315,7 @@ impl ChatWidget {
                 model,
                 reasoning_effort,
                 agents_states,
+                agents_metadata,
             }),
             item @ ThreadItem::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
             ThreadItem::EnteredReviewMode { review, .. } if !from_replay => {
