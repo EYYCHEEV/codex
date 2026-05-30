@@ -93,14 +93,22 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://github.com/${GITHUB_REPOSITORY}.git" repo
+          git -C repo fetch --depth 1 origin "${GITHUB_SHA}"
+          git -C repo checkout --detach "${GITHUB_SHA}"
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-          scope: ${{ needs.metadata.outputs.npm_scope }}
+      - name: Configure npm registry
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          npm config set registry https://registry.npmjs.org
+          npm config set "${{ needs.metadata.outputs.npm_scope }}:registry" https://registry.npmjs.org
+          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
+            printf '//registry.npmjs.org/:_authToken=%s\n' "${NODE_AUTH_TOKEN}" > ~/.npmrc
+          fi
 
       - name: Update npm
         run: npm install -g npm@latest
@@ -122,8 +130,9 @@ jobs:
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
           NPM_TAG: ${{ needs.metadata.outputs.npm_tag }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          python3 ./scripts/publish_npm_packages.py \
+          python3 ./repo/scripts/publish_npm_packages.py \
             --dir dist/npm \
             --version "${VERSION}" \
             --npm-tag "${NPM_TAG}"
