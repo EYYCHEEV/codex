@@ -305,6 +305,21 @@ async fn code_mode_wait_does_not_expose_default_hook_payloads() {
 }
 
 #[tokio::test]
+async fn update_plan_does_not_expose_default_pre_tool_use_payload() {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+
+    let update_plan = crate::tools::handlers::PlanHandler;
+    let invocation = test_invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "update-plan-call",
+        update_plan.tool_name(),
+    );
+
+    assert_eq!(update_plan.pre_tool_use_payload(&invocation), None);
+}
+
+#[tokio::test]
 async fn write_stdin_does_not_expose_default_pre_tool_use_payload() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
 
