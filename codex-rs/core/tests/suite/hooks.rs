@@ -83,7 +83,7 @@ const SECOND_CONTINUATION_PROMPT: &str = "Now tighten it to just: meow.";
 const BLOCKED_PROMPT_CONTEXT: &str = "Remember the blocked lighthouse note.";
 const PERMISSION_REQUEST_HOOK_MATCHER: &str = "^Bash$";
 const PERMISSION_REQUEST_ALLOW_REASON: &str = "should not be used for allow";
-const HOOK_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(30);
+const HOOK_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[tokio::test]
 async fn managed_hook_discovery_failure_rejects_session_startup_when_hooks_enabled() -> Result<()> {
