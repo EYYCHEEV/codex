@@ -38,6 +38,9 @@ impl SkillsWatcher {
         skills_service: Arc<SkillsService>,
         outgoing: Arc<OutgoingMessageSender>,
     ) -> Arc<Self> {
+        #[cfg(test)]
+        let file_watcher = Arc::new(FileWatcher::noop());
+        #[cfg(not(test))]
         let file_watcher = match FileWatcher::new() {
             Ok(file_watcher) => Arc::new(file_watcher),
             Err(err) => {
