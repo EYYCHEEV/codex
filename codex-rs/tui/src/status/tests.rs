@@ -186,6 +186,23 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
 }
 
 fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
+    fn sanitize_version(line: String) -> String {
+        let Some(prefix_len) = line
+            .find("OpenAI Codex (v")
+            .map(|idx| idx + "OpenAI Codex (v".len())
+        else {
+            return line;
+        };
+        if let Some(relative_end) = line[prefix_len..].find(')') {
+            let version_end = prefix_len + relative_end;
+            let mut sanitized = line;
+            sanitized.replace_range(prefix_len..version_end, "0.0.0");
+            sanitized
+        } else {
+            line
+        }
+    }
+
     lines
         .into_iter()
         .map(|line| {
@@ -193,7 +210,7 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
                 let padding = &value[..value.len() - value.trim_start().len()];
                 format!("{prefix}Directory:{padding}[[workspace]]")
             } else {
-                line
+                sanitize_version(line)
             }
         })
         .collect()

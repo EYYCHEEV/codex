@@ -92,6 +92,7 @@ pub(crate) const MAX_EXEC_OUTPUT_DELTAS_PER_CALL: usize = 10_000;
 // That would cause the `read_capped` tasks to block on `read()`
 // indefinitely, effectively hanging the whole agent.
 pub const IO_DRAIN_TIMEOUT_MS: u64 = 2_000; // 2 s should be plenty for local pipes
+const TIMED_OUT_IO_DRAIN_TIMEOUT_MS: u64 = 50;
 
 #[derive(Debug)]
 pub struct ExecParams {
@@ -1175,8 +1176,13 @@ async fn consume_output(
             }
         }
     } else {
-        let stdout = await_output(&mut stdout_handle, capture_policy.io_drain_timeout()).await?;
-        let stderr = await_output(&mut stderr_handle, capture_policy.io_drain_timeout()).await?;
+        let io_drain_timeout = if timed_out {
+            Duration::from_millis(TIMED_OUT_IO_DRAIN_TIMEOUT_MS)
+        } else {
+            capture_policy.io_drain_timeout()
+        };
+        let stdout = await_output(&mut stdout_handle, io_drain_timeout).await?;
+        let stderr = await_output(&mut stderr_handle, io_drain_timeout).await?;
         (stdout, stderr)
     };
     let aggregated_output = aggregate_output(&stdout, &stderr, retained_bytes_cap);
