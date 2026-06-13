@@ -174,6 +174,7 @@ fn mcp_startup_status_updated_emits_update_event() {
 
     let collected = processor.collect_thread_events(ServerNotification::McpServerStatusUpdated(
         McpServerStatusUpdatedNotification {
+            thread_id: None,
             name: "smoke".to_string(),
             status: McpServerStartupState::Starting,
             error: None,
@@ -200,6 +201,7 @@ fn terminal_mcp_startup_status_emits_aggregate_complete_event() {
 
     let collected = processor.collect_thread_events(ServerNotification::McpServerStatusUpdated(
         McpServerStatusUpdatedNotification {
+            thread_id: None,
             name: "smoke".to_string(),
             status: McpServerStartupState::Failed,
             error: Some("boom".to_string()),
