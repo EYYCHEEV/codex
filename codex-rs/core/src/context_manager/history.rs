@@ -336,6 +336,31 @@ impl ContextManager {
     }
 
     fn process_item(&self, item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
+        let policy = if let ResponseItem::CustomToolCallOutput { call_id, .. } = item
+            && let Some(max_output_tokens) = self.items.iter().rev().find_map(|item| match item {
+                ResponseItem::CustomToolCall {
+                    call_id: tool_call_id,
+                    name,
+                    input,
+                    ..
+                } if tool_call_id == call_id && name == codex_code_mode::PUBLIC_TOOL_NAME => {
+                    codex_code_mode::parse_exec_source(input)
+                        .ok()
+                        .and_then(|args| args.max_output_tokens)
+                }
+                _ => None,
+            }) {
+            match policy {
+                TruncationPolicy::Bytes(bytes) => {
+                    TruncationPolicy::Bytes(bytes.max(approx_bytes_for_tokens(max_output_tokens)))
+                }
+                TruncationPolicy::Tokens(tokens) => {
+                    TruncationPolicy::Tokens(tokens.max(max_output_tokens))
+                }
+            }
+        } else {
+            policy
+        };
         let policy_with_serialization_budget = policy * 1.2;
         match item {
             ResponseItem::FunctionCallOutput {
