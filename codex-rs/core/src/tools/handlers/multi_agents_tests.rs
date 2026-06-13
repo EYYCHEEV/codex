@@ -10,6 +10,7 @@ use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -2576,9 +2577,11 @@ async fn send_input_interrupts_before_prompt() {
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
     let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
+        session.clone(),
+        turn.clone(),
         "send_input",
         function_payload(json!({
             "target": agent_id.to_string(),
@@ -2618,9 +2621,11 @@ async fn send_input_accepts_structured_items() {
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
     let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
+        session.clone(),
+        turn.clone(),
         "send_input",
         function_payload(json!({
             "target": agent_id.to_string(),
@@ -3272,9 +3277,11 @@ async fn wait_agent_times_out_when_status_is_not_final() {
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
     let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
+        session.clone(),
+        turn.clone(),
         "wait_agent",
         function_payload(json!({
             "targets": [agent_id.to_string()],
@@ -3315,25 +3322,44 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
     let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
+        session.clone(),
+        turn.clone(),
         "wait_agent",
         function_payload(json!({
             "targets": [agent_id.to_string()],
             "timeout_ms": 10
         })),
     );
+    let handler = WaitAgentHandler::new(WaitAgentTimeoutOptions {
+        default_timeout_ms: 50,
+        min_timeout_ms: 50,
+        max_timeout_ms: 1_000,
+    });
 
-    let early = timeout(
-        Duration::from_millis(50),
-        WaitAgentHandler::default().handle(invocation),
-    )
-    .await;
+    let started = std::time::Instant::now();
+    let output = handler
+        .handle(invocation)
+        .await
+        .expect("wait_agent should succeed");
+    let elapsed = started.elapsed();
     assert!(
-        early.is_err(),
+        elapsed >= Duration::from_millis(/*millis*/ 50),
         "wait_agent should not return before the minimum timeout clamp"
     );
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::new(),
+            timed_out: true
+        }
+    );
+    assert_eq!(success, None);
 
     let _ = thread
         .thread

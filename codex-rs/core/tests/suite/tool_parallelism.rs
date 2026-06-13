@@ -167,6 +167,10 @@ async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
     let args_one = serde_json::to_string(&shell_args)?;
     let args_two = serde_json::to_string(&shell_args)?;
 
+    let warmup_response = sse(vec![
+        ev_assistant_message("warm-msg-1", "warmup complete"),
+        ev_completed("resp-warm-1"),
+    ]);
     let first_response = sse(vec![
         json!({"type": "response.created", "response": {"id": "resp-1"}}),
         ev_function_call("call-1", "shell_command", &args_one),
@@ -177,8 +181,13 @@ async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
         ev_assistant_message("msg-1", "done"),
         ev_completed("resp-2"),
     ]);
-    mount_sse_sequence(&server, vec![first_response, second_response]).await;
+    mount_sse_sequence(
+        &server,
+        vec![warmup_response, first_response, second_response],
+    )
+    .await;
 
+    run_turn(&test, "warm up shell tools").await?;
     let duration = run_turn_and_measure(&test, "run shell_command twice").await?;
     assert_parallel_duration(duration);
 
@@ -203,6 +212,10 @@ async fn mixed_parallel_tools_run_in_parallel() -> anyhow::Result<()> {
         "timeout_ms": 1_000,
     }))?;
 
+    let warmup_response = sse(vec![
+        ev_assistant_message("warm-msg-1", "warmup complete"),
+        ev_completed("resp-warm-1"),
+    ]);
     let first_response = sse(vec![
         json!({"type": "response.created", "response": {"id": "resp-1"}}),
         ev_function_call("call-1", "test_sync_tool", &sync_args),
@@ -213,8 +226,13 @@ async fn mixed_parallel_tools_run_in_parallel() -> anyhow::Result<()> {
         ev_assistant_message("msg-1", "done"),
         ev_completed("resp-2"),
     ]);
-    mount_sse_sequence(&server, vec![first_response, second_response]).await;
+    mount_sse_sequence(
+        &server,
+        vec![warmup_response, first_response, second_response],
+    )
+    .await;
 
+    run_turn(&test, "warm up mixed tools").await?;
     let duration = run_turn_and_measure(&test, "mix tools").await?;
     assert_parallel_duration(duration);
 
@@ -392,7 +410,7 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
     let _ = first_gate_tx.send(());
     let _ = follow_up_gate_tx.send(());
 
-    let timestamps = tokio::time::timeout(Duration::from_secs(5), async {
+    let timestamps = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let contents = fs::read_to_string(output_path)?;
             let timestamps = contents

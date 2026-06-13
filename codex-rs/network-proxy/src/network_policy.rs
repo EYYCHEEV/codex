@@ -627,7 +627,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_host_policy_emits_domain_event_for_decider_allow_override() {
-        let state = network_proxy_state_for_policy(NetworkProxyConfig::default());
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
+            allow_local_binding: true,
+            ..NetworkProxyConfig::default()
+        });
         let calls = Arc::new(AtomicUsize::new(0));
         let decider: Arc<dyn NetworkPolicyDecider> = Arc::new({
             let calls = calls.clone();
@@ -788,7 +791,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evaluate_host_policy_emits_domain_event_for_decider_ask() {
-        let state = network_proxy_state_for_policy(NetworkProxyConfig::default());
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
+            allow_local_binding: true,
+            ..NetworkProxyConfig::default()
+        });
         let decider: Arc<dyn NetworkPolicyDecider> =
             Arc::new(|_req| async { NetworkDecision::ask(REASON_NOT_ALLOWED) });
         let request = NetworkPolicyRequest::new(NetworkPolicyRequestArgs {

@@ -54,7 +54,11 @@ def classify_tarball(filename: str, version: str, npm_tag: str) -> str | None:
     }:
         return npm_tag
 
-    for platform_prefix in ("codex-npm-linux-", "codex-npm-darwin-", "codex-npm-win32-"):
+    for platform_prefix in (
+        "codex-npm-linux-",
+        "codex-npm-darwin-",
+        "codex-npm-win32-",
+    ):
         if filename.startswith(platform_prefix) and filename.endswith(suffix):
             platform = filename.removeprefix("codex-npm-").removesuffix(suffix)
             return f"{prefix}{platform}"
@@ -65,7 +69,11 @@ def classify_tarball(filename: str, version: str, npm_tag: str) -> str | None:
 def tarball_publish_rank(filename: str, version: str) -> tuple[int, str]:
     suffix = f"-{version}.tgz"
 
-    for platform_prefix in ("codex-npm-linux-", "codex-npm-darwin-", "codex-npm-win32-"):
+    for platform_prefix in (
+        "codex-npm-linux-",
+        "codex-npm-darwin-",
+        "codex-npm-win32-",
+    ):
         if filename.startswith(platform_prefix) and filename.endswith(suffix):
             return (0, filename)
 

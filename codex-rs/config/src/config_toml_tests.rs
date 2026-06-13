@@ -48,6 +48,7 @@ command = ["python3", "/tmp/legacy.py"]
                 matcher: Some("^Bash$".to_string()),
                 hooks: vec![HookHandlerConfig::Command {
                     command: "python3 /tmp/pre.py".to_string(),
+                    command_windows: None,
                     timeout_sec: None,
                     r#async: false,
                     status_message: None,

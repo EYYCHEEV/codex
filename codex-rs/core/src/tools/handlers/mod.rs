@@ -244,6 +244,7 @@ pub(super) fn implicit_granted_permissions(
     if !sandbox_permissions.uses_additional_permissions()
         && !matches!(sandbox_permissions, SandboxPermissions::RequireEscalated)
         && additional_permissions.is_none()
+        && effective_additional_permissions.permissions_preapproved
     {
         effective_additional_permissions
             .additional_permissions
@@ -401,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn implicit_sticky_grants_bypass_inline_permission_validation() {
+    fn implicit_sticky_grants_bypass_inline_permission_validation_when_preapproved() {
         let cwd = tempdir().expect("tempdir");
         let granted_permissions = file_system_permissions(cwd.path());
         let implicit_permissions = implicit_granted_permissions(
@@ -410,11 +411,28 @@ mod tests {
             &EffectiveAdditionalPermissions {
                 sandbox_permissions: SandboxPermissions::WithAdditionalPermissions,
                 additional_permissions: Some(granted_permissions.clone()),
-                permissions_preapproved: false,
+                permissions_preapproved: true,
             },
         );
 
         assert_eq!(implicit_permissions, Some(granted_permissions));
+    }
+
+    #[test]
+    fn implicit_sticky_grants_still_require_preapproval() {
+        let cwd = tempdir().expect("tempdir");
+        let granted_permissions = file_system_permissions(cwd.path());
+        let implicit_permissions = implicit_granted_permissions(
+            SandboxPermissions::UseDefault,
+            /*additional_permissions*/ None,
+            &EffectiveAdditionalPermissions {
+                sandbox_permissions: SandboxPermissions::WithAdditionalPermissions,
+                additional_permissions: Some(granted_permissions),
+                permissions_preapproved: false,
+            },
+        );
+
+        assert_eq!(implicit_permissions, None);
     }
 
     #[test]
