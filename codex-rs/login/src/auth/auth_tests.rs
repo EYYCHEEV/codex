@@ -79,6 +79,7 @@ async fn refresh_without_id_token() {
         }),
         last_refresh: Some(Utc::now()),
         agent_identity: None,
+        personal_access_token: None,
     };
     save_auth(
         codex_home.path(),
@@ -138,6 +139,7 @@ async fn refresh_with_new_id_token_updates_account_id() {
         }),
         last_refresh: Some(Utc::now()),
         agent_identity: None,
+        personal_access_token: None,
     };
     save_auth(
         codex_home.path(),
@@ -190,6 +192,7 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         }),
         last_refresh: Some(Utc::now()),
         agent_identity: None,
+        personal_access_token: None,
     };
     save_auth(
         codex_home.path(),

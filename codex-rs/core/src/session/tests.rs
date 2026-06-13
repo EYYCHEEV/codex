@@ -1169,9 +1169,7 @@ async fn managed_network_proxy_decider_survives_full_access_start() -> anyhow::R
         .parse::<std::net::SocketAddr>()?;
     let mut stream = tokio::net::TcpStream::connect(proxy_addr).await?;
     stream
-        .write_all(
-            b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
-        )
+        .write_all(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: 8.8.8.8\r\nConnection: close\r\n\r\n")
         .await?;
     let mut buffer = [0_u8; 4096];
     let bytes_read = tokio::time::timeout(StdDuration::from_secs(2), stream.read(&mut buffer))
