@@ -85,6 +85,7 @@ impl CodeModeSessionProvider for InProcessCodeModeSessionProvider {
 struct CellHandle {
     control_tx: mpsc::UnboundedSender<CellControlCommand>,
     runtime_tx: std::sync::mpsc::Sender<RuntimeCommand>,
+    runtime_terminate_handle: v8::IsolateHandle,
     cancellation_token: CancellationToken,
 }
 
@@ -194,6 +195,7 @@ impl CodeModeService {
                 CellHandle {
                     control_tx,
                     runtime_tx: runtime_tx.clone(),
+                    runtime_terminate_handle: runtime_terminate_handle.clone(),
                     cancellation_token: cancellation_token.clone(),
                 },
             );
@@ -307,6 +309,7 @@ impl CodeModeService {
                 .control_tx
                 .send(CellControlCommand::Terminate { response_tx });
             let _ = handle.runtime_tx.send(RuntimeCommand::Terminate);
+            let _ = handle.runtime_terminate_handle.terminate_execution();
         }
         while !self.inner.cells.lock().await.is_empty() {
             tokio::task::yield_now().await;
@@ -332,6 +335,7 @@ impl Drop for CodeModeService {
                     .control_tx
                     .send(CellControlCommand::Terminate { response_tx });
                 let _ = handle.runtime_tx.send(RuntimeCommand::Terminate);
+                let _ = handle.runtime_terminate_handle.terminate_execution();
             }
         }
     }
