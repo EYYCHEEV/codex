@@ -100,15 +100,10 @@ jobs:
           git -C repo checkout --detach "${GITHUB_SHA}"
 
       - name: Configure npm registry
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           npm config set registry https://registry.npmjs.org
           npm config set "${{ needs.metadata.outputs.npm_scope }}:registry" https://registry.npmjs.org
-          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
-            printf '//registry.npmjs.org/:_authToken=%s\n' "${NODE_AUTH_TOKEN}" > ~/.npmrc
-          fi
 
       - name: Update npm
         run: |
@@ -136,8 +131,8 @@ jobs:
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
           NPM_TAG: ${{ needs.metadata.outputs.npm_tag }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          # No NODE_AUTH_TOKEN is needed; this job uses npm trusted publishing via OIDC.
           python3 ./repo/scripts/publish_npm_packages.py \
             --dir dist/npm \
             --version "${VERSION}" \
