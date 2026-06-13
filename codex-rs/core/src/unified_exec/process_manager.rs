@@ -1232,7 +1232,7 @@ impl UnifiedExecProcessManager {
         mut pause_state: Option<watch::Receiver<bool>>,
         mut deadline: Instant,
     ) -> Vec<u8> {
-        const POST_EXIT_CLOSE_WAIT_CAP: Duration = Duration::from_millis(50);
+        const POST_EXIT_QUIET_WAIT_CAP: Duration = Duration::from_millis(50);
 
         let mut collected: Vec<u8> = Vec::with_capacity(4096);
         let mut exit_signal_received = cancellation_token.is_cancelled();
@@ -1268,7 +1268,7 @@ impl UnifiedExecProcessManager {
                 if exit_signal_received {
                     let now = Instant::now();
                     let close_wait_deadline = *post_exit_deadline
-                        .get_or_insert_with(|| now + remaining.min(POST_EXIT_CLOSE_WAIT_CAP));
+                        .get_or_insert_with(|| now + remaining.min(POST_EXIT_QUIET_WAIT_CAP));
                     let close_wait_remaining = close_wait_deadline.saturating_duration_since(now);
                     if close_wait_remaining == Duration::ZERO {
                         break;

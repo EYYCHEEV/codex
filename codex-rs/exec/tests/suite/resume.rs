@@ -494,7 +494,7 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
     let test = test_codex_exec();
     let server = MockServer::start().await;
     let _response_mock = mount_exec_responses(&server, /*count*/ 2).await;
-    let repo_root = exec_repo_root()?;
+    let workspace = TempDir::new()?;
 
     let marker = format!("resume-config-{}", Uuid::new_v4());
     let prompt = format!("echo {marker}");
@@ -506,7 +506,7 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
         .arg("--model")
         .arg("gpt-5.1")
         .arg("-C")
-        .arg(&repo_root)
+        .arg(workspace.path())
         .arg(&prompt)
         .assert()
         .success();
@@ -526,7 +526,7 @@ async fn exec_resume_preserves_cli_configuration_overrides() -> anyhow::Result<(
         .arg("--model")
         .arg("gpt-5.1-high")
         .arg("-C")
-        .arg(&repo_root)
+        .arg(workspace.path())
         .arg(&prompt2)
         .arg("resume")
         .arg("--last")

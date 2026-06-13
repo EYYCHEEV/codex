@@ -165,7 +165,7 @@ async fn shell_zsh_fork_skill_scripts_ignore_declared_permissions() -> Result<()
         mcp_elicitations: true,
     });
     let workspace_write_profile = restrictive_workspace_write_profile();
-    let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    let outside_dir = tempfile::tempdir()?;
     let allowed_dir = outside_dir.path().join("allowed-output");
     fs::create_dir_all(&allowed_dir)?;
     let allowed_path = allowed_dir.join("allowed.txt");
