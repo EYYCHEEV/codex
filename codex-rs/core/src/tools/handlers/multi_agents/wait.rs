@@ -92,14 +92,14 @@ impl Handler {
             });
         }
 
-        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+        let timeout_ms = args.timeout_ms.unwrap_or(self.options.default_timeout_ms);
         let timeout_ms = match timeout_ms {
             ms if ms <= 0 => {
                 return Err(FunctionCallError::RespondToModel(
                     "timeout_ms must be greater than zero".to_owned(),
                 ));
             }
-            ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
+            ms => ms.clamp(self.options.min_timeout_ms, self.options.max_timeout_ms),
         };
 
         session
@@ -337,5 +337,8 @@ async fn wait_for_final_status(
         .control(session.session_id())
         .get_status(thread_id)
         .await;
-    Ok(is_final(&latest).then_some((thread_id, latest)))
+    if is_final(&latest) {
+        return Ok(Some((thread_id, latest)));
+    }
+    std::future::pending().await
 }

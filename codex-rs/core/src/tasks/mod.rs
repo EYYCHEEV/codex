@@ -452,8 +452,8 @@ impl Session {
 
     /// Starts a regular turn when the session is idle and pending work is waiting.
     ///
-    /// Pending work includes mailbox mail marked with `trigger_turn`, or any mailbox mail while
-    /// an outstanding durable sleep is attached to the thread.
+    /// Pending work includes queued response items, mailbox mail marked with `trigger_turn`, or
+    /// any mailbox mail while an outstanding durable sleep is attached to the thread.
     ///
     /// This helper generates a fresh sub-id for the synthetic turn before delegating to the
     /// explicit-sub-id variant.
@@ -469,15 +469,21 @@ impl Session {
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
     /// session.
     ///
-    /// The turn is created only when the session is idle and mailbox mail either requests a turn
-    /// or can wake an outstanding durable sleep.
+    /// The turn is created only when the session is idle and queued response items are waiting,
+    /// mailbox mail requests a turn, or mailbox mail can wake an outstanding durable sleep.
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_pending_mailbox_items().await
-            || (!self.input_queue.has_trigger_turn_mailbox_items().await
-                && !self.has_outstanding_durable_sleep())
+        // Queued response items and trigger-turn mailbox items must wake an idle
+        // session. Ordinary pending mailbox work wakes only a durable sleep.
+        if !self
+            .input_queue
+            .has_queued_response_items_for_next_turn()
+            .await
+            && !self.input_queue.has_trigger_turn_mailbox_items().await
+            && !(self.input_queue.has_pending_mailbox_items().await
+                && self.has_outstanding_durable_sleep())
         {
             return;
         }

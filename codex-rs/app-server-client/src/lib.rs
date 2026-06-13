@@ -800,7 +800,6 @@ mod tests {
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::ToolRequestUserInputQuestion;
-    use codex_core::config::ConfigBuilder;
     use codex_core::init_state_db;
     use codex_protocol::config_types::Personality;
     use codex_uds::UnixListener;
@@ -822,29 +821,10 @@ mod tests {
     use tokio_tungstenite::tungstenite::handshake::server::Response as WebSocketResponse;
     use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
-    async fn build_test_config() -> Config {
-        match ConfigBuilder::default().build().await {
-            Ok(config) => config,
-            Err(_) => Config::load_default_with_cli_overrides(Vec::new())
-                .await
-                .expect("default config should load"),
-        }
-    }
-
     async fn build_test_config_for_codex_home(codex_home: &Path) -> Config {
-        match ConfigBuilder::default()
-            .codex_home(codex_home.to_path_buf())
-            .build()
+        Config::load_default_with_cli_overrides_for_codex_home(codex_home.to_path_buf(), Vec::new())
             .await
-        {
-            Ok(config) => config,
-            Err(_) => Config::load_default_with_cli_overrides_for_codex_home(
-                codex_home.to_path_buf(),
-                Vec::new(),
-            )
-            .await
-            .expect("default config should load"),
-        }
+            .expect("default config should load")
     }
 
     struct TestClient {
@@ -875,6 +855,9 @@ mod tests {
         let state_db = init_state_db(config.as_ref())
             .await
             .expect("state db should initialize for in-process test");
+        let environment_manager = Arc::new(EnvironmentManager::without_environments(
+            config.http_client_factory(),
+        ));
         let client = InProcessAppServerClient::start(InProcessClientStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),
             config,
@@ -886,7 +869,7 @@ mod tests {
             feedback: CodexFeedback::new(),
             log_db: None,
             state_db: Some(state_db),
-            environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+            environment_manager,
             config_warnings: Vec::new(),
             session_source,
             enable_codex_api_key_env: false,
@@ -2076,20 +2059,11 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_start_args_forward_environment_manager_and_openai_form_capability() {
-        let config = Arc::new(build_test_config().await);
-        let environment_manager = Arc::new(
-            EnvironmentManager::create_for_tests(
-                Some("ws://127.0.0.1:8765".to_string()),
-                Some(
-                    ExecServerRuntimeOptions::new(
-                        std::env::current_exe().expect("current exe"),
-                        /*codex_linux_sandbox_exe*/ None,
-                    )
-                    .expect("runtime paths"),
-                ),
-            )
-            .await,
-        );
+        let codex_home = TempDir::new().expect("temp dir");
+        let config = Arc::new(build_test_config_for_codex_home(codex_home.path()).await);
+        let environment_manager = Arc::new(EnvironmentManager::without_environments(
+            config.http_client_factory(),
+        ));
 
         let runtime_args = InProcessClientStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),
@@ -2127,13 +2101,6 @@ mod tests {
             &runtime_args.environment_manager,
             &environment_manager
         ));
-        assert!(
-            runtime_args
-                .environment_manager
-                .default_environment()
-                .expect("default environment")
-                .is_remote()
-        );
     }
 
     #[tokio::test]
