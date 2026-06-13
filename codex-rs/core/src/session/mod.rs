@@ -3328,6 +3328,17 @@ impl Session {
         Ok(active_turn_id.clone())
     }
 
+    /// Returns the input if there was no active or preparing turn to inject into.
+    #[cfg(test)]
+    pub async fn inject_response_items(
+        &self,
+        input: Vec<ResponseItem>,
+    ) -> Result<(), Vec<ResponseItem>> {
+        self.input_queue
+            .inject_response_items(&self.active_turn, input)
+            .await
+    }
+
     pub(crate) async fn record_memory_citation_for_turn(&self, sub_id: &str) {
         let turn_state = self
             .input_queue

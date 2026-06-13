@@ -28,6 +28,7 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     mailbox_tx: watch::Sender<()>,
     mailbox_pending_mails: Mutex<VecDeque<InterAgentCommunication>>,
+    idle_pending_input: Mutex<Vec<ResponseItem>>,
 }
 
 impl InputQueue {
@@ -36,6 +37,7 @@ impl InputQueue {
         Self {
             mailbox_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            idle_pending_input: Mutex::new(Vec::new()),
         }
     }
 
@@ -77,6 +79,23 @@ impl InputQueue {
             .drain(..)
             .map(|mail| ResponseItem::from(mail.to_response_input_item()))
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn queue_response_items_for_next_turn(&self, items: Vec<ResponseItem>) {
+        if items.is_empty() {
+            return;
+        }
+
+        self.idle_pending_input.lock().await.extend(items);
+    }
+
+    pub(crate) async fn take_queued_response_items_for_next_turn(&self) -> Vec<ResponseItem> {
+        std::mem::take(&mut *self.idle_pending_input.lock().await)
+    }
+
+    pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
+        !self.idle_pending_input.lock().await.is_empty()
     }
 
     pub(crate) async fn turn_state_for_sub_id(
@@ -169,20 +188,18 @@ impl InputQueue {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
+    #[cfg(test)]
     pub(crate) async fn inject_response_items(
         &self,
         active_turn: &Mutex<Option<ActiveTurn>>,
-        input: Vec<ResponseInputItem>,
-    ) -> Result<(), Vec<ResponseInputItem>> {
+        input: Vec<ResponseItem>,
+    ) -> Result<(), Vec<ResponseItem>> {
         let mut active = active_turn.lock().await;
         match active.as_mut() {
             Some(active_turn) if active_turn.task.is_some() || active_turn.is_preparing() => {
                 self.extend_pending_input_for_turn_state(
                     active_turn.turn_state.as_ref(),
-                    input
-                        .into_iter()
-                        .map(TurnInput::ResponseInputItem)
-                        .collect(),
+                    input.into_iter().map(TurnInput::ResponseItem).collect(),
                 )
                 .await;
                 Ok(())

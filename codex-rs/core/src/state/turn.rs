@@ -109,6 +109,7 @@ impl ActiveTurn {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_preparing(&self) -> bool {
         self.phase == ActiveTurnPhase::Preparing
     }

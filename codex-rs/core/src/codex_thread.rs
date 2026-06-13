@@ -425,27 +425,6 @@ impl CodexThread {
             .await;
     }
 
-    /// Append a prebuilt message to the thread history without treating it as a user turn.
-    ///
-    /// If the thread already has an active turn, the message is queued as pending input for that
-    /// turn. Otherwise it is recorded directly without starting a model turn.
-    #[cfg(test)]
-    pub(crate) async fn append_message(&self, message: ResponseItem) -> CodexResult<String> {
-        let submission_id = uuid::Uuid::new_v4().to_string();
-        let pending_item = pending_message_input_item(&message)?;
-        if let Err(items) = self
-            .codex
-            .session
-            .inject_response_items(vec![pending_item])
-            .await
-        {
-            debug_assert_eq!(items.len(), 1);
-            self.inject_response_items(vec![message]).await?;
-        }
-
-        Ok(submission_id)
-    }
-
     /// Record raw Responses API items without starting a new turn.
     pub async fn inject_response_items(&self, items: Vec<ResponseItem>) -> CodexResult<()> {
         if items.is_empty() {

@@ -816,9 +816,7 @@ async fn managed_network_proxy_decider_survives_full_access_start() -> anyhow::R
 
     let mut stream = tokio::net::TcpStream::connect(started_proxy.proxy().http_addr()).await?;
     stream
-        .write_all(
-            b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
-        )
+        .write_all(b"GET http://8.8.8.8/ HTTP/1.1\r\nHost: 8.8.8.8\r\nConnection: close\r\n\r\n")
         .await?;
     let mut buffer = [0_u8; 4096];
     let bytes_read = tokio::time::timeout(StdDuration::from_secs(2), stream.read(&mut buffer))
@@ -9056,7 +9054,8 @@ async fn steer_input_returns_active_turn_id() {
 #[tokio::test]
 async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
-    let queued_item = ResponseInputItem::Message {
+    let queued_item = ResponseItem::Message {
+        id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::InputText {
             text: "queued before wake".to_string(),
@@ -9080,14 +9079,15 @@ async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
 
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
-        vec![TurnInput::ResponseInputItem(queued_item)]
+        vec![TurnInput::ResponseItem(queued_item)]
     );
 }
 
 #[tokio::test]
 async fn preparing_active_turn_accepts_injected_response_items() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
-    let pending_item = ResponseInputItem::Message {
+    let pending_item = ResponseItem::Message {
+        id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::InputText {
             text: "queued while turn is preparing".to_string(),
@@ -9110,14 +9110,15 @@ async fn preparing_active_turn_accepts_injected_response_items() {
         sess.input_queue
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await,
-        vec![TurnInput::ResponseInputItem(pending_item)]
+        vec![TurnInput::ResponseItem(pending_item)]
     );
 }
 
 #[tokio::test]
 async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
-    let queued_item = ResponseInputItem::Message {
+    let queued_item = ResponseItem::Message {
+        id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::InputText {
             text: "queued before wake".to_string(),
@@ -9148,7 +9149,8 @@ async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
 #[tokio::test]
 async fn idle_interrupt_does_not_wake_queued_next_turn_items() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
-    let queued_item = ResponseInputItem::Message {
+    let queued_item = ResponseItem::Message {
+        id: None,
         role: "assistant".to_string(),
         content: vec![ContentItem::InputText {
             text: "queued before interrupt".to_string(),

@@ -81,10 +81,12 @@ async fn thread_start_with_non_local_thread_store_does_not_create_local_persiste
         feedback: CodexFeedback::new(),
         log_db: None,
         state_db: None,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
         enable_codex_api_key_env: false,
+        // This persistence regression does not execute shell or filesystem
+        // tools, so avoid registering host-local skill watchers.
+        environment_manager: Arc::new(EnvironmentManager::without_environments()),
         initialize: InitializeParams {
             client_info: ClientInfo {
                 name: "codex-app-server-tests".to_string(),
@@ -278,6 +280,7 @@ base_url = "{server_uri}/v1"
 wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
+supports_websockets = false
 
 [features]
 plugins = false

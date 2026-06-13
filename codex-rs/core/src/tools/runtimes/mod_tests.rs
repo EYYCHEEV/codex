@@ -727,6 +727,7 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_after_final_shell_startu
         &dir.path().abs(),
         &HashMap::new(),
         &env,
+        &RuntimePathPrepends::default(),
     );
     let output = Command::new(&rewritten[0])
         .args(&rewritten[1..])

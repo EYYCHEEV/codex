@@ -365,7 +365,7 @@ impl Session {
         turn_state.lock().await.token_usage_at_turn_start = token_usage_at_turn_start.clone();
         let mut pending_items = queued_response_items
             .into_iter()
-            .map(TurnInput::ResponseInputItem)
+            .map(TurnInput::ResponseItem)
             .collect::<Vec<_>>();
         pending_items.extend(mailbox_items);
         self.input_queue
@@ -483,7 +483,12 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_trigger_turn_mailbox_items().await {
+        if !self
+            .input_queue
+            .has_queued_response_items_for_next_turn()
+            .await
+            && !self.input_queue.has_trigger_turn_mailbox_items().await
+        {
             return;
         }
 
