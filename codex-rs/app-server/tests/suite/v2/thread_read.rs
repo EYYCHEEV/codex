@@ -381,7 +381,9 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         feedback: CodexFeedback::new(),
         log_db: None,
         state_db: None,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        // This store-backed read regression only needs thread metadata and
+        // history, so avoid registering host-local skill watchers.
+        environment_manager: Arc::new(EnvironmentManager::without_environments()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
         enable_codex_api_key_env: false,
@@ -471,6 +473,7 @@ async fn thread_read_loaded_include_turns_reads_store_history_without_rollout_pa
             request_id: RequestId::Integer(1),
             params: ThreadStartParams {
                 model: Some("mock-model".to_string()),
+                environments: Some(Vec::new()),
                 ..Default::default()
             },
         })
@@ -1425,6 +1428,7 @@ base_url = "http://127.0.0.1:1/v1"
 wire_api = "responses"
 request_max_retries = 0
 stream_max_retries = 0
+supports_websockets = false
 "#
         ),
     )
