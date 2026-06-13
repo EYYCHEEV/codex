@@ -105,6 +105,32 @@ jobs:
           npm config set registry https://registry.npmjs.org
           npm config set "${{ needs.metadata.outputs.npm_scope }}:registry" https://registry.npmjs.org
 
+      - name: Select Node.js for trusted publishing
+        run: |
+          set -euo pipefail
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          node_minor="$(node -p 'process.versions.node.split(".")[1]')"
+          if (( node_major > 22 || (node_major == 22 && node_minor >= 14) )); then
+            node --version
+            npm --version
+            exit 0
+          fi
+
+          node24_bin="$(
+            find /opt/hostedtoolcache/node -path '*/x64/bin/node' -type f 2>/dev/null \
+              | sort -V \
+              | awk -F/ '$5 ~ /^24\./ { print; exit }'
+          )"
+          if [[ -z "${node24_bin}" ]]; then
+            echo "Node.js 22.14+ is required for npm trusted publishing, but no Node 24 toolcache entry was found."
+            exit 1
+          fi
+
+          node_bin_dir="$(dirname "${node24_bin}")"
+          echo "${node_bin_dir}" >> "${GITHUB_PATH}"
+          "${node_bin_dir}/node" --version
+          "${node_bin_dir}/npm" --version
+
       - name: Update npm
         run: |
           set -euo pipefail
@@ -131,6 +157,7 @@ jobs:
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
           NPM_TAG: ${{ needs.metadata.outputs.npm_tag }}
+          NPM_CONFIG_PROVENANCE: "true"
         run: |
           # No NODE_AUTH_TOKEN is needed; this job uses npm trusted publishing via OIDC.
           python3 ./repo/scripts/publish_npm_packages.py \
