@@ -137,7 +137,6 @@ impl InputQueue {
         std::mem::take(&mut *self.queued_response_items_for_next_turn.lock().await)
     }
 
-    #[cfg(test)]
     pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
         !self
             .queued_response_items_for_next_turn

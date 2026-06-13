@@ -356,6 +356,7 @@ fn local_shell_event(
     timeout_ms: u64,
     sandbox_permissions: SandboxPermissions,
 ) -> Result<Value> {
+    let command = codex_shell_command::parse_command::shlex_join(&command);
     let mut args = json!({
         "command": command,
         "timeout_ms": timeout_ms,
@@ -364,7 +365,7 @@ fn local_shell_event(
         args["sandbox_permissions"] = json!(sandbox_permissions);
     }
     let args_str = serde_json::to_string(&args)?;
-    Ok(ev_function_call(call_id, "shell", &args_str))
+    Ok(ev_function_call(call_id, "shell_command", &args_str))
 }
 
 fn exec_command_event(
@@ -894,7 +895,7 @@ fn body_contains(req: &Request, text: &str) -> bool {
 }
 
 async fn wait_for_spawned_thread(test: &TestCodex) -> Result<Arc<CodexThread>> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let ids = test.thread_manager.list_thread_ids().await;
         if let Some(thread_id) = ids

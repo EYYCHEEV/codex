@@ -160,11 +160,14 @@ fn chatgpt_auth_json_with_last_refresh(
 
 fn fake_chatgpt_jwt(plan_type: &str, chatgpt_user_id: Option<&str>, signature: &[u8]) -> String {
     let header = json!({ "alg": "none", "typ": "JWT" });
-    let auth_payload = json!({
+    let mut auth_payload = json!({
         "chatgpt_plan_type": plan_type,
         "chatgpt_user_id": chatgpt_user_id,
         "user_id": chatgpt_user_id,
     });
+    if let Some(account_id) = account_id {
+        auth_payload["chatgpt_account_id"] = serde_json::Value::String(account_id.to_string());
+    }
     let payload = json!({
         "email": "user@example.com",
         "https://api.openai.com/auth": auth_payload,

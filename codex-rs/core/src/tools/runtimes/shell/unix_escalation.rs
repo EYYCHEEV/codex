@@ -284,6 +284,10 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         return Ok(None);
     }
 
+    let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
+        req.sandbox_permissions,
+        &exec_request.file_system_sandbox_policy,
+    );
     let exec_policy = Arc::new(RwLock::new(
         ctx.session.services.exec_policy.current().as_ref().clone(),
     ));
@@ -321,9 +325,9 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         tool_name: GuardianCommandSource::UnifiedExec,
         approval_policy: ctx.turn.approval_policy(),
         permission_profile: exec_request.permission_profile.clone(),
-        sandbox_permissions: req.sandbox_permissions,
+        sandbox_permissions,
         approval_sandbox_permissions: approval_sandbox_permissions(
-            req.sandbox_permissions,
+            sandbox_permissions,
             req.additional_permissions_preapproved,
         ),
         prompt_permissions: req.additional_permissions.clone(),

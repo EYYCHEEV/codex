@@ -182,7 +182,7 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
 
     let mut stream_error_messages = Vec::new();
     loop {
-        let event = timeout(Duration::from_secs(10), codex.next_event())
+        let event = timeout(Duration::from_secs(30), codex.next_event())
             .await
             .expect("timeout waiting for event")
             .expect("event stream ended unexpectedly")

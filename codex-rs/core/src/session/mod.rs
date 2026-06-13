@@ -2196,6 +2196,7 @@ impl Session {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn queue_response_items_for_next_turn(&self, input: Vec<ResponseInputItem>) {
         self.input_queue
             .queue_response_items_for_next_turn(input)
@@ -2203,6 +2204,7 @@ impl Session {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
         self.input_queue
             .has_queued_response_items_for_next_turn()

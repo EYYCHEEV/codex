@@ -161,8 +161,36 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
         .collect()
 }
 
+fn sanitize_version(line: String) -> String {
+    fn replace_version_between(line: &str, prefix: &str, suffix: &str) -> Option<String> {
+        let prefix_len = line.find(prefix).map(|idx| idx + prefix.len())?;
+        let relative_end = line[prefix_len..].find(suffix)?;
+        let version_end = prefix_len + relative_end;
+        let padding = " ".repeat(version_end.saturating_sub(prefix_len + "0.0.0".len()));
+        let mut sanitized = line.to_string();
+        sanitized.replace_range(prefix_len..version_end, "0.0.0");
+        if !padding.is_empty()
+            && let Some(pipe_idx) = sanitized.rfind('│')
+        {
+            sanitized.insert_str(pipe_idx, &padding);
+        }
+        Some(sanitized)
+    }
+
+    replace_version_between(&line, "OpenAI Codex (v", ")")
+        .or_else(|| replace_version_between(&line, "Update available! ", " ->"))
+        .unwrap_or(line)
+}
+
+fn render_stable_lines(lines: &[Line<'static>]) -> Vec<String> {
+    render_lines(lines)
+        .into_iter()
+        .map(sanitize_version)
+        .collect()
+}
+
 fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
-    render_lines(&cell.transcript_lines(u16::MAX))
+    render_stable_lines(&cell.transcript_lines(u16::MAX))
 }
 
 fn assert_unstyled_lines(lines: &[Line<'static>]) {
@@ -1191,7 +1219,7 @@ fn web_search_history_cell_snapshot() {
 fn standalone_unix_update_available_history_cell_snapshot() {
     let cell =
         UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneUnix));
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+    let rendered = render_stable_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
 }
@@ -1200,7 +1228,7 @@ fn standalone_unix_update_available_history_cell_snapshot() {
 fn standalone_windows_update_available_history_cell_snapshot() {
     let cell =
         UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::StandaloneWindows));
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+    let rendered = render_stable_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
 }

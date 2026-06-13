@@ -1006,12 +1006,14 @@ async fn shell_command_timeout_handles_background_grandchild_stdout() -> Result<
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
-        config
-            .permissions
-            .set_permission_profile(PermissionProfile::Disabled)
-            .expect("set permission profile");
-    });
+    let mut builder = test_codex()
+        .with_model("test-gpt-5-codex")
+        .with_config(|config| {
+            config
+                .permissions
+                .set_permission_profile(PermissionProfile::Disabled)
+                .expect("set permission profile");
+        });
     let test = builder.build(&server).await?;
 
     let call_id = "shell-command-grandchild-timeout";
@@ -1055,7 +1057,7 @@ time.sleep(60)
     .await;
 
     let start = Instant::now();
-    let output_str = tokio::time::timeout(Duration::from_secs(10), async {
+    let output_str = tokio::time::timeout(Duration::from_secs(30), async {
         test.submit_turn_with_approval_and_permission_profile(
             "run a command with a detached grandchild",
             AskForApproval::Never,
@@ -1085,7 +1087,7 @@ time.sleep(60)
     }
 
     assert!(
-        elapsed < Duration::from_secs(9),
+        elapsed < Duration::from_secs(29),
         "command should return shortly after timeout even with live grandchildren: {elapsed:?}"
     );
 

@@ -286,6 +286,7 @@ async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Re
         tokens: Some(initial_tokens.clone()),
         last_refresh: Some(initial_last_refresh),
         agent_identity: None,
+        personal_access_token: None,
     };
     ctx.write_auth(&initial_auth).await?;
 

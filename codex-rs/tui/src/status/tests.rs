@@ -183,6 +183,29 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
 }
 
 fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
+    fn sanitize_version(line: String) -> String {
+        let Some(prefix_len) = line
+            .find("OpenAI Codex (v")
+            .map(|idx| idx + "OpenAI Codex (v".len())
+        else {
+            return line;
+        };
+        if let Some(relative_end) = line[prefix_len..].find(')') {
+            let version_end = prefix_len + relative_end;
+            let padding = " ".repeat(version_end.saturating_sub(prefix_len + "0.0.0".len()));
+            let mut sanitized = line;
+            sanitized.replace_range(prefix_len..version_end, "0.0.0");
+            if !padding.is_empty()
+                && let Some(pipe_idx) = sanitized.rfind('│')
+            {
+                sanitized.insert_str(pipe_idx, &padding);
+            }
+            sanitized
+        } else {
+            line
+        }
+    }
+
     let frame_width = lines
         .iter()
         .find(|line| line.starts_with('╭'))
@@ -208,7 +231,7 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
                 rebuilt.push_str(suffix);
                 rebuilt
             } else {
-                line
+                sanitize_version(line)
             }
         })
         .collect()

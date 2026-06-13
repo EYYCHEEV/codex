@@ -155,7 +155,9 @@ def collect_native_component_sets(packages: list[str]) -> list[tuple[str, ...]]:
     return component_sets
 
 
-def expand_packages(packages: list[str], codex_platform_packages: list[str]) -> list[str]:
+def expand_packages(
+    packages: list[str], codex_platform_packages: list[str]
+) -> list[str]:
     expanded: list[str] = []
     for package in packages:
         if package == "codex":

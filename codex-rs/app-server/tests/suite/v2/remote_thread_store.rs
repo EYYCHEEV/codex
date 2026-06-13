@@ -454,7 +454,9 @@ async fn start_in_process_client(
         feedback: CodexFeedback::new(),
         log_db: None,
         state_db: None,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+        // These persistence regressions do not execute shell or filesystem
+        // tools, so avoid registering host-local skill watchers.
+        environment_manager: Arc::new(EnvironmentManager::without_environments()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
         enable_codex_api_key_env: false,
@@ -571,6 +573,7 @@ fn create_config_toml_with_thread_store(
         .with_root_config(&format!(
             "experimental_thread_store = {{ type = \"in_memory\", id = \"{store_id}\" }}"
         ))
+        .with_provider_config("supports_websockets = false")
         .disable_feature(Feature::Plugins)
         .write(codex_home)
 }
