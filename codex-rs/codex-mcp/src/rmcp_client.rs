@@ -366,6 +366,7 @@ pub(crate) struct AsyncManagedClient {
     pub(crate) cached_server_info: Option<McpServerInfo>,
     pub(crate) codex_apps_tools_cache_context: Option<CodexAppsToolsCacheContext>,
     pub(crate) tool_filter: ToolFilter,
+    pub(crate) lazy_startup: bool,
     pub(crate) startup_complete: Arc<AtomicBool>,
     pub(crate) startup_reconnect: Option<Arc<CodexAppsStartupReconnect>>,
     pub(crate) tool_plugin_provenance: Arc<ToolPluginProvenance>,
@@ -392,6 +393,7 @@ impl AsyncManagedClient {
         runtime_auth_provider: Option<SharedAuthProvider>,
         client_elicitation_capability: ElicitationCapability,
         supports_openai_form_elicitation: bool,
+        lazy_startup: bool,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let reconnect_server_name = server_name.clone();
@@ -438,6 +440,7 @@ impl AsyncManagedClient {
         if codex_apps_tools_cache_context
             .as_ref()
             .is_some_and(CodexAppsToolsCacheContext::has_current_tools)
+            && !lazy_startup
         {
             let startup_task = client.clone();
             tokio::spawn(async move {
@@ -451,6 +454,7 @@ impl AsyncManagedClient {
             cached_server_info,
             codex_apps_tools_cache_context,
             tool_filter,
+            lazy_startup,
             startup_complete,
             startup_reconnect,
             tool_plugin_provenance,
@@ -511,6 +515,8 @@ impl AsyncManagedClient {
             && let Some(startup_tools) = self.cached_tools()
         {
             Some(startup_tools)
+        } else if self.lazy_startup && !self.startup_complete.load(Ordering::Acquire) {
+            Some(Vec::new())
         } else {
             match self.client().await {
                 Ok(client) => Some(client.listed_tools()),

@@ -51,6 +51,7 @@ use crate::runtime::McpRuntimeContext;
 use crate::server::EffectiveMcpServer;
 
 pub const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
+const CODEX_APPS_MCP_STARTUP_TIMEOUT_SECS: u64 = 90;
 const MCP_TOOL_NAME_PREFIX: &str = "mcp";
 const MCP_TOOL_NAME_DELIMITER: &str = "__";
 const CODEX_CONNECTORS_TOKEN_ENV_VAR: &str = "CODEX_CONNECTORS_TOKEN";
@@ -538,7 +539,7 @@ fn mcp_server_config_for_url(
         required: false,
         supports_parallel_tool_calls: false,
         disabled_reason: None,
-        startup_timeout_sec: Some(Duration::from_secs(30)),
+        startup_timeout_sec: Some(Duration::from_secs(CODEX_APPS_MCP_STARTUP_TIMEOUT_SECS)),
         tool_timeout_sec: None,
         default_tools_approval_mode: None,
         enabled_tools: None,
