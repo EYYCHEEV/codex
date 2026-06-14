@@ -337,6 +337,7 @@ impl McpConnectionSet {
             } else {
                 MAX_MCP_CATALOG_ITEMS
             };
+            let lazy_startup = is_host_owned_codex_apps;
             let metadata = McpServerMetadata::from(&server);
             let configured_config = server.config().clone();
             let protocol_mode = if matches!(
@@ -628,6 +629,7 @@ impl McpConnectionSet {
                     .map(|manager| manager.auth_change_state_receiver()),
                 protocol_mode,
                 catalog_item_limit,
+                /*lazy_startup*/ lazy_startup,
             );
             let defer_startup = allow_deferred_startup
                 && !tool_plugin_context.is_selected_plugin_mcp_server(&server_name)
@@ -665,6 +667,9 @@ impl McpConnectionSet {
                     catalog_item_limit,
                 },
             );
+            if lazy_startup {
+                continue;
+            }
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             let publication_gate = publication_gate.clone();

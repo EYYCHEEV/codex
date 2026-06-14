@@ -278,6 +278,9 @@ impl McpConnectionSet {
                 let required = self.required_servers.binary_search(server_name).is_ok();
                 // Keep the catalog that lets us skip startup even if it expires during the wait.
                 let cached_tools = view.cached_startup_tools(/*fallback*/ None);
+                if view.connection.client.lazy_startup {
+                    return (server_name, view, cached_tools);
+                }
                 let has_cached_tools = cached_tools.is_some();
                 let must_wait_for_startup = (required
                     && (!view.allows_cached_startup() || !has_cached_tools))
