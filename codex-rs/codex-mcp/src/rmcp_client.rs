@@ -129,6 +129,7 @@ pub(crate) struct AsyncManagedClient {
     pub(crate) client: Shared<BoxFuture<'static, Result<ManagedClient, StartupOutcomeError>>>,
     pub(crate) cached_tool_info_snapshot: Option<Vec<ToolInfo>>,
     pub(crate) cached_server_info: Option<McpServerInfo>,
+    pub(crate) lazy_startup: bool,
     pub(crate) startup_complete: Arc<AtomicBool>,
     pub(crate) tool_plugin_provenance: Arc<ToolPluginProvenance>,
     pub(crate) cancel_token: CancellationToken,
@@ -151,6 +152,7 @@ impl AsyncManagedClient {
         runtime_context: McpRuntimeContext,
         runtime_auth_provider: Option<SharedAuthProvider>,
         client_elicitation_capability: ElicitationCapability,
+        lazy_startup: bool,
     ) -> Self {
         let tool_filter = server
             .configured_config()
@@ -219,7 +221,7 @@ impl AsyncManagedClient {
             outcome
         };
         let client = fut.boxed().shared();
-        if cached_tool_info_snapshot.is_some() {
+        if cached_tool_info_snapshot.is_some() && !lazy_startup {
             let startup_task = client.clone();
             tokio::spawn(async move {
                 let _ = startup_task.await;
@@ -230,6 +232,7 @@ impl AsyncManagedClient {
             client,
             cached_tool_info_snapshot,
             cached_server_info,
+            lazy_startup,
             startup_complete,
             tool_plugin_provenance,
             cancel_token,
@@ -314,6 +317,8 @@ impl AsyncManagedClient {
         let tools = if let Some(startup_tools) = self.cached_tool_info_snapshot_while_initializing()
         {
             Some(startup_tools)
+        } else if self.lazy_startup && !self.startup_complete.load(Ordering::Acquire) {
+            Some(Vec::new())
         } else {
             match self.client().await {
                 Ok(client) => Some(client.listed_tools()),
