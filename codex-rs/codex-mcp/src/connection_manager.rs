@@ -233,6 +233,7 @@ impl McpConnectionSet {
             .into_iter()
             .filter(|(_, server)| server.enabled())
         {
+            let lazy_startup = server_name == CODEX_APPS_MCP_SERVER_NAME;
             let metadata = McpServerMetadata::from(&server);
             let configured_config = server.config().clone();
             let configured_tool_filter = ToolFilter::from_config(&configured_config);
@@ -346,6 +347,7 @@ impl McpConnectionSet {
                 runtime_auth_provider,
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
+                /*lazy_startup*/ lazy_startup,
             );
             servers.insert(
                 server_name.clone(),
@@ -359,6 +361,9 @@ impl McpConnectionSet {
                     tool_timeout: configured_tool_timeout,
                 },
             );
+            if lazy_startup {
+                continue;
+            }
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             let publication_gate = publication_gate.clone();
