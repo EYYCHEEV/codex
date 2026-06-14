@@ -421,6 +421,7 @@ pub(crate) struct AsyncManagedClient {
     pub(crate) cached_server_info: Option<McpServerInfo>,
     pub(crate) codex_apps_tools_cache_context: Option<ConnectorRuntimeContext<ToolInfo>>,
     pub(crate) tool_catalog_cache_context: Option<McpToolCatalogCacheContext>,
+    pub(crate) lazy_startup: bool,
     pub(crate) startup_complete: Arc<AtomicBool>,
     pub(crate) startup_reconnect: Option<Arc<CodexAppsStartupReconnect>>,
     pub(crate) cancel_token: CancellationToken,
@@ -451,6 +452,7 @@ impl AsyncManagedClient {
         auth_changes: Option<watch::Receiver<AuthChangeState>>,
         protocol_mode: McpProtocolMode,
         catalog_item_limit: usize,
+        lazy_startup: bool,
     ) -> Self {
         let is_codex_apps_mcp_server = server_name == CODEX_APPS_MCP_SERVER_NAME;
         let reconnect_server_name = server_name.clone();
@@ -502,6 +504,7 @@ impl AsyncManagedClient {
             cached_server_info,
             codex_apps_tools_cache_context,
             tool_catalog_cache_context,
+            lazy_startup,
             startup_complete,
             startup_reconnect,
             cancel_token,
@@ -591,6 +594,8 @@ impl AsyncManagedClient {
             && let Some(startup_tools) = self.cached_tools()
         {
             Ok(startup_tools)
+        } else if self.lazy_startup && !self.startup_complete.load(Ordering::Acquire) {
+            Ok(Vec::new())
         } else {
             match self.client().await {
                 Ok(client) => Ok(client.listed_tools().await),

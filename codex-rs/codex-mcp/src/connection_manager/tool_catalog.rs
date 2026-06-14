@@ -224,6 +224,9 @@ impl McpConnectionSet {
                 let cached_tools = view.connection.client.cached_tools().filter(|tools| {
                     view.connection.client.is_codex_apps_mcp_server || !tools.is_empty()
                 });
+                if view.connection.client.lazy_startup {
+                    return (server_name, view, cached_tools);
+                }
                 let has_cached_tools = cached_tools.is_some();
                 let must_wait_for_startup = (required
                     && (!view.connection.startup_is_dormant() || !has_cached_tools))
