@@ -145,6 +145,7 @@ async fn create_ready_async_managed_client(tools: Vec<ToolInfo>) -> AsyncManaged
         codex_apps_tools_cache_context: None,
         tool_catalog_cache_context: None,
         tool_filter: ToolFilter::default(),
+        lazy_startup: false,
         startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         startup_reconnect: None,
         tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -185,6 +186,7 @@ fn create_test_manager_with_failed_apps_startup(
             codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             startup_reconnect: Some(Arc::new(CodexAppsStartupReconnect::new(reconnect_factory))),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -727,6 +729,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
             codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -869,6 +872,7 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
             codex_apps_tools_cache_context: None,
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -971,6 +975,7 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tools() {
             codex_apps_tools_cache_context: None,
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1027,6 +1032,7 @@ async fn shutdown_cancels_pending_tool_listing() {
             codex_apps_tools_cache_context: None,
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1075,6 +1081,7 @@ async fn shutdown_continues_after_caller_is_aborted() {
             codex_apps_tools_cache_context: None,
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1129,6 +1136,7 @@ async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
             codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1139,6 +1147,40 @@ async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
     let timeout_result =
         tokio::time::timeout(Duration::from_millis(10), manager.list_all_tools()).await;
     let tools = timeout_result.expect("shared empty cache should not block");
+    assert!(tools.is_empty());
+}
+
+#[tokio::test]
+async fn list_all_tools_does_not_start_lazy_codex_apps_without_cache() {
+    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+        .boxed()
+        .shared();
+    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionManager::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.clients.insert(
+        CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        AsyncManagedClient {
+            client: pending_client,
+            is_codex_apps_mcp_server: true,
+            cached_server_info: None,
+            codex_apps_tools_cache_context: None,
+            tool_filter: ToolFilter::default(),
+            lazy_startup: true,
+            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            startup_reconnect: None,
+            tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
+            cancel_token: CancellationToken::new(),
+        },
+    );
+
+    let timeout_result =
+        tokio::time::timeout(Duration::from_millis(10), manager.list_all_tools()).await;
+    let tools = timeout_result.expect("lazy codex_apps should not block without a cache");
     assert!(tools.is_empty());
 }
 
@@ -1183,6 +1225,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails()
             codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,
             tool_filter: ToolFilter::default(),
+            lazy_startup: false,
             startup_complete,
             startup_reconnect: None,
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
@@ -1650,6 +1693,93 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
         startup_outcome_error_message(error),
         "local stdio MCP server `stdio` requires a local environment"
     );
+    cancel_token.cancel();
+}
+
+#[tokio::test]
+async fn host_owned_codex_apps_is_registered_without_startup_status() {
+    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let (tx_event, rx_event) = async_channel::unbounded();
+    let codex_home = tempdir().expect("tempdir");
+    let mcp_servers = HashMap::from([(
+        CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        EffectiveMcpServer::configured(McpServerConfig {
+            transport: McpServerTransportConfig::StreamableHttp {
+                url: "http://127.0.0.1:1".to_string(),
+                bearer_token_env_var: None,
+                http_headers: None,
+                env_http_headers: None,
+            },
+            environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+            enabled: true,
+            required: false,
+            supports_parallel_tool_calls: false,
+            disabled_reason: None,
+            startup_timeout_sec: None,
+            tool_timeout_sec: None,
+            default_tools_approval_mode: None,
+            enabled_tools: None,
+            disabled_tools: None,
+            scopes: None,
+            oauth: None,
+            oauth_resource: None,
+            tools: HashMap::new(),
+        }),
+    )]);
+
+    let cancel_token = CancellationToken::new();
+    let manager = McpConnectionManager::new(
+        &mcp_servers,
+        OAuthCredentialsStoreMode::default(),
+        AuthKeyringBackendKind::default(),
+        HashMap::new(),
+        &approval_policy,
+        "submit-id".to_string(),
+        tx_event,
+        cancel_token.clone(),
+        PermissionProfile::default(),
+        McpRuntimeContext::new(
+            Arc::new(EnvironmentManager::without_environments()),
+            PathBuf::from("/tmp"),
+        ),
+        codex_home.path().to_path_buf(),
+        CodexAppsToolsCacheKey {
+            account_id: None,
+            chatgpt_user_id: None,
+            is_workspace_account: false,
+        },
+        /*host_owned_codex_apps_enabled*/ true,
+        /*prefix_mcp_tool_names*/ true,
+        ElicitationCapability::default(),
+        ToolPluginProvenance::default(),
+        /*auth*/ None,
+        /*elicitation_reviewer*/ None,
+    )
+    .await;
+
+    assert!(manager.clients.contains_key(CODEX_APPS_MCP_SERVER_NAME));
+    let tools = tokio::time::timeout(Duration::from_millis(10), manager.list_all_tools())
+        .await
+        .expect("lazy codex_apps should not block tool listing");
+    assert!(tools.is_empty());
+
+    let event = tokio::time::timeout(Duration::from_millis(100), rx_event.recv())
+        .await
+        .expect("startup complete event")
+        .expect("event channel open");
+    match event.msg {
+        EventMsg::McpStartupComplete(summary) => {
+            assert!(summary.ready.is_empty());
+            assert!(summary.cancelled.is_empty());
+            assert!(summary.failed.is_empty());
+        }
+        EventMsg::McpStartupUpdate(update) => {
+            panic!("lazy codex_apps should not emit startup update: {update:?}");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    assert!(rx_event.try_recv().is_err());
     cancel_token.cancel();
 }
 

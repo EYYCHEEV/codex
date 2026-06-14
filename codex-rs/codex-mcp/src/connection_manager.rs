@@ -184,16 +184,20 @@ impl McpConnectionManager {
         {
             server_metadata.insert(server_name.clone(), McpServerMetadata::from(&server));
             let cancel_token = startup_cancellation_token.child_token();
-            if let Some(tx_event) = tx_event.as_ref() {
-                let _ = emit_update(
-                    startup_submit_id.as_str(),
-                    tx_event,
-                    McpStartupUpdateEvent {
-                        server: server_name.clone(),
-                        status: McpStartupStatus::Starting,
-                    },
-                )
-                .await;
+            let lazy_startup =
+                host_owned_codex_apps_enabled && server_name == CODEX_APPS_MCP_SERVER_NAME;
+            if !lazy_startup {
+                if let Some(tx_event) = tx_event.as_ref() {
+                    let _ = emit_update(
+                        startup_submit_id.as_str(),
+                        tx_event,
+                        McpStartupUpdateEvent {
+                            server: server_name.clone(),
+                            status: McpStartupStatus::Starting,
+                        },
+                    )
+                    .await;
+                }
             }
             let configured_config = server.configured_config().cloned();
             let resolved_environment = configured_config.as_ref().map_or_else(
@@ -272,8 +276,12 @@ impl McpConnectionManager {
                 runtime_auth_provider,
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
+                lazy_startup,
             );
             clients.insert(server_name.clone(), async_managed_client.clone());
+            if lazy_startup {
+                continue;
+            }
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             join_set.spawn(async move {
