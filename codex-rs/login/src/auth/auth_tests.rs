@@ -53,11 +53,13 @@ async fn refresh_without_id_token() {
         last_refresh: Some(Utc::now()),
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
     save_auth(
         codex_home.path(),
         &auth_dot_json,
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("failed to write auth file");
 
@@ -113,17 +115,20 @@ async fn refresh_with_new_id_token_updates_account_id() {
         last_refresh: Some(Utc::now()),
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
     save_auth(
         codex_home.path(),
         &auth_dot_json,
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("failed to write auth file");
 
     let storage = create_auth_storage(
         codex_home.path().to_path_buf(),
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     );
     let updated = super::persist_tokens(
         &storage,
@@ -166,11 +171,13 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         last_refresh: Some(Utc::now()),
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
     save_auth(
         codex_home.path(),
         &auth_dot_json,
         AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
     )
     .expect("failed to write auth file");
 
@@ -178,16 +185,22 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::default(),
     )
     .await
     .expect("load_auth should succeed")
     .expect("auth should exist");
     assert_eq!(auth.get_account_id().as_deref(), Some("workspace-a"));
 
-    let repaired = load_auth_dot_json(codex_home.path(), AuthCredentialsStoreMode::File)
-        .expect("load_auth_dot_json should succeed")
-        .expect("auth.json should exist");
+    let repaired = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("load_auth_dot_json should succeed")
+    .expect("auth.json should exist");
     let tokens = repaired.tokens.expect("tokens should exist");
     assert_eq!(
         tokens.id_token.chatgpt_account_id.as_deref(),
