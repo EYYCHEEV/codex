@@ -287,6 +287,7 @@ async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Re
         last_refresh: Some(initial_last_refresh),
         agent_identity: None,
         personal_access_token: None,
+        bedrock_api_key: None,
     };
     ctx.write_auth(&initial_auth).await?;
 

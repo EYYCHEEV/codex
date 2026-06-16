@@ -695,6 +695,7 @@ async fn falls_back_to_ephemeral_port_when_fixed_port_is_occupied_by_another_pro
         force_state: Some("fallback_state".to_string()),
         forced_chatgpt_workspace_id: None,
         codex_streamlined_login: false,
+        auth_keyring_backend_kind: AuthKeyringBackendKind::Direct,
     })?;
 
     assert_ne!(server.actual_port, occupied_port);
