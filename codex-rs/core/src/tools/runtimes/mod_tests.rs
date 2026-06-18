@@ -684,12 +684,8 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_after_final_shell_startu
     permissions.set_mode(0o755);
     std::fs::set_permissions(&final_shell_path, permissions).expect("chmod final shell");
 
-    let session_shell = shell_with_snapshot(
-        ShellType::Sh,
-        "/bin/sh",
-        snapshot_path.abs(),
-        dir.path().abs(),
-    );
+    let (session_shell, shell_snapshot) =
+        shell_with_snapshot(ShellType::Sh, "/bin/sh", snapshot_path.abs());
     let command = vec![
         final_shell_path.to_string_lossy().into_owned(),
         "-lc".to_string(),
@@ -705,7 +701,7 @@ fn maybe_wrap_shell_lc_with_snapshot_restores_proxy_env_after_final_shell_startu
     let rewritten = maybe_wrap_shell_lc_with_snapshot(
         &command,
         &session_shell,
-        &dir.path().abs(),
+        Some(&shell_snapshot),
         &HashMap::new(),
         &env,
         &RuntimePathPrepends::default(),
