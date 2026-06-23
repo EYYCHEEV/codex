@@ -319,9 +319,7 @@ impl CodexAuth {
         };
 
         match auth_mode {
-            ApiAuthMode::Chatgpt => {
-                Ok(Self::Chatgpt(ChatgptAuth { state, storage }))
-            }
+            ApiAuthMode::Chatgpt => Ok(Self::Chatgpt(ChatgptAuth { state, storage })),
             ApiAuthMode::ChatgptAuthTokens => {
                 Ok(Self::ChatgptAuthTokens(ChatgptAuthTokens { state }))
             }
