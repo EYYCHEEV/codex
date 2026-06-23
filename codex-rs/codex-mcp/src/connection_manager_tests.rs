@@ -1751,6 +1751,7 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
         /*host_owned_codex_apps_enabled*/ true,
         /*prefix_mcp_tool_names*/ true,
         ElicitationCapability::default(),
+        /*supports_openai_form_elicitation*/ false,
         ToolPluginProvenance::default(),
         /*auth*/ None,
         /*elicitation_reviewer*/ None,
