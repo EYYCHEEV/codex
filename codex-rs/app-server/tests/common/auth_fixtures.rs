@@ -216,8 +216,8 @@ mod tests {
     use std::time::SystemTime;
     use std::time::UNIX_EPOCH;
 
-    #[test]
-    fn write_chatgpt_auth_backfills_jwt_account_id_from_fixture_account_id() -> Result<()> {
+    #[tokio::test]
+    async fn write_chatgpt_auth_backfills_jwt_account_id_from_fixture_account_id() -> Result<()> {
         let codex_home = std::env::temp_dir().join(format!(
             "app-test-support-auth-fixture-{}-{}",
             std::process::id(),
@@ -232,8 +232,15 @@ mod tests {
             AuthCredentialsStoreMode::File,
         )?;
 
-        let auth = CodexAuth::from_auth_storage(&codex_home, AuthCredentialsStoreMode::File)?
-            .expect("expected auth");
+        let auth = CodexAuth::from_auth_storage(
+            &codex_home,
+            AuthCredentialsStoreMode::File,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await?
+        .expect("expected auth");
         assert_eq!(auth.get_account_id().as_deref(), Some("workspace-a"));
         assert_eq!(
             auth.get_token_data()?
