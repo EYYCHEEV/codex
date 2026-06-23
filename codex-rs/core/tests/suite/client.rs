@@ -1528,6 +1528,7 @@ async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
         AuthCredentialsStoreMode::File,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
+        /*auth_route_config*/ None,
     )
     .await
     {
