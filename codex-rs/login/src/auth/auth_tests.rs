@@ -188,6 +188,8 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
+        /*agent_identity_authapi_base_url*/ None,
+        /*auth_route_config*/ None,
     )
     .await
     .expect("load_auth should succeed")
