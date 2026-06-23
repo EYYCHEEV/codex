@@ -688,6 +688,7 @@ async fn falls_back_to_ephemeral_port_when_fixed_port_is_occupied_by_another_pro
     let server = run_login_server(ServerOptions {
         codex_home,
         cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        auth_route_config: None,
         client_id: codex_login::CLIENT_ID.to_string(),
         issuer,
         port: occupied_port,
