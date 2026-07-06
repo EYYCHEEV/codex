@@ -41,6 +41,7 @@ use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
+use codex_protocol::protocol::McpStartupSnapshot;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
@@ -341,8 +342,37 @@ impl LocalAgentControl {
         thread.agent_status().await
     }
 
+    #[cfg(test)]
+    pub(crate) fn register_agent_metadata_for_tests(
+        &self,
+        agent_id: ThreadId,
+        agent_path: AgentPath,
+        last_task_message: Option<String>,
+    ) {
+        let reservation = self
+            .runtime
+            .registry
+            .reserve_spawn_slot(/*max_threads*/ None)
+            .expect("test agent metadata reservation should succeed");
+        reservation.commit(AgentMetadata {
+            agent_id: Some(agent_id),
+            agent_path: Some(agent_path),
+            last_task_message,
+            ..Default::default()
+        });
+    }
+
     pub(crate) fn get_agent_metadata(&self, agent_id: ThreadId) -> Option<AgentMetadata> {
         self.runtime.registry.agent_metadata_for_thread(agent_id)
+    }
+
+    pub(crate) async fn get_mcp_startup_snapshot(
+        &self,
+        agent_id: ThreadId,
+    ) -> Option<McpStartupSnapshot> {
+        let state = self.runtime.upgrade().ok()?;
+        let thread = state.get_thread(agent_id).await.ok()?;
+        thread.mcp_startup_snapshot().await
     }
 
     pub(crate) async fn list_agents(
