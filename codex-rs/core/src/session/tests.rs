@@ -5454,6 +5454,190 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
     assert!(msg.contains("zsh fork feature enabled, but no packaged zsh fork is available"));
 }
 
+#[tokio::test]
+async fn mcp_startup_events_update_live_session_snapshot() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let turn_context = session.new_default_turn().await;
+
+    session
+        .send_event(
+            turn_context.as_ref(),
+            EventMsg::McpStartupUpdate(codex_protocol::protocol::McpStartupUpdateEvent {
+                server: "docs".to_string(),
+                status: codex_protocol::protocol::McpStartupStatus::Starting,
+            }),
+        )
+        .await;
+    session
+        .send_event(
+            turn_context.as_ref(),
+            EventMsg::McpStartupComplete(codex_protocol::protocol::McpStartupCompleteEvent {
+                ready: Vec::new(),
+                failed: vec![codex_protocol::protocol::McpStartupFailure {
+                    server: "docs".to_string(),
+                    error: "boot failed".to_string(),
+                }],
+                cancelled: Vec::new(),
+            }),
+        )
+        .await;
+
+    let snapshot = session
+        .mcp_startup_snapshot()
+        .await
+        .expect("MCP startup snapshot should be populated");
+    let expected = codex_protocol::protocol::McpStartupSnapshot {
+        statuses: std::collections::BTreeMap::from([(
+            "docs".to_string(),
+            codex_protocol::protocol::McpStartupStatus::Failed {
+                error: "boot failed".to_string(),
+                reason: None,
+            },
+        )]),
+        complete: Some(codex_protocol::protocol::McpStartupCompleteEvent {
+            ready: Vec::new(),
+            failed: vec![codex_protocol::protocol::McpStartupFailure {
+                server: "docs".to_string(),
+                error: "boot failed".to_string(),
+            }],
+            cancelled: Vec::new(),
+        }),
+    };
+    assert_eq!(snapshot, expected);
+}
+
+#[tokio::test]
+async fn mcp_startup_recording_event_sender_updates_snapshot_and_forwards_event() {
+    let (session, _turn_context, rx_event) = make_session_and_context_with_rx().await;
+    let event = Event {
+        id: "mcp-startup".to_string(),
+        msg: EventMsg::McpStartupUpdate(codex_protocol::protocol::McpStartupUpdateEvent {
+            server: "docs".to_string(),
+            status: codex_protocol::protocol::McpStartupStatus::Failed {
+                error: "boot failed".to_string(),
+                reason: None,
+            },
+        }),
+    };
+
+    session
+        .begin_mcp_startup_recording("mcp-startup".to_string())
+        .await
+        .send(event.clone())
+        .await
+        .expect("proxy event send should succeed");
+
+    let forwarded = rx_event
+        .recv()
+        .await
+        .expect("proxy should forward original event");
+    assert_eq!(forwarded.id, event.id);
+    let EventMsg::McpStartupUpdate(forwarded_update) = forwarded.msg else {
+        panic!("expected forwarded MCP startup update");
+    };
+    assert_eq!(forwarded_update.server, "docs");
+    assert_eq!(
+        forwarded_update.status,
+        codex_protocol::protocol::McpStartupStatus::Failed {
+            error: "boot failed".to_string(),
+            reason: None,
+        }
+    );
+    let snapshot = session
+        .mcp_startup_snapshot()
+        .await
+        .expect("MCP startup snapshot should be populated");
+    assert_eq!(
+        snapshot.statuses.get("docs"),
+        Some(&codex_protocol::protocol::McpStartupStatus::Failed {
+            error: "boot failed".to_string(),
+            reason: None,
+        })
+    );
+}
+
+#[tokio::test]
+async fn mcp_startup_recording_resets_and_ignores_stale_round_events() {
+    let (session, _turn_context, rx_event) = make_session_and_context_with_rx().await;
+    let first_round = session
+        .begin_mcp_startup_recording("first-mcp-startup".to_string())
+        .await;
+    first_round
+        .send(Event {
+            id: "first-mcp-startup".to_string(),
+            msg: EventMsg::McpStartupUpdate(codex_protocol::protocol::McpStartupUpdateEvent {
+                server: "legacy".to_string(),
+                status: codex_protocol::protocol::McpStartupStatus::Failed {
+                    error: "old failure".to_string(),
+                    reason: None,
+                },
+            }),
+        })
+        .await
+        .expect("first round event should send");
+    rx_event
+        .recv()
+        .await
+        .expect("first round event should be forwarded");
+
+    assert_eq!(
+        session.mcp_startup_snapshot().await,
+        Some(codex_protocol::protocol::McpStartupSnapshot {
+            statuses: std::collections::BTreeMap::from([(
+                "legacy".to_string(),
+                codex_protocol::protocol::McpStartupStatus::Failed {
+                    error: "old failure".to_string(),
+                    reason: None,
+                },
+            )]),
+            complete: None,
+        })
+    );
+
+    let second_round = session
+        .begin_mcp_startup_recording("second-mcp-startup".to_string())
+        .await;
+    assert_eq!(session.mcp_startup_snapshot().await, None);
+
+    first_round
+        .send(Event {
+            id: "first-mcp-startup".to_string(),
+            msg: EventMsg::McpStartupUpdate(codex_protocol::protocol::McpStartupUpdateEvent {
+                server: "legacy".to_string(),
+                status: codex_protocol::protocol::McpStartupStatus::Cancelled,
+            }),
+        })
+        .await
+        .expect("stale first round event should still forward");
+    second_round
+        .send(Event {
+            id: "second-mcp-startup".to_string(),
+            msg: EventMsg::McpStartupUpdate(codex_protocol::protocol::McpStartupUpdateEvent {
+                server: "docs".to_string(),
+                status: codex_protocol::protocol::McpStartupStatus::Ready,
+            }),
+        })
+        .await
+        .expect("second round event should send");
+    for _ in 0..2 {
+        rx_event
+            .recv()
+            .await
+            .expect("round events should be forwarded");
+    }
+
+    assert_eq!(
+        session.mcp_startup_snapshot().await,
+        Some(codex_protocol::protocol::McpStartupSnapshot {
+            statuses: std::collections::BTreeMap::from([(
+                "docs".to_string(),
+                codex_protocol::protocol::McpStartupStatus::Ready,
+            )]),
+            complete: None,
+        })
+    );
+}
+
 async fn build_initial_context(
     session: &Session,
     turn_context: &Arc<TurnContext>,
@@ -5707,6 +5891,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        mcp_startup_recording: Arc::new(Mutex::new(Default::default())),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
@@ -7880,6 +8065,7 @@ where
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        mcp_startup_recording: Arc::new(Mutex::new(Default::default())),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
@@ -7924,6 +8110,23 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
         .await
         .expect("a fresh cancellation token cannot be cancelled");
+    session
+        .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
+            codex_protocol::protocol::McpStartupUpdateEvent {
+                server: "legacy".to_string(),
+                status: codex_protocol::protocol::McpStartupStatus::Failed {
+                    error: "old failure".to_string(),
+                    reason: None,
+                },
+            },
+        ))
+        .await;
+    assert!(
+        session
+            .mcp_startup_snapshot()
+            .await
+            .is_some_and(|snapshot| snapshot.statuses.contains_key("legacy"))
+    );
 
     let refreshed_mcp_servers = serde_json::from_value::<HashMap<String, McpServerConfig>>(json!({
         "refreshed": {
@@ -7954,6 +8157,12 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
         .capture_step_context(next_turn, &CancellationToken::new())
         .await
         .expect("a fresh cancellation token cannot be cancelled");
+    assert!(
+        !session
+            .mcp_startup_snapshot()
+            .await
+            .is_some_and(|snapshot| snapshot.statuses.contains_key("legacy"))
+    );
     let rematerialized_old = session
         .mcp_runtime_for_step(&turn_context, /*selected_capability_roots*/ &[])
         .await;

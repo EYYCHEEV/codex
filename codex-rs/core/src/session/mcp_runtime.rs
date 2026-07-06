@@ -101,11 +101,12 @@ impl Session {
             mcp_projection,
             ready_selected_capability_roots,
             elicitation_reviewer,
-        );
+        )
+        .await;
         self.services.mcp_runtime.replace(input).await;
     }
 
-    pub(super) fn build_mcp_runtime_input(
+    pub(super) async fn build_mcp_runtime_input(
         &self,
         desired: &McpDesiredState,
         mcp_projection: McpRuntimeProjection,
@@ -155,7 +156,10 @@ impl Session {
             ready_selected_capability_roots: ready_selected_capability_roots.to_vec(),
             mcp_servers,
             submit_id: desired.submit_id.clone(),
-            tx_event: Some(self.get_tx_event()),
+            tx_event: Some(
+                self.begin_mcp_startup_recording(desired.submit_id.clone())
+                    .await,
+            ),
             startup_cancellation_token: CancellationToken::new(),
             runtime_context,
             codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),

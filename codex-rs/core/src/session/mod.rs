@@ -368,6 +368,7 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::McpStartupSnapshot;
 use codex_protocol::protocol::ModelRerouteEvent;
 use codex_protocol::protocol::ModelRerouteReason;
 use codex_protocol::protocol::ModelVerification;
@@ -394,6 +395,57 @@ use codex_tools::UnifiedExecShellMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
 use codex_utils_stream_parser::ProposedPlanSegment;
+
+#[derive(Debug, Default)]
+pub(super) struct McpStartupRecordingState {
+    active_event_id: Option<String>,
+    snapshot: McpStartupSnapshot,
+}
+
+impl McpStartupRecordingState {
+    fn snapshot(&self) -> Option<McpStartupSnapshot> {
+        (!self.snapshot.is_empty()).then_some(self.snapshot.clone())
+    }
+
+    fn begin_round(&mut self, event_id: String) {
+        self.active_event_id = Some(event_id);
+        self.snapshot = McpStartupSnapshot::default();
+    }
+
+    fn record_event(&mut self, event: &Event) {
+        let should_record = self
+            .active_event_id
+            .as_deref()
+            .is_none_or(|active_id| active_id == event.id);
+        if should_record {
+            record_mcp_startup_event_in_snapshot(&mut self.snapshot, &event.msg);
+        }
+    }
+
+    #[cfg(test)]
+    fn record_msg(&mut self, msg: &EventMsg) {
+        record_mcp_startup_event_in_snapshot(&mut self.snapshot, msg);
+    }
+}
+
+fn record_mcp_startup_event_in_snapshot(snapshot: &mut McpStartupSnapshot, msg: &EventMsg) {
+    match msg {
+        EventMsg::McpStartupUpdate(update) => {
+            snapshot.record_update(update);
+        }
+        EventMsg::McpStartupComplete(complete) => {
+            snapshot.record_complete(complete);
+        }
+        _ => {}
+    }
+}
+
+async fn record_current_mcp_startup_event_in_snapshot(
+    recording: &tokio::sync::Mutex<McpStartupRecordingState>,
+    event: &Event,
+) {
+    recording.lock().await.record_event(event);
+}
 
 /// Queue and lifecycle endpoints for a running [`Session`].
 ///
@@ -2062,6 +2114,7 @@ impl Session {
     }
 
     async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+        self.record_current_mcp_startup_event(&event).await;
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
@@ -3282,6 +3335,45 @@ impl Session {
 
     pub(crate) fn multi_agent_version(&self) -> Option<MultiAgentVersion> {
         self.multi_agent_version.get().copied()
+    }
+
+    pub(crate) async fn mcp_startup_snapshot(&self) -> Option<McpStartupSnapshot> {
+        self.mcp_startup_recording.lock().await.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn record_mcp_startup_event(&self, msg: &EventMsg) {
+        self.mcp_startup_recording.lock().await.record_msg(msg);
+    }
+
+    async fn record_current_mcp_startup_event(&self, event: &Event) {
+        record_current_mcp_startup_event_in_snapshot(self.mcp_startup_recording.as_ref(), event)
+            .await;
+    }
+
+    pub(crate) async fn begin_mcp_startup_recording(&self, event_id: String) -> Sender<Event> {
+        self.mcp_startup_recording
+            .lock()
+            .await
+            .begin_round(event_id.clone());
+        self.mcp_startup_recording_event_sender(event_id)
+    }
+
+    fn mcp_startup_recording_event_sender(&self, event_id: String) -> Sender<Event> {
+        let (tx, rx) = async_channel::unbounded::<Event>();
+        let downstream_tx = self.tx_event.clone();
+        let recording = Arc::clone(&self.mcp_startup_recording);
+        tokio::spawn(async move {
+            while let Ok(event) = rx.recv().await {
+                if event.id == event_id {
+                    record_current_mcp_startup_event_in_snapshot(recording.as_ref(), &event).await;
+                }
+                if downstream_tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tx
     }
 
     pub(crate) fn set_multi_agent_version_if_unset(

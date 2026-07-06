@@ -388,6 +388,91 @@ fn agent_status_output_schema() -> Value {
     })
 }
 
+fn mcp_startup_status_output_schema() -> Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "state": { "type": "string", "const": "starting" }
+                },
+                "required": ["state"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "state": { "type": "string", "const": "ready" }
+                },
+                "required": ["state"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "state": { "type": "string", "const": "failed" },
+                    "error": { "type": "string" },
+                    "reason": {
+                        "type": "string",
+                        "enum": ["reauthentication_required"]
+                    }
+                },
+                "required": ["state", "error"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "state": { "type": "string", "const": "cancelled" }
+                },
+                "required": ["state"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn mcp_startup_snapshot_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "statuses": {
+                "type": "object",
+                "description": "Latest MCP startup status keyed by MCP server name.",
+                "additionalProperties": mcp_startup_status_output_schema()
+            },
+            "complete": {
+                "type": "object",
+                "properties": {
+                    "ready": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "failed": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "server": { "type": "string" },
+                                "error": { "type": "string" }
+                            },
+                            "required": ["server", "error"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "cancelled": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["ready", "failed", "cancelled"],
+                "additionalProperties": false
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
 fn spawn_agent_output_schema_v1() -> Value {
     json!({
         "type": "object",
@@ -468,6 +553,10 @@ fn list_agents_output_schema() -> Value {
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
+                        },
+                        "mcp_startup": {
+                            "description": "Latest MCP startup snapshot for the agent, when available.",
+                            "allOf": [mcp_startup_snapshot_output_schema()]
                         }
                     },
                     "required": ["agent_name", "agent_status"],
@@ -504,6 +593,11 @@ fn wait_output_schema_v1() -> Value {
             "timed_out": {
                 "type": "boolean",
                 "description": "Whether the wait call returned due to timeout before any agent reached a final status."
+            },
+            "mcp_startup": {
+                "type": "object",
+                "description": "MCP startup snapshots keyed by the same agent ids as status, when available.",
+                "additionalProperties": mcp_startup_snapshot_output_schema()
             }
         },
         "required": ["status", "timed_out"],

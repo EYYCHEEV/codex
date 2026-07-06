@@ -3721,7 +3721,7 @@ pub struct TurnDiffEvent {
     pub unified_diff: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
 pub struct McpStartupUpdateEvent {
     /// Server name being started.
     pub server: String,
@@ -3729,7 +3729,7 @@ pub struct McpStartupUpdateEvent {
     pub status: McpStartupStatus,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "state")]
 #[ts(rename_all = "snake_case", tag = "state")]
 pub enum McpStartupStatus {
@@ -3751,17 +3751,60 @@ pub enum McpStartupFailureReason {
     ReauthenticationRequired,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq, Default)]
 pub struct McpStartupCompleteEvent {
     pub ready: Vec<String>,
     pub failed: Vec<McpStartupFailure>,
     pub cancelled: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
 pub struct McpStartupFailure {
     pub server: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
+pub struct McpStartupSnapshot {
+    /// Latest startup status keyed by MCP server name.
+    #[serde(default)]
+    pub statuses: BTreeMap<String, McpStartupStatus>,
+    /// Most recent aggregate completion summary, when startup has completed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub complete: Option<McpStartupCompleteEvent>,
+}
+
+impl McpStartupSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.statuses.is_empty() && self.complete.is_none()
+    }
+
+    pub fn record_update(&mut self, update: &McpStartupUpdateEvent) {
+        self.statuses
+            .insert(update.server.clone(), update.status.clone());
+    }
+
+    pub fn record_complete(&mut self, complete: &McpStartupCompleteEvent) {
+        for server in &complete.ready {
+            self.statuses
+                .insert(server.clone(), McpStartupStatus::Ready);
+        }
+        for failure in &complete.failed {
+            self.statuses.insert(
+                failure.server.clone(),
+                McpStartupStatus::Failed {
+                    error: failure.error.clone(),
+                    reason: None,
+                },
+            );
+        }
+        for server in &complete.cancelled {
+            self.statuses
+                .insert(server.clone(), McpStartupStatus::Cancelled);
+        }
+        self.complete = Some(complete.clone());
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -6271,6 +6314,63 @@ mod tests {
         assert_eq!(value["msg"]["failed"][0]["server"], "b");
         assert_eq!(value["msg"]["failed"][0]["error"], "bad");
         assert_eq!(value["msg"]["cancelled"][0], "c");
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_mcp_startup_snapshot() -> Result<()> {
+        let snapshot = McpStartupSnapshot {
+            statuses: BTreeMap::from([
+                ("docs".to_string(), McpStartupStatus::Ready),
+                (
+                    "sentry".to_string(),
+                    McpStartupStatus::Failed {
+                        error: "boom".to_string(),
+                        reason: None,
+                    },
+                ),
+            ]),
+            complete: Some(McpStartupCompleteEvent {
+                ready: vec!["docs".to_string()],
+                failed: vec![McpStartupFailure {
+                    server: "sentry".to_string(),
+                    error: "boom".to_string(),
+                }],
+                cancelled: Vec::new(),
+            }),
+        };
+
+        let value = serde_json::to_value(&snapshot)?;
+        assert_eq!(
+            value,
+            json!({
+                "statuses": {
+                    "docs": {"state": "ready"},
+                    "sentry": {"state": "failed", "error": "boom"}
+                },
+                "complete": {
+                    "ready": ["docs"],
+                    "failed": [{"server": "sentry", "error": "boom"}],
+                    "cancelled": []
+                }
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_mcp_startup_snapshot_without_complete_summary() -> Result<()> {
+        let snapshot: McpStartupSnapshot = serde_json::from_value(json!({
+            "statuses": {
+                "docs": {"state": "starting"}
+            }
+        }))?;
+
+        let expected = McpStartupSnapshot {
+            statuses: BTreeMap::from([("docs".to_string(), McpStartupStatus::Starting)]),
+            complete: None,
+        };
+        assert_eq!(snapshot, expected);
         Ok(())
     }
 
