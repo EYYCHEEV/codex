@@ -52,9 +52,14 @@ impl Handler {
             .await
             .map_err(collab_spawn_error)?;
 
-        let agents = agents
-            .into_iter()
-            .map(|agent| ListedAgent {
+        let mut listed = Vec::with_capacity(agents.len());
+        for agent in agents {
+            let mcp_startup = session
+                .services
+                .agent_control
+                .get_mcp_startup_snapshot(agent.thread_id)
+                .await;
+            listed.push(ListedAgent {
                 agent_name: agent
                     .metadata
                     .agent_path
@@ -62,8 +67,10 @@ impl Handler {
                     .map(ToString::to_string)
                     .unwrap_or_else(|| agent.thread_id.to_string()),
                 agent_status: agent.status,
-            })
-            .collect();
+                mcp_startup,
+            });
+        }
+        let agents = listed;
         Ok(boxed_tool_output(ListAgentsResult { agents }))
     }
 }
@@ -84,6 +91,8 @@ struct ListAgentsArgs {
 struct ListedAgent {
     agent_name: String,
     agent_status: AgentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_startup: Option<codex_protocol::protocol::McpStartupSnapshot>,
 }
 
 #[derive(Debug, Serialize)]

@@ -6,6 +6,7 @@ use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::protocol::McpStartupSnapshot;
 use codex_tools::ToolSpec;
 use futures::FutureExt;
 use futures::StreamExt;
@@ -205,6 +206,9 @@ impl Handler {
 
         let timed_out = statuses.is_empty();
         let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
+        let mcp_startup =
+            build_wait_agent_mcp_startup(&session.services.agent_control, &target_by_thread_id)
+                .await;
         let result = WaitAgentResult {
             status: statuses
                 .into_iter()
@@ -216,6 +220,7 @@ impl Handler {
                 })
                 .collect(),
             timed_out,
+            mcp_startup,
         };
 
         session
@@ -299,6 +304,8 @@ struct WaitArgs {
 pub(crate) struct WaitAgentResult {
     pub(crate) status: HashMap<String, AgentStatus>,
     pub(crate) timed_out: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mcp_startup: Option<HashMap<String, McpStartupSnapshot>>,
 }
 
 impl ToolOutput for WaitAgentResult {
@@ -341,4 +348,17 @@ async fn wait_for_final_status(
         return Ok(Some((thread_id, latest)));
     }
     std::future::pending().await
+}
+
+async fn build_wait_agent_mcp_startup(
+    agent_control: &crate::agent::AgentControl,
+    target_by_thread_id: &HashMap<ThreadId, String>,
+) -> Option<HashMap<String, McpStartupSnapshot>> {
+    let mut snapshots = HashMap::new();
+    for (thread_id, target) in target_by_thread_id {
+        if let Some(snapshot) = agent_control.get_mcp_startup_snapshot(*thread_id).await {
+            snapshots.insert(target.clone(), snapshot);
+        }
+    }
+    (!snapshots.is_empty()).then_some(snapshots)
 }
