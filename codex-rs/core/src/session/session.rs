@@ -43,6 +43,7 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    pub(super) mcp_startup_recording: Arc<Mutex<McpStartupRecordingState>>,
     pub(crate) services: SessionServices,
     pub(super) next_internal_sub_id: AtomicU64,
 }
@@ -1161,6 +1162,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
+                mcp_startup_recording: Arc::new(Mutex::new(Default::default())),
                 services,
                 next_internal_sub_id: AtomicU64::new(0),
             });
@@ -1222,7 +1224,10 @@ impl Session {
                 config.auth_keyring_backend_kind(),
                 &session_configuration.approval_policy,
                 INITIAL_SUBMIT_ID.to_owned(),
-                Some(tx_event.clone()),
+                Some(
+                    sess.begin_mcp_startup_recording(INITIAL_SUBMIT_ID.to_owned())
+                        .await,
+                ),
                 mcp_startup_cancellation_token,
                 session_configuration.permission_profile(),
                 mcp_runtime_context.clone(),
