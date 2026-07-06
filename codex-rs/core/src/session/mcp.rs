@@ -273,7 +273,8 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             Some(self.mcp_elicitation_reviewer()),
-        );
+        )
+        .await;
         anyhow::ensure!(
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"

@@ -500,6 +500,12 @@ impl CodexThread {
         self.io.agent_status().await
     }
 
+    pub async fn mcp_startup_snapshot(
+        &self,
+    ) -> Option<codex_protocol::protocol::McpStartupSnapshot> {
+        self.session.mcp_startup_snapshot().await
+    }
+
     pub async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
         self.session.list_background_terminals().await
     }

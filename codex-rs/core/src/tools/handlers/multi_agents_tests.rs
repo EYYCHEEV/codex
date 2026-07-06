@@ -182,6 +182,7 @@ struct ListAgentsResult {
 struct ListedAgentResult {
     agent_name: String,
     agent_status: serde_json::Value,
+    mcp_startup: Option<codex_protocol::protocol::McpStartupSnapshot>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1515,6 +1516,85 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .expect("worker agent should be listed");
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
     assert_eq!(success, Some(true));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    set_turn_config(&mut turn, config.clone());
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+
+    let worker_path = AgentPath::from_string("/root/worker".to_string()).expect("path");
+    session
+        .services
+        .agent_control
+        .register_session_root(root.thread_id, None);
+    session
+        .services
+        .agent_control
+        .register_agent_metadata_for_tests(
+            root.thread_id,
+            worker_path,
+            Some("inspect this repo".to_string()),
+        );
+    root.thread
+        .codex
+        .session
+        .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
+            codex_protocol::protocol::McpStartupUpdateEvent {
+                server: "docs".to_string(),
+                status: codex_protocol::protocol::McpStartupStatus::Failed {
+                    error: "boot failed".to_string(),
+                    reason: None,
+                },
+            },
+        ))
+        .await;
+
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+
+    let worker = result
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/worker")
+        .expect("worker agent should be listed");
+    let expected = codex_protocol::protocol::McpStartupSnapshot {
+        statuses: std::collections::BTreeMap::from([(
+            "docs".to_string(),
+            codex_protocol::protocol::McpStartupStatus::Failed {
+                error: "boot failed".to_string(),
+                reason: None,
+            },
+        )]),
+        complete: None,
+    };
+    assert_eq!(worker.mcp_startup, Some(expected));
+    assert_eq!(success, Some(true));
+
+    let _ = root
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
 }
 
 #[tokio::test]
@@ -3253,7 +3333,8 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
                 (id_a.to_string(), AgentStatus::NotFound),
                 (id_b.to_string(), AgentStatus::NotFound),
             ]),
-            timed_out: false
+            timed_out: false,
+            mcp_startup: None,
         }
     );
     assert_eq!(success, None);
@@ -3292,8 +3373,102 @@ async fn wait_agent_times_out_when_status_is_not_final() {
         result,
         wait::WaitAgentResult {
             status: HashMap::new(),
-            timed_out: true
+            timed_out: true,
+            mcp_startup: None,
         }
+    );
+    assert_eq!(success, None);
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[test]
+fn wait_agent_result_deserializes_without_mcp_startup() {
+    let result: wait::WaitAgentResult =
+        serde_json::from_value(json!({"status": {}, "timed_out": true}))
+            .expect("legacy wait_agent result should deserialize");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::new(),
+            timed_out: true,
+            mcp_startup: None,
+        }
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(config.clone())
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    thread
+        .thread
+        .codex
+        .session
+        .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
+            codex_protocol::protocol::McpStartupUpdateEvent {
+                server: "docs".to_string(),
+                status: codex_protocol::protocol::McpStartupStatus::Failed {
+                    error: "boot failed".to_string(),
+                    reason: None,
+                },
+            },
+        ))
+        .await;
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let wait_task = tokio::spawn(async move {
+        WaitAgentHandler::new(WaitAgentTimeoutOptions {
+            default_timeout_ms: 25,
+            min_timeout_ms: 25,
+            max_timeout_ms: 1_000,
+        })
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({
+                "targets": [agent_id.to_string()],
+                "timeout_ms": 25
+            })),
+        ))
+        .await
+    });
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(25)).await;
+    let output = wait_task
+        .await
+        .expect("wait_agent task should finish")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(result.status, HashMap::new());
+    assert!(result.timed_out);
+    let mcp_startup = result
+        .mcp_startup
+        .expect("wait_agent should expose MCP startup snapshots");
+    let snapshot = mcp_startup
+        .get(&agent_id.to_string())
+        .expect("wait_agent should key MCP startup like status");
+    assert_eq!(
+        snapshot.statuses.get("docs"),
+        Some(&codex_protocol::protocol::McpStartupStatus::Failed {
+            error: "boot failed".to_string(),
+            reason: None,
+        })
     );
     assert_eq!(success, None);
 
@@ -3349,7 +3524,8 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
         result,
         wait::WaitAgentResult {
             status: HashMap::new(),
-            timed_out: true
+            timed_out: true,
+            mcp_startup: None,
         }
     );
     assert_eq!(success, None);
@@ -3407,7 +3583,8 @@ async fn wait_agent_returns_final_status_without_timeout() {
         result,
         wait::WaitAgentResult {
             status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
-            timed_out: false
+            timed_out: false,
+            mcp_startup: None,
         }
     );
     assert_eq!(success, None);
