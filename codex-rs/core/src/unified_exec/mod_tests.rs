@@ -157,7 +157,7 @@ async fn exec_command_with_tty(
             Arc::clone(turn),
             context.call_id.clone(),
             command.clone(),
-            cwd.clone(),
+            cwd.clone().into(),
             process_id,
             transcript,
             started_at,
