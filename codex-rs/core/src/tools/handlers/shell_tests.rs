@@ -276,12 +276,14 @@ async fn shell_command_pre_tool_use_payload_normalizes_cmd_alias() {
         arguments: json!({ "cmd": "printf shell command" }).to_string(),
     };
     let (session, turn) = make_session_and_context().await;
+    let turn = Arc::new(turn);
     let handler = ShellCommandHandler::from(codex_tools::ShellCommandBackendConfig::Classic);
 
     assert_eq!(
         handler.pre_tool_use_payload(&ToolInvocation {
             session: session.into(),
-            turn: turn.into(),
+            step_context: StepContext::for_test(Arc::clone(&turn)),
+            turn,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-42b".to_string(),
@@ -309,12 +311,14 @@ async fn shell_command_pre_tool_use_payload_normalizes_command_array() {
         .to_string(),
     };
     let (session, turn) = make_session_and_context().await;
+    let turn = Arc::new(turn);
     let handler = ShellCommandHandler::from(codex_tools::ShellCommandBackendConfig::Classic);
 
     assert_eq!(
         handler.pre_tool_use_payload(&ToolInvocation {
             session: session.into(),
-            turn: turn.into(),
+            step_context: StepContext::for_test(Arc::clone(&turn)),
+            turn,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
             call_id: "call-42c".to_string(),

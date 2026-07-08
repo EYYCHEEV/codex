@@ -3791,11 +3791,15 @@ impl McpStartupSnapshot {
                 .insert(server.clone(), McpStartupStatus::Ready);
         }
         for failure in &complete.failed {
+            let reason = match self.statuses.get(&failure.server) {
+                Some(McpStartupStatus::Failed { reason, .. }) => *reason,
+                _ => None,
+            };
             self.statuses.insert(
                 failure.server.clone(),
                 McpStartupStatus::Failed {
                     error: failure.error.clone(),
-                    reason: None,
+                    reason,
                 },
             );
         }
@@ -6356,6 +6360,35 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    #[test]
+    fn mcp_startup_snapshot_complete_preserves_failure_reason() {
+        let mut snapshot = McpStartupSnapshot::default();
+        snapshot.record_update(&McpStartupUpdateEvent {
+            server: "codex_apps".to_string(),
+            status: McpStartupStatus::Failed {
+                error: "reauth required".to_string(),
+                reason: Some(McpStartupFailureReason::ReauthenticationRequired),
+            },
+        });
+
+        snapshot.record_complete(&McpStartupCompleteEvent {
+            ready: Vec::new(),
+            failed: vec![McpStartupFailure {
+                server: "codex_apps".to_string(),
+                error: "reauth required".to_string(),
+            }],
+            cancelled: Vec::new(),
+        });
+
+        assert_eq!(
+            snapshot.statuses.get("codex_apps"),
+            Some(&McpStartupStatus::Failed {
+                error: "reauth required".to_string(),
+                reason: Some(McpStartupFailureReason::ReauthenticationRequired),
+            })
+        );
     }
 
     #[test]
