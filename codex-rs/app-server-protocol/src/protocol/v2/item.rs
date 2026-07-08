@@ -878,26 +878,41 @@ impl From<CoreTurnItem> for ThreadItem {
                     .duration
                     .and_then(|duration| i64::try_from(duration.as_millis()).ok()),
             },
-            CoreTurnItem::CollabAgentToolCall(call) => ThreadItem::CollabAgentToolCall {
-                id: call.id,
-                tool: call.tool.into(),
-                status: call.status.into(),
-                sender_thread_id: call.sender_thread_id.to_string(),
-                receiver_thread_ids: call
-                    .receiver_thread_ids
+            CoreTurnItem::CollabAgentToolCall(call) => {
+                let agents_metadata = call
+                    .receiver_agents
                     .into_iter()
-                    .map(String::from)
-                    .collect(),
-                prompt: call.prompt,
-                model: call.model,
-                reasoning_effort: call.reasoning_effort,
-                agents_states: call
-                    .agents_states
-                    .into_iter()
-                    .map(|(thread_id, status)| (thread_id.to_string(), status.into()))
-                    .collect(),
-                agents_metadata: HashMap::new(),
-            },
+                    .filter_map(|agent| {
+                        let metadata = CollabAgentMetadata {
+                            agent_nickname: agent.agent_nickname,
+                            agent_role: agent.agent_role,
+                        };
+                        (metadata.agent_nickname.is_some() || metadata.agent_role.is_some())
+                            .then(|| (agent.thread_id.to_string(), metadata))
+                    })
+                    .collect();
+
+                ThreadItem::CollabAgentToolCall {
+                    id: call.id,
+                    tool: call.tool.into(),
+                    status: call.status.into(),
+                    sender_thread_id: call.sender_thread_id.to_string(),
+                    receiver_thread_ids: call
+                        .receiver_thread_ids
+                        .into_iter()
+                        .map(String::from)
+                        .collect(),
+                    prompt: call.prompt,
+                    model: call.model,
+                    reasoning_effort: call.reasoning_effort,
+                    agents_states: call
+                        .agents_states
+                        .into_iter()
+                        .map(|(thread_id, status)| (thread_id.to_string(), status.into()))
+                        .collect(),
+                    agents_metadata,
+                }
+            }
             CoreTurnItem::SubAgentActivity(activity) => ThreadItem::SubAgentActivity {
                 id: activity.id,
                 kind: activity.kind.into(),
