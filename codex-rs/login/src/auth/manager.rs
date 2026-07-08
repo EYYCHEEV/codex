@@ -321,11 +321,8 @@ impl CodexAuth {
 
         let storage_mode = auth_dot_json.storage_mode(auth_credentials_store_mode);
         let client = create_default_auth_client(&refresh_token_endpoint(), auth_route_config)?;
-        let storage = create_auth_storage(
-            codex_home.to_path_buf(),
-            storage_mode,
-            keyring_backend_kind,
-        );
+        let storage =
+            create_auth_storage(codex_home.to_path_buf(), storage_mode, keyring_backend_kind);
         if auth_mode == AuthMode::Chatgpt
             && normalize_managed_chatgpt_account_id(&mut auth_dot_json)
             && let Err(err) = storage.save(&auth_dot_json)
@@ -341,9 +338,7 @@ impl CodexAuth {
         };
 
         match auth_mode {
-            AuthMode::Chatgpt => {
-                Ok(Self::Chatgpt(ChatgptAuth { state, storage }))
-            }
+            AuthMode::Chatgpt => Ok(Self::Chatgpt(ChatgptAuth { state, storage })),
             AuthMode::ChatgptAuthTokens => Ok(Self::ChatgptAuthTokens(ChatgptAuthTokens { state })),
             AuthMode::ApiKey => unreachable!("api key mode is handled above"),
             AuthMode::Headers => {
