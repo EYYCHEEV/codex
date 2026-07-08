@@ -137,6 +137,7 @@ impl McpConnectionManager {
         codex_home: PathBuf,
         codex_apps_tools_cache: CodexAppsToolsCache,
         codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
+        host_owned_codex_apps_enabled: bool,
         prefix_mcp_tool_names: bool,
         client_elicitation_capability: ElicitationCapability,
         supports_openai_form_elicitation: bool,

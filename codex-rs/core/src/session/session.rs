@@ -1226,6 +1226,7 @@ impl Session {
                 config.codex_home.to_path_buf(),
                 sess.services.mcp_manager.codex_apps_tools_cache(),
                 codex_apps_tools_cache_key(auth),
+                codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, auth),
                 config.prefix_mcp_tool_names(),
                 mcp_projection
                     .config

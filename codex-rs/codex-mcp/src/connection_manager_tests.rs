@@ -1599,6 +1599,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             chatgpt_user_id: None,
             is_workspace_account: false,
         },
+        /*host_owned_codex_apps_enabled*/ false,
         /*prefix_mcp_tool_names*/ true,
         ElicitationCapability::default(),
         /*supports_openai_form_elicitation*/ false,
@@ -1682,6 +1683,7 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
             PathBuf::from("/tmp"),
         ),
         codex_home.path().to_path_buf(),
+        CodexAppsToolsCache::default(),
         CodexAppsToolsCacheKey {
             account_id: None,
             chatgpt_user_id: None,
