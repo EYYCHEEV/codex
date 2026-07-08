@@ -392,7 +392,11 @@ fn mcp_startup_status_output_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "state": { "type": "string", "const": "failed" },
-                    "error": { "type": "string" }
+                    "error": { "type": "string" },
+                    "reason": {
+                        "type": "string",
+                        "enum": ["reauthentication_required"]
+                    }
                 },
                 "required": ["state", "error"],
                 "additionalProperties": false

@@ -2892,6 +2892,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             )]
             .into_iter()
             .collect(),
+            agents_metadata: HashMap::new(),
         }
     );
 
