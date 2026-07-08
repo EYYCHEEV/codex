@@ -1588,6 +1588,7 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
                 server: "docs".to_string(),
                 status: codex_protocol::protocol::McpStartupStatus::Failed {
                     error: "boot failed".to_string(),
+                    reason: None,
                 },
             },
         ))
@@ -1616,6 +1617,7 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
             "docs".to_string(),
             codex_protocol::protocol::McpStartupStatus::Failed {
                 error: "boot failed".to_string(),
+                reason: None,
             },
         )]),
         complete: None,
@@ -3523,6 +3525,7 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
                 server: "docs".to_string(),
                 status: codex_protocol::protocol::McpStartupStatus::Failed {
                     error: "boot failed".to_string(),
+                    reason: None,
                 },
             },
         ))
@@ -3566,6 +3569,7 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
         snapshot.statuses.get("docs"),
         Some(&codex_protocol::protocol::McpStartupStatus::Failed {
             error: "boot failed".to_string(),
+            reason: None,
         })
     );
     assert_eq!(success, None);
