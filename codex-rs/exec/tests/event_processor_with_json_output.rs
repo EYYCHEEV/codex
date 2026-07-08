@@ -216,6 +216,7 @@ fn terminal_mcp_startup_status_emits_aggregate_complete_event() {
                     server: "smoke".to_string(),
                     status: protocol::McpStartupStatus::Failed {
                         error: "boom".to_string(),
+                        reason: None,
                     },
                 }),
                 ThreadEvent::McpStartupComplete(protocol::McpStartupCompleteEvent {
