@@ -1097,7 +1097,7 @@ async fn list_all_tools_does_not_start_lazy_codex_apps_without_cache() {
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
-    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionManager::new_uninitialized(
         &approval_policy,
@@ -1638,12 +1638,13 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
 
 #[tokio::test]
 async fn host_owned_codex_apps_is_registered_without_startup_status() {
-    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     let (tx_event, rx_event) = async_channel::unbounded();
     let codex_home = tempdir().expect("tempdir");
     let mcp_servers = HashMap::from([(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         EffectiveMcpServer::configured(McpServerConfig {
+            auth: Default::default(),
             transport: McpServerTransportConfig::StreamableHttp {
                 url: "http://127.0.0.1:1".to_string(),
                 bearer_token_env_var: None,
@@ -1696,6 +1697,8 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
         ToolPluginProvenance::default(),
         /*auth*/ None,
         /*elicitation_reviewer*/ None,
+        /*elicitation_lifecycle*/ None,
+        ElicitationRequestRouter::default(),
     )
     .await;
 
