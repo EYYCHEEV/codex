@@ -208,7 +208,7 @@ async fn run_remote_compact_task_inner_impl(
     let base_instructions = sess.get_base_instructions().await;
     let tools = built_tools(
         sess.as_ref(),
-        turn_context.as_ref(),
+        step_context.as_ref(),
         &CancellationToken::new(),
     )
     .await?
