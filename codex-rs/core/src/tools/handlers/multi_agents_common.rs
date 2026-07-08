@@ -2,7 +2,6 @@ use crate::agent::role::apply_role_to_config;
 use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
-use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -30,7 +29,6 @@ use serde_json::Value as JsonValue;
 /// Minimum wait timeout to prevent tight polling loops from burning CPU.
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
-pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
 pub(crate) const MAX_SPAWN_AGENT_MODEL_OVERRIDES: usize = 5;
 
 pub(crate) fn model_supports_multi_agent_backend(
@@ -40,6 +38,8 @@ pub(crate) fn model_supports_multi_agent_backend(
     multi_agent_version != MultiAgentVersion::V2
         || model.multi_agent_version != Some(MultiAgentVersion::Disabled)
 }
+/// Maximum multi-agent v1 wait cycle to avoid blind hour-long parent waits.
+pub(crate) const MAX_WAIT_TIMEOUT_MS_V1: i64 = 180_000;
 
 pub(crate) fn function_arguments(payload: ToolPayload) -> Result<String, FunctionCallError> {
     match payload {
