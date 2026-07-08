@@ -7,6 +7,7 @@ use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::make_session_and_context_with_rx;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::tools::context::ToolOutput;
@@ -3340,6 +3341,10 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
                 (id_a.to_string(), AgentStatus::NotFound),
                 (id_b.to_string(), AgentStatus::NotFound),
             ]),
+            latest_status: HashMap::from([
+                (id_a.to_string(), AgentStatus::NotFound),
+                (id_b.to_string(), AgentStatus::NotFound),
+            ]),
             timed_out: false,
             mcp_startup: None,
         }
@@ -3380,6 +3385,10 @@ async fn wait_agent_times_out_when_status_is_not_final() {
         result,
         wait::WaitAgentResult {
             status: HashMap::new(),
+            latest_status: HashMap::from([(
+                agent_id.to_string(),
+                manager.agent_control().get_status(agent_id).await,
+            )]),
             timed_out: true,
             mcp_startup: None,
         }
@@ -3402,13 +3411,103 @@ fn wait_agent_result_deserializes_without_mcp_startup() {
         result,
         wait::WaitAgentResult {
             status: HashMap::new(),
+            latest_status: HashMap::new(),
             timed_out: true,
             mcp_startup: None,
         }
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
+async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible() {
+    let (mut session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    Arc::get_mut(&mut session)
+        .expect("session should not have additional references")
+        .services
+        .agent_control = manager.agent_control();
+    let config = turn.config.as_ref().clone();
+    let finished_thread = manager
+        .start_thread(config.clone())
+        .await
+        .expect("finished thread should start");
+    let running_thread = manager
+        .start_thread(config)
+        .await
+        .expect("running thread should start");
+    let finished_id = finished_thread.thread_id;
+    let running_id = running_thread.thread_id;
+    let wait_task = tokio::spawn({
+        let session = session.clone();
+        let turn = turn.clone();
+        async move {
+            WaitAgentHandler::new(WaitAgentTimeoutOptions {
+                default_timeout_ms: 1_000,
+                min_timeout_ms: 1,
+                max_timeout_ms: 1_000,
+            })
+            .handle(invocation(
+                session,
+                turn,
+                "wait_agent",
+                function_payload(json!({
+                    "targets": [finished_id.to_string(), running_id.to_string()],
+                    "timeout_ms": 1_000
+                })),
+            ))
+            .await
+        }
+    });
+    let event = timeout(Duration::from_secs(1), rx_event.recv())
+        .await
+        .expect("wait begin event should arrive")
+        .expect("wait begin event should be emitted");
+    let EventMsg::CollabWaitingBegin(_) = event.msg else {
+        panic!("expected wait begin event");
+    };
+    tokio::task::yield_now().await;
+
+    let _ = finished_thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    let output = timeout(Duration::from_secs(1), wait_task)
+        .await
+        .expect("wait_agent should finish after one agent reaches a final status")
+        .expect("wait task should join")
+        .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::from([(finished_id.to_string(), AgentStatus::Shutdown)]),
+            latest_status: HashMap::from([
+                (
+                    finished_id.to_string(),
+                    manager.agent_control().get_status(finished_id).await
+                ),
+                (
+                    running_id.to_string(),
+                    manager.agent_control().get_status(running_id).await
+                ),
+            ]),
+            timed_out: false,
+            mcp_startup: None,
+        }
+    );
+    assert_eq!(success, None);
+
+    let _ = running_thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
 async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3434,35 +3533,33 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
         ))
         .await;
 
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    let wait_task = tokio::spawn(async move {
-        WaitAgentHandler::new(WaitAgentTimeoutOptions {
-            default_timeout_ms: 25,
-            min_timeout_ms: 25,
-            max_timeout_ms: 1_000,
-        })
-        .handle(invocation(
-            session,
-            turn,
-            "wait_agent",
-            function_payload(json!({
-                "targets": [agent_id.to_string()],
-                "timeout_ms": 25
-            })),
-        ))
-        .await
-    });
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(25)).await;
-    let output = wait_task
-        .await
-        .expect("wait_agent task should finish")
-        .expect("wait_agent should succeed");
+    let output = WaitAgentHandler::new(WaitAgentTimeoutOptions {
+        default_timeout_ms: 25,
+        min_timeout_ms: 25,
+        max_timeout_ms: 1_000,
+    })
+    .handle(invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "wait_agent",
+        function_payload(json!({
+            "targets": [agent_id.to_string()],
+            "timeout_ms": 25
+        })),
+    ))
+    .await
+    .expect("wait_agent should succeed");
     let (content, success) = expect_text_output(output);
     let result: wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(result.status, HashMap::new());
+    assert_eq!(
+        result.latest_status,
+        HashMap::from([(
+            agent_id.to_string(),
+            manager.agent_control().get_status(agent_id).await,
+        )])
+    );
     assert!(result.timed_out);
     let mcp_startup = result
         .mcp_startup
@@ -3531,6 +3628,69 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
         result,
         wait::WaitAgentResult {
             status: HashMap::new(),
+            latest_status: HashMap::from([(
+                agent_id.to_string(),
+                manager.agent_control().get_status(agent_id).await,
+            )]),
+            timed_out: true,
+            mcp_startup: None,
+        }
+    );
+    assert_eq!(success, None);
+
+    let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn wait_agent_clamps_long_timeouts_to_maximum() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let config = turn.config.as_ref().clone();
+    let thread = manager
+        .start_thread(config.clone())
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "wait_agent",
+        function_payload(json!({
+            "targets": [agent_id.to_string()],
+            "timeout_ms": 1_000
+        })),
+    );
+    let handler = WaitAgentHandler::new(WaitAgentTimeoutOptions {
+        default_timeout_ms: 50,
+        min_timeout_ms: 1,
+        max_timeout_ms: 50,
+    });
+
+    let output = timeout(
+        Duration::from_millis(/*millis*/ 500),
+        handler.handle(invocation),
+    )
+    .await
+    .expect("wait_agent should clamp the requested timeout down to the configured maximum")
+    .expect("wait_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        result,
+        wait::WaitAgentResult {
+            status: HashMap::new(),
+            latest_status: HashMap::from([(
+                agent_id.to_string(),
+                manager.agent_control().get_status(agent_id).await,
+            )]),
             timed_out: true,
             mcp_startup: None,
         }
@@ -3590,6 +3750,7 @@ async fn wait_agent_returns_final_status_without_timeout() {
         result,
         wait::WaitAgentResult {
             status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
+            latest_status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
             timed_out: false,
             mcp_startup: None,
         }

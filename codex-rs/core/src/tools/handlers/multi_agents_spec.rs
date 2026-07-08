@@ -56,10 +56,24 @@ pub struct WaitAgentTimeoutOptions {
 
 impl Default for WaitAgentTimeoutOptions {
     fn default() -> Self {
+        Self::multi_agent_v2_default()
+    }
+}
+
+impl WaitAgentTimeoutOptions {
+    pub(crate) fn v1() -> Self {
         Self {
             default_timeout_ms: super::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS,
             min_timeout_ms: super::multi_agents_common::MIN_WAIT_TIMEOUT_MS,
-            max_timeout_ms: super::multi_agents_common::MAX_WAIT_TIMEOUT_MS,
+            max_timeout_ms: super::multi_agents_common::MAX_WAIT_TIMEOUT_MS_V1,
+        }
+    }
+
+    pub(crate) fn multi_agent_v2_default() -> Self {
+        Self {
+            default_timeout_ms: crate::config::DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS,
+            min_timeout_ms: crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS,
+            max_timeout_ms: crate::config::DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS,
         }
     }
 }
@@ -272,7 +286,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "wait_agent".to_string(),
-            description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+            description: "Wait for agents to reach a final status. `status` contains final statuses only. `latest_status` samples the current status for every requested target when the wait returns, including on timeout. Use bounded waits up to 180000 ms and inspect `latest_status` plus `mcp_startup` before re-waiting."
                 .to_string(),
             strict: false,
             defer_loading: None,
@@ -590,17 +604,22 @@ fn wait_output_schema_v1() -> Value {
                 "description": "Final statuses keyed by agent id.",
                 "additionalProperties": agent_status_output_schema()
             },
+            "latest_status": {
+                "type": "object",
+                "description": "Latest sampled statuses keyed by the requested agent ids. This includes non-final lifecycle states and is sampled when wait_agent returns.",
+                "additionalProperties": agent_status_output_schema()
+            },
             "timed_out": {
                 "type": "boolean",
                 "description": "Whether the wait call returned due to timeout before any agent reached a final status."
             },
             "mcp_startup": {
                 "type": "object",
-                "description": "MCP startup snapshots keyed by the same agent ids as status, when available.",
+                "description": "MCP startup snapshots keyed by requested agent ids, when available.",
                 "additionalProperties": mcp_startup_snapshot_output_schema()
             }
         },
-        "required": ["status", "timed_out"],
+        "required": ["status", "latest_status", "timed_out"],
         "additionalProperties": false
     })
 }
@@ -954,7 +973,7 @@ fn wait_agent_tool_parameters_v1(options: WaitAgentTimeoutOptions) -> JsonSchema
         (
             "timeout_ms".to_string(),
             JsonSchema::number(Some(format!(
-                "Timeout in milliseconds. Defaults to {}, min {}, max {}. Prefer longer waits (minutes) to avoid busy polling.",
+                "Timeout in milliseconds. Defaults to {}, min {}, max {}. Use bounded waits up to the max; inspect latest_status and mcp_startup before re-waiting.",
                 options.default_timeout_ms, options.min_timeout_ms, options.max_timeout_ms,
             ))),
         ),

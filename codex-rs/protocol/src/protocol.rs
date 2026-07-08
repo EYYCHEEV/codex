@@ -4409,7 +4409,7 @@ pub struct CollabWaitingEndEvent {
     /// Optional receiver metadata paired with final statuses.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_statuses: Vec<CollabAgentStatusEntry>,
-    /// Last known status of the receiver agents reported to the sender agent.
+    /// Final statuses of the receiver agents reported to the sender agent.
     pub statuses: HashMap<ThreadId, AgentStatus>,
 }
 
