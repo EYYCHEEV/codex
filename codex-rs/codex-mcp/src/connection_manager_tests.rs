@@ -2467,7 +2467,7 @@ async fn list_all_tools_does_not_start_lazy_codex_apps_without_cache() {
     let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
         .boxed()
         .shared();
-    let approval_policy = Constrained::allow_any(AskForApproval::OnFailure);
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionSet::new_uninitialized(
         &approval_policy,
