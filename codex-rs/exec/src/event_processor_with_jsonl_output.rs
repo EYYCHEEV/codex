@@ -148,6 +148,7 @@ impl EventProcessorWithJsonOutput {
             McpServerStartupState::Ready => protocol::McpStartupStatus::Ready,
             McpServerStartupState::Failed => protocol::McpStartupStatus::Failed {
                 error: error.unwrap_or_else(|| "unknown MCP startup failure".to_string()),
+                reason: None,
             },
             McpServerStartupState::Cancelled => protocol::McpStartupStatus::Cancelled,
         }
@@ -180,7 +181,7 @@ impl EventProcessorWithJsonOutput {
         for (server, status) in &self.mcp_startup_statuses {
             match status {
                 protocol::McpStartupStatus::Ready => ready.push(server.clone()),
-                protocol::McpStartupStatus::Failed { error } => {
+                protocol::McpStartupStatus::Failed { error, .. } => {
                     failed.push(protocol::McpStartupFailure {
                         server: server.clone(),
                         error: error.clone(),

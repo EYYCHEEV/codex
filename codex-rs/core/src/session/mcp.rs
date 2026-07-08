@@ -462,6 +462,7 @@ impl Session {
             self.services.mcp_manager.codex_apps_tools_cache(),
             self.services.mcp_manager.tool_catalog_cache(),
             connector_runtime_context_key(auth.as_ref()),
+            codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()),
             mcp_config.prefix_mcp_tool_names,
             mcp_config.client_elicitation_capability.clone(),
             self.services

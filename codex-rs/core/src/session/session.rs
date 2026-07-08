@@ -1235,6 +1235,7 @@ impl Session {
                 sess.services.mcp_manager.codex_apps_tools_cache(),
                 sess.services.mcp_manager.tool_catalog_cache(),
                 connector_runtime_context_key(auth),
+                codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, auth),
                 config.prefix_mcp_tool_names(),
                 mcp_projection
                     .config

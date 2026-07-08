@@ -1477,6 +1477,7 @@ async fn host_owned_codex_apps_manager(
         session.services.mcp_manager.codex_apps_tools_cache(),
         session.services.mcp_manager.tool_catalog_cache(),
         codex_connectors::connector_runtime_context_key(auth.as_ref()),
+        /*host_owned_codex_apps_enabled*/ true,
         turn_context.config.prefix_mcp_tool_names(),
         rmcp::model::ElicitationCapability::default(),
         /*supports_openai_form_elicitation*/ false,
