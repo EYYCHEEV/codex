@@ -383,6 +383,83 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
 }
 
 #[test]
+fn wait_agent_tool_v1_advertises_latest_status_and_bounded_waits() {
+    let ToolSpec::Namespace(namespace) = create_wait_agent_tool_v1(WaitAgentTimeoutOptions::v1())
+    else {
+        panic!("wait_agent v1 should be a namespace tool");
+    };
+    assert_eq!(namespace.name, MULTI_AGENT_V1_NAMESPACE);
+    let Some(ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+        description,
+        parameters,
+        output_schema,
+        ..
+    })) = namespace.tools.first()
+    else {
+        panic!("wait_agent should be a namespace function tool");
+    };
+
+    assert!(description.contains("`status` contains final statuses only"));
+    assert!(description.contains("`latest_status` samples the current status"));
+    assert!(description.contains("Use bounded waits up to 180000 ms"));
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("wait_agent should use object params");
+    assert_eq!(
+        properties
+            .get("timeout_ms")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Timeout in milliseconds. Defaults to 30000, min 10000, max 180000. Use bounded waits up to the max; inspect latest_status and mcp_startup before re-waiting."
+        )
+    );
+    let output_schema = output_schema
+        .as_ref()
+        .expect("wait_agent should have an output schema");
+    assert_eq!(
+        output_schema["required"],
+        json!(["status", "latest_status", "timed_out"])
+    );
+    assert_eq!(
+        output_schema["properties"]["latest_status"]["description"],
+        json!(
+            "Latest sampled statuses keyed by the requested agent ids. This includes non-final lifecycle states and is sampled when wait_agent returns."
+        )
+    );
+    assert_eq!(
+        output_schema["properties"]["latest_status"]["additionalProperties"]["oneOf"][0]["enum"],
+        json!([
+            "pending_init",
+            "running",
+            "interrupted",
+            "shutdown",
+            "not_found"
+        ])
+    );
+}
+
+#[test]
+fn wait_agent_timeout_options_default_preserves_v2_wait_cap() {
+    let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+        create_wait_agent_tool_v2(WaitAgentTimeoutOptions::default())
+    else {
+        panic!("wait_agent should be a function tool");
+    };
+
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("wait_agent should use object params");
+    assert_eq!(
+        properties
+            .get("timeout_ms")
+            .and_then(|schema| schema.description.as_deref()),
+        Some("Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.")
+    );
+}
+
+#[test]
 fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
