@@ -82,10 +82,12 @@ impl ChatWidget {
             // Normal path: fold the update into the active round and surface
             // per-server failures immediately.
             let mut startup_status = self.mcp_startup_status.take().unwrap_or_default();
-            if let McpStartupStatus::Failed { error } = &status {
+            if let McpStartupStatus::Failed { error, .. } = &status {
                 let already_reported = matches!(
                     startup_status.get(&server),
-                    Some(McpStartupStatus::Failed { error: previous }) if previous == error
+                    Some(McpStartupStatus::Failed {
+                        error: previous, ..
+                    }) if previous == error
                 );
                 if !already_reported {
                     self.on_warning(error);
@@ -97,7 +99,7 @@ impl ChatWidget {
         if activated_pending_round {
             // A promoted buffered round may already contain terminal failures.
             for state in startup_status.values() {
-                if let McpStartupStatus::Failed { error } = state {
+                if let McpStartupStatus::Failed { error, .. } = state {
                     self.on_warning(error);
                 }
             }
