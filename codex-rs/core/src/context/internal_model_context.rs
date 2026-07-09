@@ -73,6 +73,27 @@ impl InternalModelContextFragment {
             body: body.into(),
         }
     }
+
+    /// Returns the unwrapped body only for an exact, valid modern source wrapper.
+    ///
+    /// This is intentionally stricter than retained-history matching: callers use
+    /// it to cross a trust boundary, so surrounding data and legacy wrappers are
+    /// not accepted.
+    pub(crate) fn parse_body_for_source<'a>(
+        text: &'a str,
+        expected_source: &str,
+    ) -> Option<&'a str> {
+        let rest = text.strip_prefix(CONTEXT_START_MARKER)?;
+        let rest = rest.strip_prefix(SOURCE_ATTR_START)?;
+        let (source, framed_body) = rest.split_once(SOURCE_ATTR_END)?;
+        if source != expected_source || !is_valid_source(source) {
+            return None;
+        }
+
+        let framed_body = framed_body.strip_suffix(CONTEXT_END_MARKER)?;
+        let body = framed_body.strip_prefix('\n')?.strip_suffix('\n')?;
+        Some(body)
+    }
 }
 
 impl ContextualUserFragment for InternalModelContextFragment {
