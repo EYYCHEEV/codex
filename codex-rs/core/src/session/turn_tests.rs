@@ -1,8 +1,13 @@
 use super::*;
+use crate::context::ContextualUserFragment;
+use crate::context::InternalContextSource;
+use crate::context::InternalModelContextFragment;
 use codex_extension_api::ExtensionData;
 use codex_extension_api::TurnItemContributor;
 use codex_protocol::ResponseItemId;
+use codex_protocol::AgentPath;
 use codex_protocol::items::AgentMessageContent;
+use codex_protocol::protocol::InterAgentCommunication;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use tracing_subscriber::prelude::*;
@@ -107,4 +112,89 @@ fn realtime_user_verification_notice_excludes_request_payload() {
             None,
         )),
     );
+}
+
+#[test]
+fn capability_mentions_include_only_user_and_trusted_goal_inputs() {
+    let ordinary_user_inputs = vec![
+        UserInput::Text {
+            text: "Run the explicitly requested capability.".to_string(),
+            text_elements: Vec::new(),
+        },
+        UserInput::Mention {
+            name: "selected-plugin".to_string(),
+            path: "plugin://selected-plugin@local".to_string(),
+        },
+    ];
+    let goal_body = "Continue the trusted goal with $upgrade-codex.";
+    let goal_context: ResponseItem = ContextualUserFragment::into(
+        InternalModelContextFragment::new(InternalContextSource::from_static("goal"), goal_body),
+    );
+    let identical_extension_context: ResponseItem =
+        ContextualUserFragment::into(InternalModelContextFragment::new(
+            InternalContextSource::from_static("extension"),
+            goal_body,
+        ));
+    let other_extension_context: ResponseItem =
+        ContextualUserFragment::into(InternalModelContextFragment::new(
+            InternalContextSource::from_static("extension"),
+            "Do not resolve $extension-only.",
+        ));
+    let generated_user_context = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "Do not resolve $generated-response.".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let inter_agent_context = InterAgentCommunication::new(
+        AgentPath::root()
+            .join("worker")
+            .expect("worker agent path must be valid"),
+        AgentPath::root(),
+        Vec::new(),
+        "Do not resolve $inter-agent.".to_string(),
+        true,
+    );
+
+    let collected = collect_capability_mention_inputs(&[
+        TurnInput::UserInput {
+            content: ordinary_user_inputs.clone(),
+            client_id: Some("client-message-id".to_string()),
+            acceptance_order: None,
+        },
+        TurnInput::ResponseItem(codex_history::ResponseItemEnvelope::new(
+            identical_extension_context,
+        )),
+        TurnInput::ResponseItem(codex_history::ResponseItemEnvelope::new(goal_context)),
+        TurnInput::ResponseItem(codex_history::ResponseItemEnvelope::new(
+            other_extension_context,
+        )),
+        TurnInput::ResponseItem(codex_history::ResponseItemEnvelope::new(
+            generated_user_context,
+        )),
+        TurnInput::ResponseItem(codex_history::ResponseItemEnvelope::new(
+            assistant_output_text("Do not resolve $assistant-output."),
+        )),
+        TurnInput::FunctionCallOutput(ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("call-id".to_string()),
+            name: None,
+            namespace: None,
+            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                "Do not resolve $function-output.".to_string(),
+            ),
+            internal_chat_message_metadata_passthrough: None,
+        }),
+        TurnInput::InterAgentCommunication(inter_agent_context),
+    ]);
+
+    let mut expected = ordinary_user_inputs;
+    expected.push(UserInput::Text {
+        text: goal_body.to_string(),
+        text_elements: Vec::new(),
+    });
+    assert_eq!(collected, expected);
 }

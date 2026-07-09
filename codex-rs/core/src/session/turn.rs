@@ -12,6 +12,7 @@ use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context::InternalModelContextFragment;
 use crate::context::UserVerificationNotice;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
@@ -221,7 +222,7 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
 
-    let user_input = turn_user_input(&input);
+    let user_input = collect_capability_mention_inputs(&input);
     let allow_plugin_mentions =
         !crate::guardian::is_basic_session_source(&turn_context.session_source);
     let McpStartupRequirements {
@@ -466,7 +467,7 @@ pub(crate) async fn run_turn(
                 .await?
             }
             Some(_) | None => {
-                let pending_user_input = turn_user_input(&pending_input);
+                let pending_user_input = collect_capability_mention_inputs(&pending_input);
                 if allow_plugin_mentions {
                     required_plugins.extend(crate::plugins::collect_explicit_plugin_ids(
                         &pending_user_input,
@@ -848,18 +849,34 @@ pub(crate) async fn run_hooks_and_record_inputs(
     blocked_input && !accepted_user_input
 }
 
-fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
-    input
-        .iter()
-        .filter_map(|item| match item {
-            TurnInput::UserInput { content, .. } => Some(content.as_slice()),
-            TurnInput::ResponseItem(_)
-            | TurnInput::FunctionCallOutput(_)
-            | TurnInput::InterAgentCommunication(_) => None,
-        })
-        .flatten()
-        .cloned()
-        .collect()
+fn collect_capability_mention_inputs(input: &[TurnInput]) -> Vec<UserInput> {
+    let mut collected = Vec::new();
+
+    for item in input {
+        match item {
+            TurnInput::UserInput { content, .. } => collected.extend(content.iter().cloned()),
+            TurnInput::ResponseItem(envelope) => {
+                if let ResponseItem::Message { role, content, .. } = &envelope.item
+                    && role == "user"
+                {
+                    collected.extend(content.iter().filter_map(|item| {
+                        let ContentItem::InputText { text } = item else {
+                            return None;
+                        };
+                        InternalModelContextFragment::parse_body_for_source(text, "goal").map(
+                            |body| UserInput::Text {
+                                text: body.to_owned(),
+                                text_elements: Vec::new(),
+                            },
+                        )
+                    }));
+                }
+            }
+            TurnInput::FunctionCallOutput(_) | TurnInput::InterAgentCommunication(_) => {}
+        }
+    }
+
+    collected
 }
 
 async fn required_mcp_servers_for_input(
