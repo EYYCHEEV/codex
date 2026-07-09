@@ -3455,9 +3455,18 @@ async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible
         .await
         .expect("wait begin event should arrive")
         .expect("wait begin event should be emitted");
-    let EventMsg::CollabWaitingBegin(_) = event.msg else {
-        panic!("expected wait begin event");
+    let EventMsg::ItemStarted(started) = event.msg else {
+        panic!("expected wait item start event");
     };
+    let codex_protocol::items::TurnItem::CollabAgentToolCall(item) = started.item else {
+        panic!("expected wait item start to contain collab agent tool call");
+    };
+    assert_eq!(item.tool, codex_protocol::items::CollabAgentTool::Wait);
+    assert_eq!(
+        item.status,
+        codex_protocol::items::CollabAgentToolCallStatus::InProgress
+    );
+    assert_eq!(item.receiver_thread_ids, vec![finished_id, running_id],);
     tokio::task::yield_now().await;
 
     let _ = finished_thread
