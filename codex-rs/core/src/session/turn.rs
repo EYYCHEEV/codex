@@ -16,6 +16,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context::InternalModelContextFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
@@ -565,6 +566,36 @@ pub(crate) async fn run_hooks_and_record_inputs(
     blocked_input && !accepted_user_input
 }
 
+fn collect_capability_mention_inputs(input: &[TurnInput]) -> Vec<UserInput> {
+    let mut collected = Vec::new();
+
+    for item in input {
+        match item {
+            TurnInput::UserInput { content, .. } => collected.extend(content.iter().cloned()),
+            TurnInput::ResponseItem(ResponseItem::Message { role, content, .. })
+                if role == "user" =>
+            {
+                // Only source-tagged goal context may cross this trust boundary. Other generated
+                // response items must not become user requests for skills, plugins, or apps.
+                collected.extend(content.iter().filter_map(|item| {
+                    let ContentItem::InputText { text } = item else {
+                        return None;
+                    };
+                    InternalModelContextFragment::parse_body_for_source(text, "goal").map(|body| {
+                        UserInput::Text {
+                            text: body.to_owned(),
+                            text_elements: Vec::new(),
+                        }
+                    })
+                }));
+            }
+            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => {}
+        }
+    }
+
+    collected
+}
+
 #[instrument(level = "trace", skip_all)]
 async fn build_skills_and_plugins(
     sess: &Arc<Session>,
@@ -579,15 +610,7 @@ async fn build_skills_and_plugins(
         return Some((Vec::new(), HashSet::new()));
     }
 
-    let user_input = input
-        .iter()
-        .filter_map(|item| match item {
-            TurnInput::UserInput { content, .. } => Some(content.as_slice()),
-            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => None,
-        })
-        .flatten()
-        .cloned()
-        .collect::<Vec<_>>();
+    let user_input = collect_capability_mention_inputs(input);
     let tracking = build_track_events_context(
         turn_context.model_info.slug.clone(),
         sess.thread_id.to_string(),
