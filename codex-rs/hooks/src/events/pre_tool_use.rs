@@ -304,7 +304,7 @@ async fn execute_handlers(
                             error: Some("Hook misconfigured: empty command".to_string()),
                         }
                     } else {
-                        run_command(shell, &handler, &input_json, cwd).await
+                        run_command(shell, &handler, configured_order, &input_json, cwd).await
                     };
                     parse_completed(&handler, run_result, turn_id)
                 }

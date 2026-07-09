@@ -101,6 +101,7 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
         CodexAppsToolsCache::default(),
         McpToolCatalogCache::default(),
         codex_mcp::codex_apps_tools_cache_key(Some(&expected_auth)),
+        /*host_owned_codex_apps_enabled*/ true,
         /*prefix_mcp_tool_names*/ true,
         ElicitationCapability::default(),
         /*supports_openai_form_elicitation*/ false,

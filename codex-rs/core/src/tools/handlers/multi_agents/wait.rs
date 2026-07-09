@@ -350,10 +350,10 @@ async fn build_wait_agent_mcp_startup(
 ) -> Option<HashMap<String, McpStartupSnapshot>> {
     let mut snapshots = HashMap::new();
     for (thread_id, target) in target_by_thread_id {
-        if let Some(snapshot) = agent_control.get_mcp_startup_snapshot(*thread_id).await {
-            if mcp_startup_snapshot_has_server_evidence(&snapshot) {
-                snapshots.insert(target.clone(), snapshot);
-            }
+        if let Some(snapshot) = agent_control.get_mcp_startup_snapshot(*thread_id).await
+            && mcp_startup_snapshot_has_server_evidence(&snapshot)
+        {
+            snapshots.insert(target.clone(), snapshot);
         }
     }
     (!snapshots.is_empty()).then_some(snapshots)
