@@ -123,23 +123,17 @@ impl Session {
             ));
         }
 
-        let task_input = if has_user_input {
+        if has_user_input {
             self.clear_connector_selection().await;
             for item in &input {
                 if let TurnInput::UserInput { content, .. } = item {
                     turn_context.session_telemetry.user_prompt(content);
                 }
             }
-            input
-        } else {
-            self.input_queue
-                .extend_pending_input_for_turn_state(turn_state.as_ref(), input)
-                .await;
-            Vec::new()
-        };
+        }
         self.start_task(
             turn_context,
-            task_input,
+            input,
             RegularTask::new(),
             MailboxParentProvenance::Ignore,
         )
