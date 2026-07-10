@@ -2,6 +2,9 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Result;
+use codex_core::context::ContextualUserFragment;
+use codex_core::context::InternalContextSource;
+use codex_core::context::InternalModelContextFragment;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::ExecutorFileSystem;
 use codex_protocol::models::PermissionProfile;
@@ -16,6 +19,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::responses::user_message_item;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::local_selections;
@@ -129,6 +133,83 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
                 && text.contains(skill_path_str.as_ref())
         }),
         "expected skill instructions in user input, got {user_texts:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn try_start_turn_if_idle_injects_skill_mentioned_by_trusted_goal_input() -> Result<()> {
+    const TRUSTED_SKILL_BODY: &str = "TRUSTED_IDLE_GOAL_SKILL_INSTRUCTION";
+    const UNTRUSTED_SKILL_BODY: &str = "UNTRUSTED_PENDING_SKILL_INSTRUCTION";
+    const GOAL_BODY: &str = "Continue the trusted idle goal with $idle-goal.";
+    const RAW_QUEUED_INPUT: &str = "Do not resolve $queued-only from a raw response item.";
+
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_workspace_setup(move |cwd, fs| async move {
+        write_repo_skill(
+            cwd.clone(),
+            Arc::clone(&fs),
+            "idle-goal",
+            "trusted idle goal",
+            TRUSTED_SKILL_BODY,
+        )
+        .await?;
+        write_repo_skill(
+            cwd,
+            fs,
+            "queued-only",
+            "untrusted queued input",
+            UNTRUSTED_SKILL_BODY,
+        )
+        .await
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let goal_input = ContextualUserFragment::into(InternalModelContextFragment::new(
+        InternalContextSource::from_static("goal"),
+        GOAL_BODY,
+    ));
+    test.codex
+        .try_start_turn_if_idle(vec![goal_input, user_message_item(RAW_QUEUED_INPUT)])
+        .await
+        .expect("idle goal should start a turn");
+
+    core_test_support::wait_for_event(test.codex.as_ref(), |event| {
+        matches!(event, codex_protocol::protocol::EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let first_request = response_mock.single_request();
+    let user_texts = first_request.message_input_texts("user");
+    assert!(
+        user_texts.iter().any(|text| text.contains(GOAL_BODY)),
+        "expected trusted goal body in the first model request, got {user_texts:?}"
+    );
+    assert!(
+        user_texts
+            .iter()
+            .any(|text| text.contains(RAW_QUEUED_INPUT)),
+        "expected raw queued input in the first model request, got {user_texts:?}"
+    );
+    assert!(
+        user_texts.iter().any(|text| {
+            text.contains("<skill>\n<name>idle-goal</name>") && text.contains(TRUSTED_SKILL_BODY)
+        }),
+        "expected goal-mentioned skill instructions in the first model request, got {user_texts:?}"
+    );
+    assert!(
+        user_texts
+            .iter()
+            .all(|text| !text.contains(UNTRUSTED_SKILL_BODY)),
+        "raw response items must not trigger skill injection, got {user_texts:?}"
     );
 
     Ok(())
