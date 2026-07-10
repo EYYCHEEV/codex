@@ -118,13 +118,8 @@ impl Session {
             ));
         }
 
-        self.input_queue
-            .extend_pending_input_for_turn_state(
-                turn_state.as_ref(),
-                input.into_iter().map(TurnInput::ResponseItem).collect(),
-            )
-            .await;
-        self.start_task(turn_context, Vec::new(), RegularTask::new())
+        let task_input = input.into_iter().map(TurnInput::ResponseItem).collect();
+        self.start_task(turn_context, task_input, RegularTask::new())
             .await;
         Ok(())
     }
