@@ -363,7 +363,12 @@ pub(crate) async fn run_turn(
         )
         .await?;
     }
-    let mut can_drain_pending_input = input.is_empty();
+    let mut can_drain_pending_input = input.iter().all(|item| {
+        matches!(
+            item,
+            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_)
+        )
+    });
     if run_hooks_and_record_inputs(
         &sess,
         &turn_context,
