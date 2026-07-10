@@ -288,7 +288,12 @@ pub(crate) async fn run_turn(
     if run_pending_session_start_hooks(&sess, &turn_context).await {
         return Ok(None);
     }
-    let mut can_drain_pending_input = input.is_empty();
+    let mut can_drain_pending_input = input.iter().all(|item| {
+        matches!(
+            item,
+            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_)
+        )
+    });
     if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await {
         return Ok(None);
     }
