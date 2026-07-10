@@ -498,15 +498,9 @@ async fn start_if_idle(
         TurnStartKind::Automatic | TurnStartKind::Recovery => {
             // Empty automatic user input resumes sampling without a new message.
             if !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
-                session
-                    .input_queue
-                    .extend_pending_input_for_turn_state(
-                        turn_state.as_ref(),
-                        vec![
-                            pending_turn_input(session, input, &turn_context.sub_id, origin).await,
-                        ],
-                    )
-                    .await;
+                task_input.push(
+                    pending_turn_input(session, input, &turn_context.sub_id, origin).await,
+                );
             }
         }
     }
