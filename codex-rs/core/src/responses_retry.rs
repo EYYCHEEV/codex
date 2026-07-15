@@ -39,8 +39,13 @@ impl Default for ResponsesStreamRetryState {
     }
 }
 
-/// Handles a retryable stream error and returns `Ok(())` when the caller should
-/// retry the request loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponsesRetryDecision {
+    Retry,
+    FallbackToHttp,
+}
+
+/// Handles a retryable stream error and reports how the caller should retry the request loop.
 pub(crate) async fn handle_retryable_response_stream_error(
     retry_state: &mut ResponsesStreamRetryState,
     max_retries: u64,
@@ -49,7 +54,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
     sess: &Session,
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
-) -> Result<(), CodexErr> {
+) -> Result<ResponsesRetryDecision, CodexErr> {
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
@@ -79,10 +84,11 @@ pub(crate) async fn handle_retryable_response_stream_error(
         retry_state.connection_retry_delay = retry_delay
             .saturating_mul(2)
             .min(MAX_CONNECTION_RETRY_DELAY);
-        return Ok(());
+        return Ok(ResponsesRetryDecision::Retry);
     }
 
-    if retry_state.retries >= max_retries
+    if client_session.websocket_http_fallback_allowed()
+        && retry_state.retries >= max_retries
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             turn_context.model_info(),
@@ -96,7 +102,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
         )
         .await;
         retry_state.retries = 0;
-        return Ok(());
+        return Ok(ResponsesRetryDecision::FallbackToHttp);
     }
 
     if retry_state.retries < max_retries {
@@ -122,7 +128,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
         }
         codex_client::record_retry!(retry_count, delay, operation);
         tokio::time::sleep(delay).await;
-        return Ok(());
+        return Ok(ResponsesRetryDecision::Retry);
     }
 
     Err(err)

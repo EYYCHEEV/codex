@@ -8,6 +8,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::router::ToolRouter;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::ResolvedSelectedCapabilityRoot;
+use codex_login::CodexAuth;
 use codex_mcp::McpBinding;
 use codex_otel::SessionTelemetry;
 
@@ -27,6 +28,12 @@ pub(crate) struct StepContext {
     pub(crate) executor_capability_discovery: Option<Arc<ExecutorCapabilityDiscoverySnapshot>>,
     /// The exact MCP connections, configuration, and catalog captured for this step.
     pub(crate) mcp: Arc<McpBinding>,
+    /// Effective authentication selected atomically with this request step.
+    pub(crate) effective_auth: Option<CodexAuth>,
+    /// Exact connector directory identity selected with this request step.
+    pub(crate) connector_directory_cache_key: Option<codex_connectors::ConnectorDirectoryCacheKey>,
+    /// Exact Codex Apps tool-catalog identity selected with this request step.
+    pub(crate) codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
     /// The finalized tool plan advertised and executed for this exact sampling request.
     pub(crate) tool_router: Arc<ToolRouter>,
     /// The canonical AGENTS.md value observed with this environment snapshot.

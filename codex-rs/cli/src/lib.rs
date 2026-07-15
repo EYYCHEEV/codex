@@ -1,3 +1,4 @@
+mod auth_projection;
 pub(crate) mod debug_sandbox;
 mod exit_status;
 pub(crate) mod login;
@@ -9,6 +10,8 @@ use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::ProfileV2Name;
 use std::path::PathBuf;
 
+pub use auth_projection::CliAuthProjection;
+pub use auth_projection::load_cli_auth_projection;
 pub use debug_sandbox::run_command_under_landlock;
 pub use debug_sandbox::run_command_under_seatbelt;
 pub use debug_sandbox::run_command_under_windows_sandbox;

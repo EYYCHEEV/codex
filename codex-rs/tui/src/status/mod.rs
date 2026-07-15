@@ -14,7 +14,9 @@ mod rate_limits;
 pub(crate) mod remote_connection;
 mod thread_usage;
 
+pub(crate) use account::ManagedAccountsState;
 pub(crate) use account::StatusAccountDisplay;
+pub(crate) use account::managed_account_label;
 pub(crate) use card::StatusHistoryHandle;
 #[cfg(test)]
 pub(crate) use card::new_status_output;

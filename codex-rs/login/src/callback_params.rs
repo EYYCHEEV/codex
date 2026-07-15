@@ -5,9 +5,10 @@ pub enum LoginOnboardingEntrypoint {
     LifeSciences,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoginCallbackResult {
     pub onboarding_entrypoint: Option<LoginOnboardingEntrypoint>,
+    pub managed_account_id: Option<String>,
 }
 
 pub(crate) fn login_callback_result_from_state(
@@ -21,6 +22,7 @@ pub(crate) fn login_callback_result_from_state(
     (callback_state.strip_suffix(LIFE_SCIENCES_OAUTH_STATE_SUFFIX) == Some(expected_state))
         .then_some(LoginCallbackResult {
             onboarding_entrypoint: Some(LoginOnboardingEntrypoint::LifeSciences),
+            ..Default::default()
         })
 }
 

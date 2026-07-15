@@ -16,7 +16,8 @@ const RATE_LIMIT_RESET_CONFIRMATION_VIEW_ID: &str = "rate-limit-reset-confirmati
 impl ChatWidget {
     pub(super) fn open_usage_menu(&mut self) {
         self.clear_pending_rate_limit_reset_hint();
-        let should_refresh_reset_availability = self.available_rate_limit_reset_credits == Some(0);
+        let should_refresh_reset_availability =
+            self.managed_accounts().is_none() && self.available_rate_limit_reset_credits == Some(0);
         self.bottom_pane
             .show_selection_view(self.usage_menu_params());
         if should_refresh_reset_availability {
@@ -30,47 +31,53 @@ impl ChatWidget {
     }
 
     fn usage_menu_params(&self) -> SelectionViewParams {
-        let reset_eligible = self.has_chatgpt_account;
-        let (reset_action_enabled, reset_description) =
-            match (reset_eligible, self.available_rate_limit_reset_credits) {
-                (true, Some(available_count)) if available_count > 0 => (
-                    true,
-                    format!(
-                        "You have {available_count} {} available.",
-                        reset_label(available_count)
+        let managed = self.managed_accounts().is_some();
+        let mut items = vec![SelectionItem {
+            name: "Show usage".to_string(),
+            description: Some("View recent account token usage.".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenTokenActivity);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        }];
+        if !managed {
+            let reset_eligible = self.has_chatgpt_account;
+            let (reset_action_enabled, reset_description) =
+                match (reset_eligible, self.available_rate_limit_reset_credits) {
+                    (true, Some(available_count)) if available_count > 0 => (
+                        true,
+                        format!(
+                            "You have {available_count} {} available.",
+                            reset_label(available_count)
+                        ),
                     ),
-                ),
-                (true, None) => (true, "Check reset availability.".to_string()),
-                (true, Some(_)) | (false, _) => {
-                    (false, "No usage limit resets available.".to_string())
-                }
-            };
+                    (true, None) => (true, "Check reset availability.".to_string()),
+                    (true, Some(_)) | (false, _) => {
+                        (false, "No usage limit resets available.".to_string())
+                    }
+                };
+            items.push(SelectionItem {
+                name: "Redeem usage limit reset".to_string(),
+                description: Some(reset_description),
+                is_disabled: !reset_action_enabled,
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenRateLimitResetCredits);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
         SelectionViewParams {
             view_id: Some(USAGE_MENU_VIEW_ID),
             title: Some("Usage".to_string()),
-            subtitle: Some("View account usage or redeem an earned reset.".to_string()),
+            subtitle: Some(if managed {
+                "View account usage.".to_string()
+            } else {
+                "View account usage or redeem an earned reset.".to_string()
+            }),
             footer_hint: Some(standard_popup_hint_line()),
-            items: vec![
-                SelectionItem {
-                    name: "Show usage".to_string(),
-                    description: Some("View recent account token usage.".to_string()),
-                    actions: vec![Box::new(|tx| {
-                        tx.send(AppEvent::OpenTokenActivity);
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                },
-                SelectionItem {
-                    name: "Redeem usage limit reset".to_string(),
-                    description: Some(reset_description),
-                    is_disabled: !reset_action_enabled,
-                    actions: vec![Box::new(|tx| {
-                        tx.send(AppEvent::OpenRateLimitResetCredits);
-                    })],
-                    dismiss_on_select: true,
-                    ..Default::default()
-                },
-            ],
+            items,
             ..Default::default()
         }
     }
@@ -81,6 +88,9 @@ impl ChatWidget {
         snapshots: Vec<RateLimitSnapshot>,
         result: Result<RateLimitResetCreditsSummary, String>,
     ) {
+        if self.managed_accounts().is_some() {
+            return;
+        }
         if self.pending_usage_menu_rate_limit_request_id != Some(request_id) {
             return;
         }
@@ -127,6 +137,9 @@ impl ChatWidget {
         snapshots: Vec<RateLimitSnapshot>,
         result: Result<RateLimitResetCreditsSummary, String>,
     ) -> bool {
+        if self.managed_accounts().is_some() {
+            return false;
+        }
         if self.pending_rate_limit_reset_request_id != Some(request_id) {
             return false;
         }
@@ -363,6 +376,9 @@ impl ChatWidget {
         credit_id: Option<String>,
         result: Result<ConsumeAccountRateLimitResetCreditResponse, String>,
     ) -> bool {
+        if self.managed_accounts().is_some() {
+            return false;
+        }
         if self.pending_rate_limit_reset_request_id != Some(request_id) {
             return false;
         }
@@ -440,6 +456,9 @@ impl ChatWidget {
         snapshots: Vec<RateLimitSnapshot>,
         result: Result<RateLimitResetCreditsSummary, String>,
     ) -> bool {
+        if self.managed_accounts().is_some() {
+            return false;
+        }
         if self.pending_rate_limit_reset_request_id != Some(request_id) {
             return false;
         }
@@ -500,6 +519,9 @@ impl ChatWidget {
         snapshots: Vec<RateLimitSnapshot>,
         result: Result<RateLimitResetCreditsSummary, String>,
     ) -> bool {
+        if self.managed_accounts().is_some() {
+            return false;
+        }
         if self.pending_rate_limit_reset_hint_request_id != Some(request_id) {
             return false;
         }

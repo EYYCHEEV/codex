@@ -48,6 +48,7 @@ pub use codex_thread::GuardianAuthorizationVersion;
 pub use codex_thread::GuardianRootMessage;
 pub use codex_thread::GuardianRootSnapshot;
 pub use codex_thread::ThreadConfigSnapshot;
+pub use codex_thread::ThreadRuntimeSnapshot;
 pub use session::turn_context::TurnContext;
 mod agent;
 mod agent_communication;
@@ -197,6 +198,7 @@ pub(crate) use codex_shell_command::powershell;
 pub use attestation::AttestationContext;
 pub use attestation::AttestationProvider;
 pub use attestation::GenerateAttestationFuture;
+pub use client::CurrentClientSetup;
 pub use client::ModelClient;
 pub use client::ModelClientSession;
 pub use client::X_CODEX_INSTALLATION_ID_HEADER;
@@ -205,6 +207,10 @@ pub use client::X_CODEX_TURN_METADATA_HEADER;
 pub use client_common::Prompt;
 pub use client_common::ResponseEvent;
 pub use client_common::ResponseStream;
+pub use codex_protocol::error::CodexErr;
+pub fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
+    session::turn::response_event_commits_attempt(event)
+}
 pub use codex_prompts::REVIEW_PROMPT;
 pub use compact::content_items_to_text;
 pub use current_time::SleepFuture;

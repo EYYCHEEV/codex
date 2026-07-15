@@ -1391,7 +1391,9 @@ impl Session {
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
             session_extension_data.insert(analytics_events_client.clone());
-            let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
+            let mcp_resource_client = Arc::new(McpResourceClient::from_binding(Arc::new(
+                codex_mcp::McpBinding::empty(Arc::new(mcp_projection.config.clone())),
+            )));
             let extension_metrics =
                 extension_metrics::from_session_telemetry(session_telemetry.clone());
             for contributor in extensions.thread_lifecycle_contributors() {

@@ -404,10 +404,12 @@ impl MessageProcessor {
         let account_processor = AccountRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
+            thread_state_manager.clone(),
             outgoing.clone(),
             Arc::clone(&config),
             config_manager.clone(),
         );
+        let account_selection_observer = account_processor.selection_observer();
         let apps_processor = AppsRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -494,6 +496,7 @@ impl MessageProcessor {
             auth_manager.clone(),
             Arc::clone(&thread_manager),
             outgoing.clone(),
+            account_selection_observer.clone(),
             arg0_paths.clone(),
             Arc::clone(&config),
             config_manager.clone(),
@@ -513,6 +516,7 @@ impl MessageProcessor {
             auth_manager,
             Arc::clone(&thread_manager),
             outgoing.clone(),
+            account_selection_observer,
             analytics_events_client.clone(),
             arg0_paths.clone(),
             Arc::clone(&config),
@@ -1623,9 +1627,14 @@ impl MessageProcessor {
             ClientRequest::BedrockSetup { params, .. } => {
                 self.account_processor.bedrock_setup(params).await
             }
-            ClientRequest::LogoutAccount { .. } => {
+            ClientRequest::ListAccounts { params, .. } => {
                 self.account_processor
-                    .logout_account(request_id.clone())
+                    .list_accounts(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::LogoutAccount { params, .. } => {
+                self.account_processor
+                    .logout_account(request_id.clone(), params)
                     .await
             }
             ClientRequest::CancelLoginAccount { params, .. } => {

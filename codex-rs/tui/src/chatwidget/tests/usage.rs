@@ -1,4 +1,5 @@
 use super::super::reset_credits::ResetCreditOption;
+use super::super::reset_credits::rate_limit_reset_scope;
 use super::super::reset_credits::reset_credit_options;
 use super::*;
 use chrono::TimeZone;
@@ -17,6 +18,46 @@ fn reset_credits(available_count: i64) -> RateLimitResetCreditsSummary {
     RateLimitResetCreditsSummary {
         available_count,
         credits: None,
+    }
+}
+
+fn managed_usage_account(
+    id: &str,
+    plan_type: codex_protocol::account::PlanType,
+    used_percent: f64,
+) -> codex_app_server_protocol::ManagedChatgptAccountView {
+    let mut rate_limit = snapshot(used_percent);
+    rate_limit
+        .primary
+        .as_mut()
+        .expect("primary window")
+        .window_duration_mins = Some(10_080);
+    rate_limit.plan_type = Some(codex_protocol::account::PlanType::Pro);
+    codex_app_server_protocol::ManagedChatgptAccountView {
+        managed_account_id: id.to_string(),
+        chatgpt_account_id: Some(format!("workspace-{id}")),
+        email: Some(format!("{id}@example.com")),
+        plan_type,
+        eligible: true,
+        eligibility_reason: None,
+        account_revision: 1,
+        credential_revision: 1,
+        refresh_status: codex_app_server_protocol::ManagedChatgptAccountRefreshStatus::Healthy,
+        block: None,
+        usage: codex_app_server_protocol::ManagedChatgptAccountUsage {
+            state: codex_app_server_protocol::ManagedChatgptAccountUsageState::Fresh,
+            rate_limits: vec![rate_limit],
+            token_usage: Some(codex_app_server_protocol::AccountTokenUsageSummary {
+                lifetime_tokens: Some(123),
+                peak_daily_tokens: Some(45),
+                longest_running_turn_sec: Some(67),
+                current_streak_days: Some(2),
+                longest_streak_days: Some(3),
+            }),
+            observed_at: Some(1_700_000_000),
+            unavailable_reason: None,
+            unavailable_observed_at: None,
+        },
     }
 }
 
@@ -100,6 +141,68 @@ fn reset_credit_options_use_generic_copy_when_backend_copy_is_missing() {
             description: "Reset your current usage limits.".to_string(),
         }]
     );
+}
+
+#[tokio::test]
+async fn managed_usage_uses_selected_row_plan_and_never_exposes_singular_reset_flow() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    set_chatgpt_auth(&mut chat);
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![
+            managed_usage_account("a", codex_protocol::account::PlanType::Pro, 91.0),
+            managed_usage_account("b", codex_protocol::account::PlanType::Free, 42.0),
+        ],
+        selected_account_id: Some("b".to_string()),
+        pool_revision: 1,
+        selection_revision: Some(1),
+    });
+    chat.available_rate_limit_reset_credits = Some(5);
+
+    assert_eq!(
+        chat.current_plan_type(),
+        Some(codex_protocol::account::PlanType::Free)
+    );
+    assert!(matches!(
+        rate_limit_reset_scope(&chat.rate_limit_snapshots_by_limit_id, chat.plan_type),
+        RateLimitResetScope::Monthly
+    ));
+
+    chat.dispatch_command(SlashCommand::Usage);
+
+    let rendered = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(rendered.contains("Show usage"));
+    assert!(!rendered.contains("Redeem usage limit reset"));
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::RefreshRateLimits { .. }))
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTokenActivity));
+    chat.add_token_activity_output(TokenActivityView::Daily);
+    let request_id = match rx.try_recv() {
+        Ok(AppEvent::RefreshManagedTokenActivity { request_id }) => request_id,
+        other => panic!("expected scoped managed token activity refresh, got {other:?}"),
+    };
+    let summary = chat
+        .managed_accounts()
+        .and_then(|accounts| accounts.selected_account())
+        .and_then(|account| account.usage.token_usage.clone())
+        .expect("selected managed token usage");
+    assert!(chat.finish_managed_token_activity_refresh(
+        request_id,
+        Ok(codex_app_server_protocol::GetAccountTokenUsageResponse {
+            summary,
+            daily_usage_buckets: None,
+        }),
+    ));
+    let rendered = lines_to_single_string(
+        &chat
+            .pending_token_activity_output()
+            .expect("completed managed token activity")
+            .display_lines(/*width*/ 80),
+    );
+    assert!(rendered.contains("123"));
 }
 
 #[tokio::test]

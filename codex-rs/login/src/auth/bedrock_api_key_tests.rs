@@ -20,6 +20,7 @@ fn api_key_auth() -> AuthDotJson {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
         bedrock_access_keys: None,
     }
 }
@@ -33,6 +34,7 @@ fn bedrock_only_auth() -> AuthDotJson {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: Some(bedrock_auth()),
+        managed_chatgpt: None,
         bedrock_access_keys: None,
     }
 }
@@ -92,6 +94,7 @@ async fn login_with_bedrock_api_key_replaces_openai_auth() -> anyhow::Result<()>
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: Some(bedrock_auth()),
+        managed_chatgpt: None,
         bedrock_access_keys: None,
     };
     assert_eq!(loaded, expected);

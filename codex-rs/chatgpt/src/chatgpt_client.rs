@@ -51,6 +51,15 @@ fn psp_chatgpt_client(factory: HttpClientFactory) -> HttpClient {
     client
 }
 
+fn chatgpt_client(config: &Config) -> HttpClient {
+    let http_client_factory = config.http_client_factory();
+    if http_client_factory.has_chatgpt_cookies() {
+        psp_chatgpt_client(http_client_factory)
+    } else {
+        create_client()
+    }
+}
+
 /// Make a GET request to the ChatGPT backend API.
 pub(crate) async fn chatgpt_get_request<T: DeserializeOwned>(
     config: &Config,
@@ -64,7 +73,6 @@ pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
     path: String,
     timeout: Option<Duration>,
 ) -> anyhow::Result<T> {
-    let chatgpt_base_url = &config.chatgpt_base_url;
     let auth_manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     let auth = auth_manager
@@ -80,23 +88,35 @@ pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
         "ChatGPT account ID not available, please re-run `codex login`"
     );
 
+    chatgpt_get_request_with_auth_and_timeout(config, &auth, path, timeout, CODEX_PRODUCT_SKU).await
+}
+
+/// Makes a GET request with one already-captured auth identity.
+pub(crate) async fn chatgpt_get_request_with_auth_and_timeout<T: DeserializeOwned>(
+    config: &Config,
+    auth: &CodexAuth,
+    path: String,
+    timeout: Option<Duration>,
+    product_sku: &str,
+) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        auth.uses_codex_backend(),
+        "ChatGPT backend requests require Codex backend auth"
+    );
+    anyhow::ensure!(
+        auth.get_account_id().is_some(),
+        "ChatGPT account ID not available, please re-run codex login"
+    );
     let url = format!(
         "{}/{}",
-        chatgpt_base_url.trim_end_matches('/'),
+        config.chatgpt_base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     );
-
-    let http_client_factory = config.http_client_factory();
-    let client = if http_client_factory.has_chatgpt_cookies() {
-        psp_chatgpt_client(http_client_factory)
-    } else {
-        create_client()
-    };
-    let mut request = client
+    let mut request = chatgpt_client(config)
         .get(&url)
         .headers(default_headers())
-        .headers(codex_model_provider::auth_provider_from_auth(&auth).to_auth_headers())
-        .header(OAI_PRODUCT_SKU_HEADER, CODEX_PRODUCT_SKU)
+        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
+        .header(OAI_PRODUCT_SKU_HEADER, product_sku)
         .header("Content-Type", "application/json");
     if let Some(timeout) = timeout {
         request = request.timeout(timeout);
@@ -145,13 +165,7 @@ pub(crate) async fn chatgpt_post_request_with_timeout<
         config.chatgpt_base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     );
-    let http_client_factory = config.http_client_factory();
-    let client = if http_client_factory.has_chatgpt_cookies() {
-        psp_chatgpt_client(http_client_factory)
-    } else {
-        create_client()
-    };
-    let response = client
+    let response = chatgpt_client(config)
         .post(&url)
         .headers(default_headers())
         .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
