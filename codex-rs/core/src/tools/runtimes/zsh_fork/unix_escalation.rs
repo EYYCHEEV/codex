@@ -107,9 +107,10 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         return Ok(None);
     }
 
+    let (attempt_file_system_sandbox_policy, _) = attempt.permissions.to_runtime_permissions();
     let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
         req.sandbox_permissions,
-        &exec_request.file_system_sandbox_policy,
+        &attempt_file_system_sandbox_policy,
     );
     let exec_policy = Arc::new(RwLock::new(
         ctx.session

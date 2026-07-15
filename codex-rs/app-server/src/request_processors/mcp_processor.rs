@@ -135,15 +135,20 @@ impl McpRequestProcessor {
             McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
         };
 
-        let auth = self.auth_manager.auth().await;
-        let (mcp_config, runtime_context) = match thread_id.as_deref() {
+        let (auth, mcp_config, runtime_context) = match thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
-                let (config, runtime_context) =
-                    thread.current_mcp_config_and_runtime_context().await;
-                ((*config).clone(), runtime_context)
+                let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
+                    internal_error(format!("failed to capture thread runtime: {err}"))
+                })?;
+                (
+                    snapshot.effective_auth,
+                    snapshot.mcp.config().clone(),
+                    snapshot.runtime_context,
+                )
             }
             None => {
+                let auth = self.auth_manager.auth().await;
                 let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
                 let mcp_config = self
                     .thread_manager
@@ -154,7 +159,7 @@ impl McpRequestProcessor {
                     self.thread_manager.environment_manager(),
                     config.cwd.to_path_buf(),
                 );
-                (mcp_config, runtime_context)
+                (auth, Arc::new(mcp_config), runtime_context)
             }
         };
         let effective_servers = codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
@@ -264,6 +269,43 @@ impl McpRequestProcessor {
         Ok(McpServerOauthLoginResponse { authorization_url })
     }
 
+    async fn threadless_auth_and_codex_apps_cache_key(
+        &self,
+        chatgpt_base_url: &str,
+    ) -> Result<(Option<CodexAuth>, codex_mcp::CodexAppsToolsCacheKey), JSONRPCErrorError> {
+        let managed_snapshot = self
+            .auth_manager
+            .managed_chatgpt_auth_snapshot(&codex_login::ManagedChatgptSelectionScope::default())
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to resolve threadless managed account snapshot: {err}"
+                ))
+            })?;
+
+        if let Some(snapshot) = managed_snapshot {
+            let is_workspace_account = snapshot.auth.is_workspace_account();
+            let cache_key = codex_mcp::CodexAppsToolsCacheKey::from_transport_binding(
+                snapshot.transport,
+                snapshot.account_revision,
+                chatgpt_base_url,
+                is_workspace_account,
+            );
+            return Ok((Some(snapshot.auth), cache_key));
+        }
+
+        let auth = self.auth_manager.auth().await;
+        let transport = codex_login::TransportAuthBinding::for_nonmanaged_auth(auth.as_ref());
+        let is_workspace_account = auth.as_ref().is_some_and(CodexAuth::is_workspace_account);
+        let cache_key = codex_mcp::CodexAppsToolsCacheKey::from_runtime_binding(
+            transport,
+            None,
+            chatgpt_base_url,
+            is_workspace_account,
+        );
+        Ok((auth, cache_key))
+    }
+
     async fn list_mcp_server_status(
         &self,
         request_id: &ConnectionRequestId,
@@ -320,28 +362,46 @@ impl McpRequestProcessor {
                 None => self.load_latest_config(/*fallback_cwd*/ None).await?,
             };
             let mcp_manager = self.thread_manager.mcp_manager();
-            let auth = self.auth_manager.auth().await;
-            let (mcp_config, runtime_context) = match thread.as_ref() {
-                Some(thread) => thread.runtime_mcp_config_and_context(&config).await,
-                None => (
-                    mcp_manager.runtime_config(&config).await,
-                    McpRuntimeContext::new(
-                        self.thread_manager.environment_manager(),
-                        config.cwd.to_path_buf(),
-                    ),
-                ),
-            };
+            let (mcp_config, auth, runtime_context, codex_apps_tools_cache_key) =
+                match thread.as_ref() {
+                    Some(thread) => {
+                        let snapshot = thread
+                            .current_runtime_snapshot_with_config(Arc::new(config))
+                            .await
+                            .map_err(|err| {
+                                internal_error(format!("failed to capture thread runtime: {err}"))
+                            })?;
+                        (
+                            snapshot.mcp.config().clone(),
+                            snapshot.effective_auth,
+                            snapshot.runtime_context,
+                            snapshot.codex_apps_tools_cache_key,
+                        )
+                    }
+                    None => {
+                        let mcp_config = mcp_manager.runtime_config(&config).await;
+                        let (auth, cache_key) = self
+                            .threadless_auth_and_codex_apps_cache_key(&mcp_config.chatgpt_base_url)
+                            .await?;
+                        let runtime_context = McpRuntimeContext::new(
+                            self.thread_manager.environment_manager(),
+                            config.cwd.to_path_buf(),
+                        );
+                        (Arc::new(mcp_config), auth, runtime_context, cache_key)
+                    }
+                };
             let snapshot = collect_mcp_server_status_snapshot_with_detail(
                 &mcp_config,
                 auth.as_ref(),
                 runtime_context,
                 mcp_manager.codex_apps_tools_cache(),
                 mcp_manager.tool_catalog_cache(),
+                codex_apps_tools_cache_key,
                 detail,
                 params.server_name.as_deref(),
             )
             .await;
-            (Arc::new(mcp_config), snapshot)
+            (mcp_config, snapshot)
         };
 
         let runtime_statuses = match thread {
@@ -522,7 +582,9 @@ impl McpRequestProcessor {
         let mcp_config = mcp_manager.runtime_config(&config).await;
         let codex_apps_tools_cache = mcp_manager.codex_apps_tools_cache();
         let tool_catalog_cache = mcp_manager.tool_catalog_cache();
-        let auth = self.auth_manager.auth().await;
+        let (auth, codex_apps_tools_cache_key) = self
+            .threadless_auth_and_codex_apps_cache_key(&mcp_config.chatgpt_base_url)
+            .await?;
         let environment_manager = self.thread_manager.environment_manager();
         // This threadless resource-read path has no turn cwd or turn-selected
         // environment. Use config cwd only as the local stdio fallback; named
@@ -538,6 +600,7 @@ impl McpRequestProcessor {
                 runtime_context,
                 codex_apps_tools_cache,
                 tool_catalog_cache,
+                codex_apps_tools_cache_key,
                 &server,
                 resource_params,
             )

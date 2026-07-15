@@ -168,6 +168,11 @@ impl ThreadScopedOutgoingMessageSender {
             thread_id,
         }
     }
+    pub(crate) fn notification_target(
+        &self,
+    ) -> (Arc<OutgoingMessageSender>, Arc<Vec<ConnectionId>>) {
+        (Arc::clone(&self.outgoing), Arc::clone(&self.connection_ids))
+    }
 
     pub(crate) async fn send_request(
         &self,
@@ -951,6 +956,7 @@ mod tests {
                 success: true,
                 error: None,
                 onboarding_entrypoint: None,
+                managed_account_id: None,
             });
 
         let jsonrpc_notification =
@@ -983,6 +989,7 @@ mod tests {
                 success: true,
                 error: None,
                 onboarding_entrypoint: None,
+                managed_account_id: None,
             });
 
         assert_eq!(
@@ -1005,6 +1012,8 @@ mod tests {
     fn verify_account_rate_limits_notification_serialization() {
         let notification =
             ServerNotification::AccountRateLimitsUpdated(AccountRateLimitsUpdatedNotification {
+                managed_account_id: None,
+                account_revision: None,
                 rate_limits: RateLimitSnapshot {
                     limit_id: Some("codex".to_string()),
                     limit_name: None,

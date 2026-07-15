@@ -26,10 +26,11 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::AuthDotJson;
 use crate::auth::AuthKeyringBackendKind;
 use crate::auth::save_auth;
 use crate::callback_params::LIFE_SCIENCES_OAUTH_STATE_SUFFIX;
+use crate::auth::AuthManager;
+use crate::auth::ManagedChatgptOauthCredentials;
 use crate::callback_params::LoginCallbackResult;
 use crate::callback_params::LoginOnboardingEntrypoint;
 use crate::default_client::originator;
@@ -275,7 +276,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
                                     )
                                 })
                                 .await;
-                                Some(result.map(|()| callback_result))
+                                Some(result.map(|()| callback_result.clone()))
                             }
                             HandledRequest::RedirectAndExit { header, result } => {
                                 match tokio::task::spawn_blocking(move || {
@@ -413,6 +414,7 @@ async fn process_request(
                     );
                 }
             };
+            let mut callback_result = callback_result.unwrap_or_default();
 
             match exchange_code_for_tokens(
                 &opts.issuer,
@@ -442,7 +444,7 @@ async fn process_request(
                         obtain_api_key(&client, &opts.issuer, &opts.client_id, &tokens.id_token)
                             .await
                             .ok();
-                    if let Err(err) = persist_tokens_async(
+                    match persist_tokens_async(
                         &opts.codex_home,
                         api_key.clone(),
                         tokens.id_token.clone(),
@@ -450,17 +452,21 @@ async fn process_request(
                         tokens.refresh_token.clone(),
                         opts.cli_auth_credentials_store_mode,
                         opts.auth_keyring_backend_kind,
+                        &opts.auth_route_config,
                     )
                     .await
                     {
-                        eprintln!("Persist error: {err}");
-                        return login_error_response(
-                            "Sign-in completed but credentials could not be saved locally.",
-                            io::ErrorKind::Other,
-                            Some("persist_failed"),
-                            Some(&err.to_string()),
-                        );
-                    }
+                        Ok(identity) => callback_result.managed_account_id = Some(identity),
+                        Err(err) => {
+                            eprintln!("Persist error: {err}");
+                            return login_error_response(
+                                "Sign-in completed but credentials could not be saved locally.",
+                                io::ErrorKind::Other,
+                                Some("persist_failed"),
+                                Some(&err.to_string()),
+                            );
+                        }
+                    };
 
                     let redirect = compose_success_url(
                         actual_port,
@@ -836,41 +842,37 @@ pub(crate) async fn persist_tokens_async(
     refresh_token: String,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
-) -> io::Result<()> {
-    // Reuse existing synchronous logic but run it off the async runtime.
-    let codex_home = codex_home.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut tokens = TokenData {
-            id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
-            access_token,
-            refresh_token,
-            account_id: None,
-        };
-        if let Some(acc) = jwt_auth_claims(&id_token)
-            .get("chatgpt_account_id")
-            .and_then(|v| v.as_str())
-        {
-            tokens.account_id = Some(acc.to_string());
-        }
-        let auth = AuthDotJson {
-            auth_mode: Some(AuthMode::Chatgpt),
-            openai_api_key: api_key,
-            tokens: Some(tokens),
-            last_refresh: Some(Utc::now()),
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-            bedrock_access_keys: None,
-        };
-        save_auth(
-            &codex_home,
-            &auth,
-            auth_credentials_store_mode,
-            keyring_backend_kind,
-        )
-    })
-    .await
-    .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
+    auth_route_config: &AuthRouteConfig,
+) -> io::Result<String> {
+    let mut tokens = TokenData {
+        id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
+        access_token,
+        refresh_token,
+        account_id: None,
+    };
+    if let Some(account_id) = jwt_auth_claims(&id_token)
+        .get("chatgpt_account_id")
+        .and_then(|value| value.as_str())
+    {
+        tokens.account_id = Some(account_id.to_string());
+    }
+    let manager = AuthManager::new(
+        codex_home.to_path_buf(),
+        false,
+        auth_credentials_store_mode,
+        None,
+        None,
+        keyring_backend_kind,
+        auth_route_config.clone(),
+    )
+    .await;
+    manager
+        .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+            tokens,
+            last_refresh: Utc::now(),
+            oauth_api_key: api_key,
+        })
+        .await
 }
 
 /// Validates the ID token against an optional workspace restriction.
@@ -1047,9 +1049,206 @@ pub(crate) async fn obtain_api_key(
 }
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use pretty_assertions::assert_eq;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use crate::auth::AuthKeyringBackendKind;
+    use crate::auth::load_auth_dot_json;
+    use codex_config::types::AuthCredentialsStoreMode;
+
+    use super::TokenEndpointErrorDetail;
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::render_login_error_page;
+    use super::sanitize_url_for_logging;
+
+    fn oauth_id_token(email: &str, account_id: &str) -> String {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let header = encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = encode(
+            &serde_json::to_vec(&json!({
+                "email": email,
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                    "chatgpt_user_id": format!("user-{account_id}"),
+                    "chatgpt_plan_type": "pro",
+                }
+            }))
+            .expect("serialize OAuth claims"),
+        );
+        format!("{header}.{payload}.sig")
+    }
+
+    #[tokio::test]
+    async fn sequential_oauth_completions_preserve_siblings_and_replace_only_same_identity() {
+        let codex_home = tempdir().expect("tempdir");
+        let first_identity = super::persist_tokens_async(
+            codex_home.path(),
+            Some("api-a1".to_string()),
+            oauth_id_token("a@example.com", "workspace-a"),
+            "access-a1".to_string(),
+            "refresh-a1".to_string(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+            &crate::test_support::transport_default_auth_route_config(),
+        )
+        .await
+        .expect("persist first OAuth completion");
+        let second_identity = super::persist_tokens_async(
+            codex_home.path(),
+            Some("api-b1".to_string()),
+            oauth_id_token("b@example.com", "workspace-b"),
+            "access-b1".to_string(),
+            "refresh-b1".to_string(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+            &crate::test_support::transport_default_auth_route_config(),
+        )
+        .await
+        .expect("persist second OAuth completion");
+        let relogin_identity = super::persist_tokens_async(
+            codex_home.path(),
+            Some("api-a2".to_string()),
+            oauth_id_token(" A@Example.com ", "workspace-a"),
+            "access-a2".to_string(),
+            "refresh-a2".to_string(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+            &crate::test_support::transport_default_auth_route_config(),
+        )
+        .await
+        .expect("persist same-identity OAuth completion");
+
+        assert_eq!(relogin_identity, first_identity);
+        assert_ne!(second_identity, first_identity);
+        let stored = load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .expect("load managed OAuth pool")
+        .expect("stored auth");
+        let pool = stored.managed_chatgpt.expect("managed OAuth pool");
+        assert_eq!(pool.accounts.len(), 2);
+        assert_eq!(
+            pool.accounts
+                .iter()
+                .find(|account| account.identity_key == first_identity)
+                .expect("first account")
+                .tokens
+                .refresh_token,
+            "refresh-a2"
+        );
+        assert_eq!(
+            pool.accounts
+                .iter()
+                .find(|account| account.identity_key == second_identity)
+                .expect("second account")
+                .tokens
+                .refresh_token,
+            "refresh-b1"
+        );
+    }
+
+    #[test]
+    fn parse_token_endpoint_error_prefers_error_description() {
+        let detail = parse_token_endpoint_error(
+            r#"{"error":"invalid_grant","error_description":"refresh token expired"}"#,
+        );
+
+        assert_eq!(
+            detail,
+            TokenEndpointErrorDetail {
+                error_code: Some("invalid_grant".to_string()),
+                error_message: Some("refresh token expired".to_string()),
+                display_message: "refresh token expired".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_token_endpoint_error_reads_nested_error_message_and_code() {
+        let detail = parse_token_endpoint_error(
+            r#"{"error":{"code":"proxy_auth_required","message":"proxy authentication required"}}"#,
+        );
+
+        assert_eq!(
+            detail,
+            TokenEndpointErrorDetail {
+                error_code: Some("proxy_auth_required".to_string()),
+                error_message: Some("proxy authentication required".to_string()),
+                display_message: "proxy authentication required".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_token_endpoint_error_falls_back_to_error_code() {
+        let detail = parse_token_endpoint_error(r#"{"error":"temporarily_unavailable"}"#);
+
+        assert_eq!(
+            detail,
+            TokenEndpointErrorDetail {
+                error_code: Some("temporarily_unavailable".to_string()),
+                error_message: None,
+                display_message: "temporarily_unavailable".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_token_endpoint_error_preserves_plain_text_for_display() {
+        let detail = parse_token_endpoint_error("service unavailable");
+
+        assert_eq!(
+            detail,
+            TokenEndpointErrorDetail {
+                error_code: None,
+                error_message: None,
+                display_message: "service unavailable".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_query_value_only_scrubs_known_keys() {
+        assert_eq!(
+            redact_sensitive_query_value("code", "abc123"),
+            "<redacted>".to_string()
+        );
+        assert_eq!(
+            redact_sensitive_query_value("redirect_uri", "http://localhost:1455/auth/callback"),
+            "http://localhost:1455/auth/callback".to_string()
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_url_parts_preserves_safe_url_shape() {
+        let mut url = url::Url::parse(
+            "https://user:pass@auth.openai.com/oauth/token?code=abc123&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback#frag",
+        )
+        .expect("valid url");
+
+        redact_sensitive_url_parts(&mut url);
+
+        assert_eq!(
+            url.as_str(),
+            "https://auth.openai.com/oauth/token?code=%3Credacted%3E&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
+        );
+    }
+
+    #[test]
+    fn sanitize_url_for_logging_redacts_sensitive_issuer_parts() {
+        let redacted =
+            sanitize_url_for_logging("https://user:pass@example.com/base?token=abc123&env=prod");
+
+        assert_eq!(
+            redacted,
+            "https://example.com/base?token=%3Credacted%3E&env=prod".to_string()
+        );
+    }
 
     #[test]
     fn render_login_error_page_escapes_dynamic_fields() {

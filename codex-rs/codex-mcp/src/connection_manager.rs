@@ -30,6 +30,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use crate::CodexAppsToolsCacheKey;
 use crate::binding::call_tool_result_from_rmcp;
 use crate::catalog::McpServerSource;
 use crate::elicitation::ElicitationRequestManager;
@@ -61,10 +62,13 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
+use codex_api::SharedAuthProvider;
 use codex_config::McpServerTransportConfig;
 use codex_config::McpStartupReadiness;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
+use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::protocol::Event;
@@ -301,14 +305,11 @@ impl McpConnectionSet {
         let static_chatgpt_auth_provider = auth
             .filter(|auth| auth.uses_codex_backend())
             .map(codex_model_provider::auth_provider_from_auth);
-        let codex_apps_auth_provider = auth_manager.as_ref().and_then(|auth_manager| {
-            auth.filter(|auth| auth.uses_codex_backend()).map(|auth| {
-                codex_model_provider::auth_provider_from_auth_manager(
-                    Arc::clone(auth_manager),
-                    auth,
-                )
-            })
-        });
+        let codex_apps_auth_provider = codex_apps_auth_provider_for_snapshot(
+            auth,
+            auth_manager.clone(),
+            &codex_apps_tools_cache_key,
+        );
         for (server_name, server) in mcp_servers
             .into_iter()
             .filter(|(_, server)| server.enabled())
@@ -402,9 +403,9 @@ impl McpConnectionSet {
                     .context(codex_home.clone(), codex_apps_tools_cache_key.clone())
                     .with_live_scope(scope.to_string())
             });
-            // The reserved Codex Apps registration follows the shared
-            // AuthManager across refreshes. In the hosted-plugin path, this
-            // is the ChatGPT /ps/mcp connection. User-configured MCP
+            // Managed Codex Apps uses the exact selected snapshot. An external
+            // auth overlay may follow bearer refreshes only while its complete
+            // non-secret transport binding remains unchanged. User-configured
             // registrations keep their existing configured auth path.
             let chatgpt_auth_provider = if server_name == CODEX_APPS_MCP_SERVER_NAME {
                 codex_apps_auth_provider
@@ -432,6 +433,7 @@ impl McpConnectionSet {
                     auth_provider: runtime_auth_provider.clone(),
                     auth_manager: auth_manager.clone(),
                     auth: auth.cloned(),
+                    codex_apps_tools_cache_key: codex_apps_tools_cache_key.clone(),
                     protocol_mode,
                     client_mcp_extensions: client_mcp_extensions.clone(),
                 }));
@@ -1080,6 +1082,27 @@ impl McpConnectionSet {
         }
         server_infos
     }
+}
+
+fn codex_apps_auth_provider_for_snapshot(
+    auth: Option<&CodexAuth>,
+    auth_manager: Option<Arc<AuthManager>>,
+    cache_key: &CodexAppsToolsCacheKey,
+) -> Option<SharedAuthProvider> {
+    let auth = auth.filter(|auth| auth.uses_codex_backend())?;
+    if !cache_key.is_managed()
+        && auth.is_external_chatgpt_tokens()
+        && let Some(auth_manager) = auth_manager
+    {
+        return Some(codex_model_provider::auth_provider_from_auth_manager(
+            auth_manager,
+            auth,
+            cache_key.transport_binding(),
+            None,
+        ));
+    }
+
+    Some(codex_model_provider::auth_provider_from_auth(auth))
 }
 
 #[cfg(test)]

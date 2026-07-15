@@ -46,6 +46,7 @@ pub fn login_with_bedrock_access_keys(
         tokens: None,
         last_refresh: None,
         agent_identity: None,
+        managed_chatgpt: None,
         personal_access_token: None,
         bedrock_api_key: None,
         bedrock_access_keys: Some(BedrockAccessKeysAuth {

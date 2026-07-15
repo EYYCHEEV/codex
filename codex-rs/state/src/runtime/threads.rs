@@ -3563,6 +3563,9 @@ mod tests {
                     model_context_window: None,
                 }),
                 rate_limits: None,
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
             },
         ))];
         let override_updated_at =

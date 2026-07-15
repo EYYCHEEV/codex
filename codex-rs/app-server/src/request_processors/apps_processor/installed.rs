@@ -1,9 +1,10 @@
 use super::*;
 
+use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeTool;
-use codex_connectors::connector_runtime_context_key;
 use codex_connectors::connector_tool_is_synthetic;
 use codex_connectors::installed_connector_runtime;
+use codex_login::TransportAuthBinding;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpRuntime;
@@ -64,7 +65,12 @@ impl AppsRequestProcessor {
                 .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend));
 
             let mcp_manager = self.thread_manager.mcp_manager();
-            let cache_key = connector_runtime_context_key(auth.as_ref());
+            let cache_key = ConnectorRuntimeContextKey::from_runtime_binding(
+                TransportAuthBinding::for_nonmanaged_auth(auth.as_ref()),
+                None,
+                config.chatgpt_base_url.clone(),
+                auth.as_ref().is_some_and(CodexAuth::is_workspace_account),
+            );
             let previous_snapshot = mcp_manager
                 .codex_apps_tools_cache()
                 .current_snapshot(config.codex_home.to_path_buf(), cache_key.clone());

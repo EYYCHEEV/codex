@@ -86,6 +86,7 @@ impl ChatWidget {
                 && codex_realtime_webrtc::RealtimeWebrtcSession::is_supported();
         self.bottom_pane
             .set_voice_command_enabled(self.realtime_conversation_available_for_thread);
+        self.apply_pending_managed_account_selection();
         self.bottom_pane
             .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {

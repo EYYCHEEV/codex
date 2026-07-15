@@ -20,6 +20,7 @@ use serde_json::Value;
 use tokio::sync::watch;
 
 use crate::CODEX_APPS_MCP_SERVER_NAME;
+use crate::CodexAppsToolsCacheKey;
 use crate::EffectiveMcpServer;
 use crate::McpEventStream;
 use crate::McpProtocolMode;
@@ -38,6 +39,7 @@ pub(crate) struct EventStreamConnectionSettings {
     pub auth_provider: Option<SharedAuthProvider>,
     pub auth_manager: Option<Arc<AuthManager>>,
     pub auth: Option<CodexAuth>,
+    pub codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
     pub protocol_mode: McpProtocolMode,
     pub client_mcp_extensions: ClientMcpExtensions,
 }
@@ -69,11 +71,8 @@ impl McpEventStreamOpener {
             () = self.wait_for_access_change() => bail!("event subscription access changed"),
             result = async {
                 let connection = &self.connection;
-                if let Some(manager) = &connection.auth_manager {
-                    let auth = manager.auth().await;
-                    if !self.matches_auth(auth.as_ref()) {
-                        bail!("event subscription account changed");
-                    }
+                if !self.matches_runtime_binding().await {
+                    bail!("event subscription account changed");
                 }
 
                 let startup_timeout = connection.server.config().startup_timeout_sec
@@ -123,7 +122,7 @@ impl McpEventStreamOpener {
             };
             let mut changes = manager.auth_change_receiver();
             loop {
-                if !self.matches_auth(manager.auth_cached().as_ref()) {
+                if !self.matches_runtime_binding().await {
                     return;
                 }
                 if changes.changed().await.is_err() {
@@ -137,7 +136,42 @@ impl McpEventStreamOpener {
         }
     }
 
-    fn matches_auth(&self, current: Option<&CodexAuth>) -> bool {
+    async fn matches_runtime_binding(&self) -> bool {
+        let Some(manager) = &self.connection.auth_manager else {
+            return true;
+        };
+        let expected = &self.connection.codex_apps_tools_cache_key;
+        if expected.is_managed() {
+            let identity = expected.transport_binding().identity_key;
+            let Ok(Some(snapshot)) = manager
+                .managed_chatgpt_auth_snapshot_for_identity(&identity)
+                .await
+            else {
+                return false;
+            };
+            return CodexAppsToolsCacheKey::from_transport_binding(
+                snapshot.transport,
+                snapshot.account_revision,
+                expected.base_url(),
+                snapshot.auth.is_workspace_account(),
+            ) == *expected;
+        }
+
+        let current = manager.auth().await;
+        if expected.base_url().is_empty() {
+            return self.matches_legacy_auth(current.as_ref());
+        }
+        CodexAppsToolsCacheKey::from_runtime_binding(
+            codex_login::TransportAuthBinding::for_nonmanaged_auth(current.as_ref()),
+            /*credential_revision*/ None,
+            expected.base_url(),
+            current
+                .as_ref()
+                .is_some_and(CodexAuth::is_workspace_account),
+        ) == *expected
+    }
+
+    fn matches_legacy_auth(&self, current: Option<&CodexAuth>) -> bool {
         match (self.connection.auth.as_ref(), current) {
             (Some(CodexAuth::AgentIdentity(expected)), Some(CodexAuth::AgentIdentity(current))) => {
                 expected.record() == current.record()

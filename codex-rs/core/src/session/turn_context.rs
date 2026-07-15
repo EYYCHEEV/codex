@@ -1337,6 +1337,22 @@ impl Session {
         self.new_default_turn_for(TurnContextBuildMode::Full).await
     }
 
+    /// Builds a context from refreshed config while retaining this thread's settings and environments.
+    pub(crate) async fn new_default_turn_with_config(&self, config: Arc<Config>) -> Arc<TurnContext> {
+        let mut session_configuration = self.default_turn_configuration().await;
+        session_configuration.original_config_do_not_use = config;
+        let turn_environments = self.services.turn_environments.snapshot().await;
+        self.new_turn_context_from_configuration(
+            self.next_internal_sub_id(),
+            session_configuration,
+            turn_environments,
+            NewTurnContextOptions::default(),
+            TurnContextBuildMode::Full,
+            self.git_enrichment_policy,
+        )
+        .await
+    }
+
     /// Captures current recording settings without discovering skills.
     /// This context must not be used to capture or execute a step.
     pub(crate) async fn new_inject_items_context(&self) -> Arc<TurnContext> {

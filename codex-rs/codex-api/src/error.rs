@@ -1,6 +1,7 @@
 use crate::rate_limits::RateLimitError;
 use codex_client::TransportError;
 use codex_http_client::RetryAfter;
+use codex_protocol::error::WebsocketCloseDetails;
 use codex_protocol::protocol::MisalignmentErrorDetails;
 use http::StatusCode;
 use serde_json::Value;
@@ -14,6 +15,8 @@ pub enum ApiError {
     Api { status: StatusCode, message: String },
     #[error("stream error: {0}")]
     Stream(String),
+    #[error("stream error: websocket closed by server before response.completed")]
+    WebsocketClosed(Box<WebsocketCloseDetails>),
     #[error("context window exceeded")]
     ContextWindowExceeded,
     #[error("quota exceeded")]

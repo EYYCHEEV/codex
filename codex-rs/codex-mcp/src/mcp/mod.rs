@@ -31,7 +31,6 @@ use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
-use codex_connectors::connector_runtime_context_key;
 use codex_login::CodexAuth;
 use codex_model_provider::CHATGPT_CODEX_BASE_URL;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -50,6 +49,7 @@ use rmcp::model::ReadResourceResult;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use crate::CodexAppsToolsCacheKey;
 use crate::McpProtocolMode;
 use crate::McpServerSource;
 use crate::ResolvedMcpCatalog;
@@ -445,6 +445,7 @@ pub async fn read_mcp_resource(
     runtime_context: McpRuntimeContext,
     codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     tool_catalog_cache: crate::McpToolCatalogCache,
+    codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
     server: &str,
     params: ReadResourceRequestParams,
 ) -> anyhow::Result<ReadResourceResult> {
@@ -467,7 +468,7 @@ pub async fn read_mcp_resource(
             runtime_context,
             codex_apps_tools_cache,
             tool_catalog_cache,
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth),
+            codex_apps_tools_cache_key,
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
             auth_manager: None,
@@ -501,6 +502,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     runtime_context: McpRuntimeContext,
     codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     tool_catalog_cache: crate::McpToolCatalogCache,
+    codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
     detail: McpSnapshotDetail,
     server_name: Option<&str>,
 ) -> McpServerStatusSnapshot {
@@ -547,7 +549,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
             runtime_context,
             codex_apps_tools_cache,
             tool_catalog_cache,
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth),
+            codex_apps_tools_cache_key,
             client_mcp_extensions: ClientMcpExtensions::default(),
             auth: auth.cloned(),
             auth_manager: None,
