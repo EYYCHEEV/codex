@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 
 use crate::SkillInjections;
 use crate::build_skill_injections;
+use crate::client::CurrentClientSetup;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -38,6 +39,7 @@ use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
+use crate::responses_retry::ResponsesRetryDecision;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
@@ -108,7 +110,10 @@ use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SafetyBufferingEvent;
+use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
@@ -182,18 +187,36 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
 
-    // run_turn owns the step used to seed context and make the first sampling request.
+    // Seed extensions and model-visible state from the same atomic setup as the first request.
+    let first_request_setup = sess
+        .services
+        .model_client
+        .current_client_setup(
+            Some(&turn_context.model_info.slug),
+            Some(&sess.session_id().to_string()),
+        )
+        .await?;
     let first_step_context = match sess
-        .capture_step_context(Arc::clone(&turn_context), &cancellation_token)
+        .capture_step_context_for_setup(Arc::clone(&turn_context), &first_request_setup)
+        .or_cancel(&cancellation_token)
         .await
     {
-        Ok(step_context) => step_context,
-        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+        Ok(Ok(step_context)) => step_context,
+        Ok(Err(err)) => return Err(err),
+        Err(codex_async_utils::CancelErr::Cancelled) => {
             run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
-            return Err(err);
+            return Err(CodexErr::TurnAborted);
         }
-        Err(err) => return Err(err),
     };
+    let first_resource_client =
+        codex_mcp::McpResourceClient::new(Arc::clone(&first_step_context.mcp));
+    turn_extension_data.insert(first_resource_client.clone());
+    sess.services
+        .thread_extension_data
+        .insert(first_resource_client.clone());
+    sess.services
+        .session_extension_data
+        .insert(first_resource_client);
     // Keep the exact model-visible state used by this turn and its inline compactions.
     let (mut world_state, display_roots) = tokio::join!(
         sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),
@@ -249,7 +272,7 @@ pub(crate) async fn run_turn(
     // 1. At the start of a turn, so the fresh turn input in `input` gets sampled first.
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
 
-    let mut next_step_context = Some(first_step_context);
+    let mut next_step_context = Some((first_step_context, first_request_setup));
     loop {
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
@@ -272,12 +295,23 @@ pub(crate) async fn run_turn(
         )
         .await;
 
-        // Capture once so context, advertised tools, and tool calls share one request view.
-        let step_context = match next_step_context.take() {
-            Some(step_context) => step_context,
+        // Capture one atomic provider setup so context, advertised tools, and model transport agree.
+        let (step_context, request_setup) = match next_step_context.take() {
+            Some(step) => step,
             None => {
-                sess.capture_step_context(Arc::clone(&turn_context), &cancellation_token)
-                    .await?
+                let setup = sess
+                    .services
+                    .model_client
+                    .current_client_setup(
+                        Some(&turn_context.model_info.slug),
+                        Some(&sess.session_id().to_string()),
+                    )
+                    .await?;
+                let step_context = sess
+                    .capture_step_context_for_setup(Arc::clone(&turn_context), &setup)
+                    .or_cancel(&cancellation_token)
+                    .await??;
+                (step_context, setup)
             }
         };
         let sampling_request_result: CodexResult<_> = async {
@@ -314,13 +348,14 @@ pub(crate) async fn run_turn(
                 &mut client_session,
                 &responses_metadata,
                 sampling_request_input,
+                request_setup,
                 cancellation_token.child_token(),
             )
             .await
         }
         .await;
         match sampling_request_result {
-            Ok((sampling_request_output, sampling_request_input)) => {
+            Ok((sampling_request_output, sampling_request_input, sampling_step_context)) => {
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
@@ -396,7 +431,7 @@ pub(crate) async fn run_turn(
                 if should_roll_over {
                     if let Err(err) = run_auto_compact(
                         &sess,
-                        Arc::clone(&step_context),
+                        Arc::clone(&sampling_step_context),
                         /*fallback_step_context*/ None,
                         &mut client_session,
                         InitialContextInjection::BeforeLastUserMessage {
@@ -1087,7 +1122,7 @@ async fn run_auto_compact(
             Arc::clone(sess),
             step_context,
             fallback_step_context,
-            client_session.turn_state(),
+            client_session,
             initial_context_injection,
             reason,
             phase,
@@ -1199,30 +1234,56 @@ async fn run_sampling_request(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
+    initial_request_setup: CurrentClientSetup,
     cancellation_token: CancellationToken,
-) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>, Arc<StepContext>)> {
     let turn_context = Arc::clone(&step_context.turn);
-    let router = Arc::clone(&step_context.tool_router);
-
     let base_instructions = sess.get_base_instructions().await;
-
-    let tool_runtime = ToolCallRuntime::new(
-        Arc::clone(&router),
-        Arc::clone(&sess),
-        Arc::clone(&step_context),
-        Arc::clone(&turn_diff_tracker),
-    );
-    let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
-        &sess,
-        Arc::clone(&step_context),
-        Arc::clone(&router),
-        Arc::clone(&turn_diff_tracker),
-    );
     let max_retries = turn_context.provider.info().stream_max_retries();
-    let mut retries = 0;
+    let mut retries: u64 = 0;
     let mut initial_input = Some(input);
     let mut original_input = None;
+    let mut prepared_attempt = Some((step_context, initial_request_setup));
     loop {
+        let (attempt_step_context, request_setup) = match prepared_attempt.take() {
+            Some(attempt) => attempt,
+            None => {
+                let setup = sess
+                    .services
+                    .model_client
+                    .current_client_setup(
+                        Some(&turn_context.model_info.slug),
+                        Some(responses_metadata.session_id.as_str()),
+                    )
+                    .await?;
+                let step_context = sess
+                    .capture_step_context_for_setup(Arc::clone(&turn_context), &setup)
+                    .or_cancel(&cancellation_token)
+                    .await??;
+                (step_context, setup)
+            }
+        };
+        let resource_client = codex_mcp::McpResourceClient::new(Arc::clone(
+            &attempt_step_context.mcp,
+        ));
+        turn_store.insert(resource_client.clone());
+        sess.services
+            .thread_extension_data
+            .insert(resource_client.clone());
+        sess.services.session_extension_data.insert(resource_client);
+        let router = Arc::clone(&attempt_step_context.tool_router);
+        let tool_runtime = ToolCallRuntime::new(
+            Arc::clone(&router),
+            Arc::clone(&sess),
+            Arc::clone(&attempt_step_context),
+            Arc::clone(&turn_diff_tracker),
+        );
+        let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
+            &sess,
+            Arc::clone(&attempt_step_context),
+            Arc::clone(&router),
+            Arc::clone(&turn_diff_tracker),
+        );
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
@@ -1236,8 +1297,8 @@ async fn run_sampling_request(
             turn_context.as_ref(),
             base_instructions.clone(),
         );
-        let err = match try_run_sampling_request(
-            tool_runtime.clone(),
+        let AttemptOutcome { result, committed } = try_run_sampling_request(
+            tool_runtime,
             Arc::clone(&sess),
             Arc::clone(&turn_context),
             Arc::clone(&turn_store),
@@ -1245,38 +1306,101 @@ async fn run_sampling_request(
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
+            request_setup,
             cancellation_token.child_token(),
         )
-        .await
-        {
+        .await;
+        let err = match result {
             Ok(output) => {
-                return Ok((output, original_input.unwrap_or(prompt.input)));
+                return Ok((
+                    output,
+                    original_input.unwrap_or(prompt.input),
+                    attempt_step_context,
+                ));
             }
-            Err(err) => match err.details() {
-                CodexErrorDetails::ContextWindowExceeded => {
-                    sess.set_total_tokens_full(&turn_context).await;
-                    return Err(err);
-                }
-                CodexErrorDetails::UsageLimitReached(e) => {
-                    let rate_limits = e.rate_limits.clone();
-                    if let Some(rate_limits) = rate_limits {
-                        sess.update_rate_limits(&turn_context, *rate_limits).await;
-                    }
-                    return Err(err);
-                }
-                _ => err,
-            },
+            Err(err) => err,
         };
+        let mut websocket_close_diagnostic = client_session.websocket_close_diagnostic_context(
+            &err,
+            turn_context.sub_id.as_str(),
+            responses_metadata.session_id.as_str(),
+            turn_context.model_info.slug.as_str(),
+            committed,
+        );
+        let attempt_number = retries.saturating_add(1);
 
         if original_input.is_none() {
             original_input = Some(prompt.input);
         }
 
-        if !err.is_retryable() {
+        if !committed {
+            let refresh_request_auth = client_session.request_scope_refresh_pending();
+            if client_session
+                .recover_last_managed_attempt(&err, committed)
+                .await
+            {
+                let recovery_decision = if refresh_request_auth {
+                    ResponsesWebsocketCloseRecovery::RefreshRequestAuth
+                } else {
+                    ResponsesWebsocketCloseRecovery::RotateAccount
+                };
+                persist_websocket_close_diagnostic(
+                    &sess,
+                    websocket_close_diagnostic.take(),
+                    attempt_number,
+                    max_retries,
+                    recovery_decision,
+                )
+                .await;
+                continue;
+            }
+        }
+
+        let err = match err.details() {
+            CodexErrorDetails::ContextWindowExceeded => {
+                sess.set_total_tokens_full(&turn_context).await;
+                return Err(err);
+            }
+            CodexErrorDetails::UsageLimitReached(e) => {
+                let rate_limits = e.rate_limits.clone();
+                if let Some(rate_limits) = rate_limits {
+                    sess.update_rate_limits(
+                        &turn_context,
+                        *rate_limits,
+                        client_session.managed_rate_limit_binding(),
+                    )
+                    .await;
+                }
+                return Err(err);
+            }
+            _ => err,
+        };
+
+        if committed {
+            persist_websocket_close_diagnostic(
+                &sess,
+                websocket_close_diagnostic.take(),
+                attempt_number,
+                max_retries,
+                ResponsesWebsocketCloseRecovery::NoReplayAfterOutput,
+            )
+            .await;
             return Err(err);
         }
 
-        handle_retryable_response_stream_error(
+        if !err.is_retryable() {
+            persist_websocket_close_diagnostic(
+                &sess,
+                websocket_close_diagnostic.take(),
+                attempt_number,
+                max_retries,
+                ResponsesWebsocketCloseRecovery::NoRetry,
+            )
+            .await;
+            return Err(err);
+        }
+
+        let retry_decision = handle_retryable_response_stream_error(
             &mut retries,
             max_retries,
             err,
@@ -1285,9 +1409,63 @@ async fn run_sampling_request(
             &turn_context,
             ResponsesStreamRequest::Sampling,
         )
-        .await?;
+        .await;
+        let recovery_decision = match retry_decision {
+            Ok(ResponsesRetryDecision::Retry) => {
+                ResponsesWebsocketCloseRecovery::ReconnectWebsocket
+            }
+            Ok(ResponsesRetryDecision::FallbackToHttp) => {
+                ResponsesWebsocketCloseRecovery::FallbackToHttp
+            }
+            Err(err) => {
+                persist_websocket_close_diagnostic(
+                    &sess,
+                    websocket_close_diagnostic.take(),
+                    attempt_number,
+                    max_retries,
+                    ResponsesWebsocketCloseRecovery::RetryExhausted,
+                )
+                .await;
+                return Err(err);
+            }
+        };
+        persist_websocket_close_diagnostic(
+            &sess,
+            websocket_close_diagnostic.take(),
+            attempt_number,
+            max_retries,
+            recovery_decision,
+        )
+        .await;
         turn_context.turn_timing_state.record_sampling_retry();
     }
+}
+
+async fn persist_websocket_close_diagnostic(
+    sess: &Session,
+    context: Option<Box<crate::client::WebsocketCloseDiagnosticContext>>,
+    attempt_number: u64,
+    max_retries: u64,
+    recovery_decision: ResponsesWebsocketCloseRecovery,
+) {
+    let Some(context) = context else {
+        return;
+    };
+    sess.persist_rollout_items(&[RolloutItem::EventMsg(EventMsg::StreamError(
+        StreamErrorEvent {
+            message: "Responses WebSocket closed before response.completed".to_string(),
+            codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            }),
+            additional_details: None,
+        }
+        .with_websocket_close_diagnostic((*context).finish(
+            attempt_number,
+            max_retries,
+            recovery_decision,
+        )),
+    ))])
+    .await;
 }
 
 #[instrument(level = "trace",
@@ -1303,6 +1481,8 @@ pub(crate) async fn built_tools(
     turn_context: &TurnContext,
     environments: &TurnEnvironmentSnapshot,
     mcp: &codex_mcp::McpBinding,
+    effective_auth: Option<&codex_login::CodexAuth>,
+    connector_directory_cache_key: Option<&codex_connectors::ConnectorDirectoryCacheKey>,
     step_store: &ExtensionData,
 ) -> (Vec<ToolInfo>, Arc<ToolRouter>) {
     let all_mcp_tools = mcp.tools().to_vec();
@@ -1337,11 +1517,10 @@ pub(crate) async fn built_tools(
         None
     };
     let tool_suggest_is_enabled = tool_suggest_enabled(turn_context);
-    let auth = if tool_suggest_is_enabled {
-        sess.services.auth_manager.auth().await
-    } else {
-        None
-    };
+    let auth = tool_suggest_is_enabled.then_some(effective_auth).flatten();
+    let directory_cache_key = tool_suggest_is_enabled
+        .then(|| connector_directory_cache_key.cloned())
+        .flatten();
     let endpoint_recommended_plugin_candidates = if tool_suggest_is_enabled {
         let plugins_config = turn_context.config.plugins_config_input();
         sess.services
@@ -1349,7 +1528,7 @@ pub(crate) async fn built_tools(
             .recommended_plugin_candidates_for_config(RecommendedPluginCandidatesInput {
                 plugins_config: &plugins_config,
                 loaded_plugins: &loaded_plugins,
-                auth: auth.as_ref(),
+                auth,
                 disabled_tools: &turn_context.config.tool_suggest.disabled_tools,
                 app_server_client_name: turn_context.app_server_client_name.as_deref(),
             })
@@ -1377,7 +1556,8 @@ pub(crate) async fn built_tools(
                         match connectors::list_tool_suggest_discoverable_tools_with_auth(
                             &turn_context.config,
                             sess.services.plugins_manager.as_ref(),
-                            auth.as_ref(),
+                            auth,
+                            directory_cache_key.clone(),
                             accessible_connectors.as_slice(),
                             &loaded_plugin_app_connector_ids,
                         )
@@ -1431,6 +1611,59 @@ pub(crate) async fn built_tools(
         &sess.services.tool_search_handler_cache,
     ));
     (all_mcp_tools, tool_router)
+}
+
+/// The result of one transport attempt together with the replay-safety boundary.
+///
+/// `committed` means the attempt has emitted model output or tool activity, or has
+/// mutated conversation history. Retry and account-recovery code must not replay
+/// a committed attempt, regardless of how its error is classified.
+#[must_use = "attempt commitment must be checked before retrying"]
+pub(crate) struct AttemptOutcome<T> {
+    pub(crate) result: CodexResult<T>,
+    pub(crate) committed: bool,
+}
+
+impl<T> AttemptOutcome<T> {
+    pub(crate) fn new(result: CodexResult<T>, committed: bool) -> Self {
+        Self { result, committed }
+    }
+
+    pub(crate) fn uncommitted(result: CodexResult<T>) -> Self {
+        Self::new(result, false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retry_allowed(&self) -> bool {
+        self.result.is_err() && !self.committed
+    }
+}
+
+/// Central classification for response events that cross the replay-safety boundary.
+///
+/// Metadata-only events remain uncommitted. Output item lifecycle events and all
+/// streamed text, reasoning, and tool-argument activity commit conservatively even
+/// when a particular client suppresses their presentation.
+pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
+    match event {
+        ResponseEvent::OutputItemDone(_)
+        | ResponseEvent::OutputItemAdded(_)
+        | ResponseEvent::OutputTextDelta(_)
+        | ResponseEvent::ToolCallInputDelta { .. }
+        | ResponseEvent::ReasoningSummaryDelta { .. }
+        | ResponseEvent::ReasoningSummaryDone { .. }
+        | ResponseEvent::ReasoningContentDelta { .. }
+        | ResponseEvent::ReasoningSummaryPartAdded { .. }
+        | ResponseEvent::Completed { .. } => true,
+        ResponseEvent::Created
+        | ResponseEvent::SafetyBuffering(_)
+        | ResponseEvent::ServerModel(_)
+        | ResponseEvent::ModelVerifications(_)
+        | ResponseEvent::TurnModerationMetadata(_)
+        | ResponseEvent::ServerReasoningIncluded(_)
+        | ResponseEvent::RateLimits(_)
+        | ResponseEvent::ModelsEtag(_) => false,
+    }
 }
 
 #[derive(Debug)]
@@ -1618,6 +1851,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
             _ => None,
         },
         EventMsg::Error(_)
+        | EventMsg::ManagedAccountSelected(_)
         | EventMsg::Warning(_)
         | EventMsg::GuardianWarning(_)
         | EventMsg::RealtimeConversationStarted(_)
@@ -2034,560 +2268,588 @@ async fn try_run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
+    request_setup: CurrentClientSetup,
     cancellation_token: CancellationToken,
-) -> CodexResult<SamplingRequestResult> {
-    feedback_tags!(
-        model = turn_context.model_info.slug.clone(),
-        approval_policy = turn_context.approval_policy.value(),
-        sandbox_policy = &turn_context.sandbox_policy(),
-        effort = turn_context.reasoning_effort,
-        auth_mode = sess.services.auth_manager.auth_mode(),
-        features = sess.features.enabled_features(),
-    );
-    let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
-        turn_context.sub_id.as_str(),
-        turn_context.model_info.slug.as_str(),
-        turn_context.provider.info().name.as_str(),
-    );
-    let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
-    let uses_sequential_cutoff_reasoning_summaries = turn_context
-        .config
-        .features
-        .enabled(Feature::ConcurrentReasoningSummaries)
-        && turn_context.provider.info().is_openai();
-    let mut stream = client_session
-        .stream(
-            prompt,
-            &turn_context.model_info,
-            &turn_context.session_telemetry,
-            turn_context.reasoning_effort.clone(),
-            turn_context.reasoning_summary,
-            turn_context.config.service_tier.clone(),
-            responses_metadata,
-            &inference_trace,
-        )
-        .instrument(trace_span!("stream_request"))
-        .or_cancel(&cancellation_token)
-        .await??;
-    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
-        FuturesOrdered::new();
-    let mut needs_follow_up = false;
-    let mut last_agent_message: Option<String> = None;
-    let mut active_item: Option<TurnItem> = None;
-    let mut active_tool_argument_diff_consumer: Option<(
-        String,
-        Box<dyn ToolArgumentDiffConsumer>,
-    )> = None;
-    let mut should_emit_turn_diff = false;
-    let mut should_emit_token_count = false;
-    let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
-    let plan_mode = turn_context.mode == ModeKind::Plan;
-    let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
-    let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
-    let defer_streamed_turn_items_for_contributors =
-        !sess.services.extensions.turn_item_contributors().is_empty();
-    let mut active_item_is_streaming_to_client = false;
-    let receiving_span = trace_span!("receiving_stream");
-    let outcome: CodexResult<SamplingRequestResult> = loop {
-        let handle_responses = trace_span!(
-            parent: &receiving_span,
-            "handle_responses",
-            otel.name = field::Empty,
-            tool_name = field::Empty,
-            from = field::Empty,
-            codex.request.reasoning_effort = %reasoning_effort,
-            gen_ai.usage.input_tokens = field::Empty,
-            gen_ai.usage.cache_read.input_tokens = field::Empty,
-            gen_ai.usage.cache_write.input_tokens = field::Empty,
-            gen_ai.usage.output_tokens = field::Empty,
-            codex.usage.reasoning_output_tokens = field::Empty,
-            codex.usage.total_tokens = field::Empty,
+) -> AttemptOutcome<SamplingRequestResult> {
+    let mut committed = false;
+    let result = async {
+        feedback_tags!(
+            model = turn_context.model_info.slug.clone(),
+            approval_policy = turn_context.approval_policy.value(),
+            sandbox_policy = &turn_context.sandbox_policy(),
+            effort = turn_context.reasoning_effort,
+            auth_mode = request_setup
+                .effective_auth
+                .as_ref()
+                .map(codex_login::CodexAuth::auth_mode),
+            features = sess.features.enabled_features(),
         );
-
-        let event = match stream
-            .next()
-            .instrument(trace_span!(parent: &handle_responses, "receiving"))
+        let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
+            turn_context.sub_id.as_str(),
+            turn_context.model_info.slug.as_str(),
+            turn_context.provider.info().name.as_str(),
+        );
+        let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
+        let uses_sequential_cutoff_reasoning_summaries = turn_context
+            .config
+            .features
+            .enabled(Feature::ConcurrentReasoningSummaries)
+            && turn_context.provider.info().is_openai();
+        let stream_result = client_session
+            .stream_attempt_with_setup(
+                prompt,
+                &turn_context.model_info,
+                &turn_context.session_telemetry,
+                turn_context.reasoning_effort.clone(),
+                turn_context.reasoning_summary,
+                turn_context.config.service_tier.clone(),
+                responses_metadata,
+                &inference_trace,
+                request_setup,
+            )
+            .instrument(trace_span!("stream_request"))
             .or_cancel(&cancellation_token)
-            .await
-        {
-            Ok(event) => event,
-            Err(codex_async_utils::CancelErr::Cancelled) => {
-                break Err(CodexErr::TurnAborted);
-            }
-        };
+            .await;
+        while let Some(selection) = client_session.take_managed_selection_update() {
+            sess.send_event(&turn_context, EventMsg::ManagedAccountSelected(selection))
+                .await;
+        }
+        let managed_rate_limit_binding = client_session.managed_rate_limit_binding();
+        sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.clone())
+            .await;
+        let mut stream = stream_result??;
+        let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
+            FuturesOrdered::new();
+        let mut needs_follow_up = false;
+        let mut last_agent_message: Option<String> = None;
+        let mut active_item: Option<TurnItem> = None;
+        let mut active_tool_argument_diff_consumer: Option<(
+            String,
+            Box<dyn ToolArgumentDiffConsumer>,
+        )> = None;
+        let mut should_emit_turn_diff = false;
+        let mut should_emit_token_count = false;
+        let reasoning_effort = turn_context.effective_reasoning_effort_for_tracing();
+        let plan_mode = turn_context.mode == ModeKind::Plan;
+        let mut assistant_message_stream_parsers = AssistantMessageStreamParsers::new(plan_mode);
+        let mut plan_mode_state = plan_mode.then(|| PlanModeStreamState::new(&turn_context.sub_id));
+        let defer_streamed_turn_items_for_contributors =
+            !sess.services.extensions.turn_item_contributors().is_empty();
+        let mut active_item_is_streaming_to_client = false;
+        let receiving_span = trace_span!("receiving_stream");
+        let outcome: CodexResult<SamplingRequestResult> = loop {
+            let handle_responses = trace_span!(
+                parent: &receiving_span,
+                "handle_responses",
+                otel.name = field::Empty,
+                tool_name = field::Empty,
+                from = field::Empty,
+                codex.request.reasoning_effort = %reasoning_effort,
+                gen_ai.usage.input_tokens = field::Empty,
+                gen_ai.usage.cache_read.input_tokens = field::Empty,
+                gen_ai.usage.cache_write.input_tokens = field::Empty,
+                gen_ai.usage.output_tokens = field::Empty,
+                codex.usage.reasoning_output_tokens = field::Empty,
+                codex.usage.total_tokens = field::Empty,
+            );
 
-        let event = match event {
-            Some(Ok(event)) => event,
-            Some(Err(err)) => break Err(err),
-            None => {
-                break Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                ));
-            }
-        };
-
-        sess.services
-            .session_telemetry
-            .record_responses(&handle_responses, &event);
-        record_turn_ttft_metric(&turn_context, &event).await;
-
-        match event {
-            ResponseEvent::Created => {}
-            ResponseEvent::OutputItemDone(mut item) => {
-                assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
-                if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
-                    && let Ok(Some(event)) = consumer.finish()
-                {
-                    sess.send_event(&turn_context, event).await;
-                }
-                let previously_active_item = active_item.take();
-                let previously_streamed_item = if active_item_is_streaming_to_client {
-                    previously_active_item
-                } else {
-                    None
-                };
-                active_item_is_streaming_to_client = false;
-                if let Some(previous) = previously_streamed_item.as_ref()
-                    && matches!(previous, TurnItem::AgentMessage(_))
-                {
-                    let item_id = previous.id();
-                    flush_assistant_text_segments_for_item(
-                        &sess,
-                        &turn_context,
-                        plan_mode_state.as_mut(),
-                        &mut assistant_message_stream_parsers,
-                        &item_id,
-                    )
-                    .await;
-                }
-                if let Some(state) = plan_mode_state.as_mut()
-                    && handle_assistant_item_done_in_plan_mode(
-                        &sess,
-                        &turn_context,
-                        turn_store.as_ref(),
-                        &item,
-                        state,
-                        previously_streamed_item.as_ref(),
-                        &mut last_agent_message,
-                    )
-                    .await
-                {
-                    continue;
-                }
-
-                let mut ctx = HandleOutputCtx {
-                    sess: sess.clone(),
-                    turn_context: turn_context.clone(),
-                    turn_store: Arc::clone(&turn_store),
-                    tool_runtime: tool_runtime.clone(),
-                    cancellation_token: cancellation_token.child_token(),
-                };
-
-                let preempt_for_mailbox_mail = match &item {
-                    ResponseItem::Message { role, phase, .. } => {
-                        role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
-                    }
-                    ResponseItem::Reasoning { .. } => true,
-                    ResponseItem::AgentMessage { .. } => false,
-                    ResponseItem::AdditionalTools { .. }
-                    | ResponseItem::LocalShellCall { .. }
-                    | ResponseItem::FunctionCall { .. }
-                    | ResponseItem::ToolSearchCall { .. }
-                    | ResponseItem::FunctionCallOutput { .. }
-                    | ResponseItem::CustomToolCall { .. }
-                    | ResponseItem::CustomToolCallOutput { .. }
-                    | ResponseItem::ToolSearchOutput { .. }
-                    | ResponseItem::WebSearchCall { .. }
-                    | ResponseItem::ImageGenerationCall { .. }
-                    | ResponseItem::Compaction { .. }
-                    | ResponseItem::CompactionTrigger { .. }
-                    | ResponseItem::ContextCompaction { .. }
-                    | ResponseItem::Other => false,
-                };
-
-                let output_result =
-                    match handle_output_item_done(&mut ctx, item, previously_streamed_item)
-                        .instrument(handle_responses)
-                        .await
-                    {
-                        Ok(output_result) => output_result,
-                        Err(err) => break Err(err),
-                    };
-                if let Some(tool_future) = output_result.tool_future {
-                    in_flight.push_back(tool_future);
-                }
-                if let Some(agent_message) = output_result.last_agent_message {
-                    last_agent_message = Some(agent_message);
-                }
-                needs_follow_up |= output_result.needs_follow_up;
-                // todo: remove before stabilizing multi-agent v2
-                if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
-                    break Ok(SamplingRequestResult {
-                        needs_follow_up: true,
-                        last_agent_message,
-                    });
-                }
-            }
-            ResponseEvent::OutputItemAdded(mut item) => {
-                assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
-                if let ResponseItem::CustomToolCall {
-                    call_id,
-                    name,
-                    namespace,
-                    ..
-                } = &item
-                {
-                    let tool_name = ToolName::new(namespace.clone(), name.as_str());
-                    active_tool_argument_diff_consumer = tool_runtime
-                        .create_diff_consumer(&tool_name)
-                        .map(|consumer| (call_id.clone(), consumer));
-                } else if matches!(&item, ResponseItem::FunctionCall { .. }) {
-                    active_tool_argument_diff_consumer = None;
-                }
-                if let Some(turn_item) = handle_non_tool_response_item(
-                    sess.as_ref(),
-                    TurnItemContributorPolicy::Skip,
-                    &item,
-                    plan_mode,
-                )
+            let event = match stream
+                .next()
+                .instrument(trace_span!(parent: &handle_responses, "receiving"))
+                .or_cancel(&cancellation_token)
                 .await
-                {
-                    let mut turn_item = turn_item;
-                    let stream_item_to_client = !defer_streamed_turn_items_for_contributors;
-                    let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
-                    let mut seeded_item_id: Option<String> = None;
-                    if stream_item_to_client
-                        && matches!(turn_item, TurnItem::AgentMessage(_))
-                        && let Some(raw_text) = raw_assistant_output_text_from_item(&item)
+            {
+                Ok(event) => event,
+                Err(codex_async_utils::CancelErr::Cancelled) => break Err(CodexErr::TurnAborted),
+            };
+
+            let event = match event {
+                Some(Ok(event)) => event,
+                Some(Err(err)) => break Err(err),
+                None => {
+                    break Err(CodexErr::Stream(
+                        "stream closed before response.completed".into(),
+                    ));
+                }
+            };
+
+            sess.services
+                .session_telemetry
+                .record_responses(&handle_responses, &event);
+            record_turn_ttft_metric(&turn_context, &event).await;
+
+            committed |= response_event_commits_attempt(&event);
+
+            match event {
+                ResponseEvent::Created => {}
+                ResponseEvent::OutputItemDone(mut item) => {
+                    assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                    if let Some((_, mut consumer)) = active_tool_argument_diff_consumer.take()
+                        && let Ok(Some(event)) = consumer.finish()
                     {
-                        let item_id = turn_item.id();
-                        let mut seeded =
-                            assistant_message_stream_parsers.seed_item_text(&item_id, &raw_text);
-                        if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
-                            agent_message.content =
-                                vec![codex_protocol::items::AgentMessageContent::Text {
-                                    text: if plan_mode {
-                                        String::new()
-                                    } else {
-                                        std::mem::take(&mut seeded.visible_text)
-                                    },
-                                }];
-                        }
-                        seeded_parsed = plan_mode.then_some(seeded);
-                        seeded_item_id = Some(item_id);
+                        sess.send_event(&turn_context, event).await;
                     }
-                    if stream_item_to_client {
-                        if let Some(state) = plan_mode_state.as_mut()
-                            && matches!(turn_item, TurnItem::AgentMessage(_))
-                        {
-                            let item_id = turn_item.id();
-                            state
-                                .pending_agent_message_items
-                                .insert(item_id, turn_item.clone());
-                        } else {
-                            sess.emit_turn_item_started(&turn_context, &turn_item).await;
-                        }
-                        if let (Some(state), Some(item_id), Some(parsed)) = (
-                            plan_mode_state.as_mut(),
-                            seeded_item_id.as_deref(),
-                            seeded_parsed,
-                        ) {
-                            emit_streamed_assistant_text_delta(
-                                &sess,
-                                &turn_context,
-                                Some(state),
-                                item_id,
-                                parsed,
-                            )
-                            .await;
-                        }
-                    }
-                    active_item = Some(turn_item);
-                    active_item_is_streaming_to_client = stream_item_to_client;
-                }
-            }
-            ResponseEvent::ServerModel(server_model) => {
-                if !turn_context
-                    .server_model_warning_emitted
-                    .load(Ordering::Relaxed)
-                    && sess
-                        .maybe_warn_on_server_model_mismatch(&turn_context, server_model)
-                        .await
-                {
-                    turn_context
-                        .server_model_warning_emitted
-                        .store(true, Ordering::Relaxed);
-                }
-            }
-            ResponseEvent::ModelVerifications(verifications) => {
-                if !turn_context
-                    .model_verification_emitted
-                    .swap(true, Ordering::Relaxed)
-                {
-                    sess.emit_model_verification(&turn_context, verifications)
-                        .await;
-                }
-            }
-            ResponseEvent::TurnModerationMetadata(metadata) => {
-                sess.emit_turn_moderation_metadata(&turn_context, metadata)
-                    .await;
-            }
-            ResponseEvent::SafetyBuffering(buffering) => {
-                sess.send_event(
-                    &turn_context,
-                    EventMsg::SafetyBuffering(SafetyBufferingEvent {
-                        model: turn_context.model_info.slug.clone(),
-                        use_cases: buffering.use_cases,
-                        reasons: buffering.reasons,
-                        show_buffering_ui: buffering.show_buffering_ui,
-                        faster_model: buffering.faster_model,
-                    }),
-                )
-                .await;
-            }
-            ResponseEvent::ServerReasoningIncluded(included) => {
-                sess.set_server_reasoning_included(included).await;
-            }
-            ResponseEvent::RateLimits(snapshot) => {
-                // Update internal state with latest rate limits, but defer sending until
-                // token usage is available to avoid duplicate TokenCount events.
-                sess.record_rate_limits_info(snapshot).await;
-                should_emit_token_count = true;
-            }
-            ResponseEvent::ModelsEtag(etag) => {
-                // Update internal state with latest models etag
-                sess.services
-                    .models_manager
-                    .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
-                    .await;
-            }
-            ResponseEvent::Completed {
-                response_id,
-                token_usage,
-                end_turn,
-            } => {
-                flush_assistant_text_segments_all(
-                    &sess,
-                    &turn_context,
-                    plan_mode_state.as_mut(),
-                    &mut assistant_message_stream_parsers,
-                )
-                .await;
-                sess.send_event(
-                    &turn_context,
-                    EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
-                        response_id,
-                        token_usage: token_usage.clone(),
-                    }),
-                )
-                .await;
-                let budget_result = sess
-                    .record_token_usage_info(&turn_context, token_usage.as_ref())
-                    .await;
-                should_emit_token_count = true;
-                should_emit_turn_diff = true;
-                if let Err(err) = budget_result {
-                    break Err(err);
-                }
-                if let Some(false) = end_turn {
-                    needs_follow_up = true;
-                }
-                break Ok(SamplingRequestResult {
-                    needs_follow_up,
-                    last_agent_message,
-                });
-            }
-            ResponseEvent::OutputTextDelta(delta) => {
-                // In review child threads, suppress assistant text deltas; the
-                // UI will show a selection popup from the final ReviewOutput.
-                if let Some(active) = active_item.as_ref() {
-                    if !active_item_is_streaming_to_client {
-                        continue;
-                    }
-                    let item_id = active.id();
-                    if matches!(active, TurnItem::AgentMessage(_)) {
-                        let parsed = assistant_message_stream_parsers.parse_delta(&item_id, &delta);
-                        emit_streamed_assistant_text_delta(
+                    let previously_active_item = active_item.take();
+                    let previously_streamed_item = if active_item_is_streaming_to_client {
+                        previously_active_item
+                    } else {
+                        None
+                    };
+                    active_item_is_streaming_to_client = false;
+                    if let Some(previous) = previously_streamed_item.as_ref()
+                        && matches!(previous, TurnItem::AgentMessage(_))
+                    {
+                        let item_id = previous.id();
+                        flush_assistant_text_segments_for_item(
                             &sess,
                             &turn_context,
                             plan_mode_state.as_mut(),
+                            &mut assistant_message_stream_parsers,
                             &item_id,
-                            parsed,
                         )
                         .await;
-                    } else {
-                        let event = AgentMessageContentDeltaEvent {
-                            thread_id: sess.thread_id.to_string(),
-                            turn_id: turn_context.sub_id.clone(),
-                            item_id,
-                            delta,
+                    }
+                    if let Some(state) = plan_mode_state.as_mut()
+                        && handle_assistant_item_done_in_plan_mode(
+                            &sess,
+                            &turn_context,
+                            turn_store.as_ref(),
+                            &item,
+                            state,
+                            previously_streamed_item.as_ref(),
+                            &mut last_agent_message,
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+
+                    let mut ctx = HandleOutputCtx {
+                        sess: sess.clone(),
+                        turn_context: turn_context.clone(),
+                        turn_store: Arc::clone(&turn_store),
+                        tool_runtime: tool_runtime.clone(),
+                        cancellation_token: cancellation_token.child_token(),
+                    };
+
+                    let preempt_for_mailbox_mail = match &item {
+                        ResponseItem::Message { role, phase, .. } => {
+                            role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
+                        }
+                        ResponseItem::Reasoning { .. } => true,
+                        ResponseItem::AgentMessage { .. } => false,
+                        ResponseItem::AdditionalTools { .. }
+                        | ResponseItem::LocalShellCall { .. }
+                        | ResponseItem::FunctionCall { .. }
+                        | ResponseItem::ToolSearchCall { .. }
+                        | ResponseItem::FunctionCallOutput { .. }
+                        | ResponseItem::CustomToolCall { .. }
+                        | ResponseItem::CustomToolCallOutput { .. }
+                        | ResponseItem::ToolSearchOutput { .. }
+                        | ResponseItem::WebSearchCall { .. }
+                        | ResponseItem::ImageGenerationCall { .. }
+                        | ResponseItem::Compaction { .. }
+                        | ResponseItem::CompactionTrigger { .. }
+                        | ResponseItem::ContextCompaction { .. }
+                        | ResponseItem::Other => false,
+                    };
+
+                    let output_result =
+                        match handle_output_item_done(&mut ctx, item, previously_streamed_item)
+                            .instrument(handle_responses)
+                            .await
+                        {
+                            Ok(output_result) => output_result,
+                            Err(err) => break Err(err),
                         };
-                        sess.send_event(&turn_context, EventMsg::AgentMessageContentDelta(event))
+                    if let Some(tool_future) = output_result.tool_future {
+                        in_flight.push_back(tool_future);
+                    }
+                    if let Some(agent_message) = output_result.last_agent_message {
+                        last_agent_message = Some(agent_message);
+                    }
+                    needs_follow_up |= output_result.needs_follow_up;
+                    // todo: remove before stabilizing multi-agent v2
+                    if preempt_for_mailbox_mail
+                        && sess.input_queue.has_pending_mailbox_items().await
+                    {
+                        break Ok(SamplingRequestResult {
+                            needs_follow_up: true,
+                            last_agent_message,
+                        });
+                    }
+                }
+                ResponseEvent::OutputItemAdded(mut item) => {
+                    assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
+                    if let ResponseItem::CustomToolCall {
+                        call_id,
+                        name,
+                        namespace,
+                        ..
+                    } = &item
+                    {
+                        let tool_name = ToolName::new(namespace.clone(), name.as_str());
+                        active_tool_argument_diff_consumer = tool_runtime
+                            .create_diff_consumer(&tool_name)
+                            .map(|consumer| (call_id.clone(), consumer));
+                    } else if matches!(&item, ResponseItem::FunctionCall { .. }) {
+                        active_tool_argument_diff_consumer = None;
+                    }
+                    if let Some(turn_item) = handle_non_tool_response_item(
+                        sess.as_ref(),
+                        TurnItemContributorPolicy::Skip,
+                        &item,
+                        plan_mode,
+                    )
+                    .await
+                    {
+                        let mut turn_item = turn_item;
+                        let stream_item_to_client = !defer_streamed_turn_items_for_contributors;
+                        let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
+                        let mut seeded_item_id: Option<String> = None;
+                        if stream_item_to_client
+                            && matches!(turn_item, TurnItem::AgentMessage(_))
+                            && let Some(raw_text) = raw_assistant_output_text_from_item(&item)
+                        {
+                            let item_id = turn_item.id();
+                            let mut seeded = assistant_message_stream_parsers
+                                .seed_item_text(&item_id, &raw_text);
+                            if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
+                                agent_message.content =
+                                    vec![codex_protocol::items::AgentMessageContent::Text {
+                                        text: if plan_mode {
+                                            String::new()
+                                        } else {
+                                            std::mem::take(&mut seeded.visible_text)
+                                        },
+                                    }];
+                            }
+                            seeded_parsed = plan_mode.then_some(seeded);
+                            seeded_item_id = Some(item_id);
+                        }
+                        if stream_item_to_client {
+                            if let Some(state) = plan_mode_state.as_mut()
+                                && matches!(turn_item, TurnItem::AgentMessage(_))
+                            {
+                                let item_id = turn_item.id();
+                                state
+                                    .pending_agent_message_items
+                                    .insert(item_id, turn_item.clone());
+                            } else {
+                                sess.emit_turn_item_started(&turn_context, &turn_item).await;
+                            }
+                            if let (Some(state), Some(item_id), Some(parsed)) = (
+                                plan_mode_state.as_mut(),
+                                seeded_item_id.as_deref(),
+                                seeded_parsed,
+                            ) {
+                                emit_streamed_assistant_text_delta(
+                                    &sess,
+                                    &turn_context,
+                                    Some(state),
+                                    item_id,
+                                    parsed,
+                                )
+                                .await;
+                            }
+                        }
+                        active_item = Some(turn_item);
+                        active_item_is_streaming_to_client = stream_item_to_client;
+                    }
+                }
+                ResponseEvent::ServerModel(server_model) => {
+                    if !turn_context
+                        .server_model_warning_emitted
+                        .load(Ordering::Relaxed)
+                        && sess
+                            .maybe_warn_on_server_model_mismatch(&turn_context, server_model)
+                            .await
+                    {
+                        turn_context
+                            .server_model_warning_emitted
+                            .store(true, Ordering::Relaxed);
+                    }
+                }
+                ResponseEvent::ModelVerifications(verifications) => {
+                    if !turn_context
+                        .model_verification_emitted
+                        .swap(true, Ordering::Relaxed)
+                    {
+                        sess.emit_model_verification(&turn_context, verifications)
                             .await;
                     }
-                } else {
-                    error_or_panic("OutputTextDelta without active item".to_string());
                 }
-            }
-            ResponseEvent::ToolCallInputDelta {
-                item_id: _,
-                call_id,
-                delta,
-            } => {
-                let Some((active_call_id, consumer)) = active_tool_argument_diff_consumer.as_mut()
-                else {
-                    continue;
-                };
-                let call_id = match call_id {
-                    Some(call_id) if call_id.as_str() != active_call_id.as_str() => continue,
-                    Some(call_id) => call_id,
-                    None => active_call_id.clone(),
-                };
-                if let Some(event) = consumer.consume_diff(turn_context.as_ref(), call_id, &delta) {
-                    sess.send_event(&turn_context, event).await;
-                }
-            }
-            ResponseEvent::ReasoningSummaryDelta {
-                delta,
-                summary_index,
-            } => {
-                if uses_sequential_cutoff_reasoning_summaries {
-                    continue;
-                }
-                if let Some(active) = active_item.as_ref() {
-                    if !active_item_is_streaming_to_client {
-                        continue;
-                    }
-                    let event = ReasoningContentDeltaEvent {
-                        thread_id: sess.thread_id.to_string(),
-                        turn_id: turn_context.sub_id.clone(),
-                        item_id: active.id(),
-                        delta,
-                        summary_index,
-                    };
-                    sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
+                ResponseEvent::TurnModerationMetadata(metadata) => {
+                    sess.emit_turn_moderation_metadata(&turn_context, metadata)
                         .await;
-                } else {
-                    error_or_panic("ReasoningSummaryDelta without active item".to_string());
                 }
-            }
-            ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
-                if uses_sequential_cutoff_reasoning_summaries {
-                    continue;
-                }
-                if let Some(active) = active_item.as_ref() {
-                    if !active_item_is_streaming_to_client {
-                        continue;
-                    }
-                    let event =
-                        EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
-                            item_id: active.id(),
-                            summary_index,
-                        });
-                    sess.send_event(&turn_context, event).await;
-                } else {
-                    error_or_panic("ReasoningSummaryPartAdded without active item".to_string());
-                }
-            }
-            ResponseEvent::ReasoningSummaryDone {
-                item_id,
-                text,
-                summary_index,
-            } => {
-                if !uses_sequential_cutoff_reasoning_summaries {
-                    continue;
-                }
-                let Some(active) = active_item.as_ref() else {
-                    continue;
-                };
-                if !active_item_is_streaming_to_client || active.id() != item_id {
-                    continue;
-                }
-                if summary_index > 0 {
+                ResponseEvent::SafetyBuffering(buffering) => {
                     sess.send_event(
                         &turn_context,
-                        EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
-                            item_id: item_id.clone(),
-                            summary_index,
+                        EventMsg::SafetyBuffering(SafetyBufferingEvent {
+                            model: turn_context.model_info.slug.clone(),
+                            use_cases: buffering.use_cases,
+                            reasons: buffering.reasons,
+                            show_buffering_ui: buffering.show_buffering_ui,
+                            faster_model: buffering.faster_model,
                         }),
                     )
                     .await;
                 }
-                let event = ReasoningContentDeltaEvent {
-                    thread_id: sess.thread_id.to_string(),
-                    turn_id: turn_context.sub_id.clone(),
-                    item_id,
-                    delta: text,
-                    summary_index,
-                };
-                sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
+                ResponseEvent::ServerReasoningIncluded(included) => {
+                    sess.set_server_reasoning_included(included).await;
+                }
+                ResponseEvent::RateLimits(snapshot) => {
+                    // Update internal state with latest rate limits, but defer sending until
+                    // token usage is available to avoid duplicate TokenCount events.
+                    sess.record_rate_limits_info(snapshot, managed_rate_limit_binding.clone())
+                        .await;
+                    should_emit_token_count = true;
+                }
+                ResponseEvent::ModelsEtag(etag) => {
+                    // Update internal state with latest models etag
+                    sess.services
+                        .models_manager
+                        .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
+                        .await;
+                }
+                ResponseEvent::Completed {
+                    response_id,
+                    token_usage,
+                    end_turn,
+                } => {
+                    flush_assistant_text_segments_all(
+                        &sess,
+                        &turn_context,
+                        plan_mode_state.as_mut(),
+                        &mut assistant_message_stream_parsers,
+                    )
                     .await;
-            }
-            ResponseEvent::ReasoningContentDelta {
-                delta,
-                content_index,
-            } => {
-                if let Some(active) = active_item.as_ref() {
-                    if !active_item_is_streaming_to_client {
+                    sess.send_event(
+                        &turn_context,
+                        EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
+                            response_id,
+                            token_usage: token_usage.clone(),
+                        }),
+                    )
+                    .await;
+                    let budget_result = sess
+                        .record_token_usage_info(&turn_context, token_usage.as_ref())
+                        .await;
+                    should_emit_token_count = true;
+                    should_emit_turn_diff = true;
+                    if let Err(err) = budget_result {
+                        break Err(err);
+                    }
+                    if let Some(false) = end_turn {
+                        needs_follow_up = true;
+                    }
+                    break Ok(SamplingRequestResult {
+                        needs_follow_up,
+                        last_agent_message,
+                    });
+                }
+                ResponseEvent::OutputTextDelta(delta) => {
+                    // In review child threads, suppress assistant text deltas; the
+                    // UI will show a selection popup from the final ReviewOutput.
+                    if let Some(active) = active_item.as_ref() {
+                        if !active_item_is_streaming_to_client {
+                            continue;
+                        }
+                        let item_id = active.id();
+                        if matches!(active, TurnItem::AgentMessage(_)) {
+                            let parsed =
+                                assistant_message_stream_parsers.parse_delta(&item_id, &delta);
+                            emit_streamed_assistant_text_delta(
+                                &sess,
+                                &turn_context,
+                                plan_mode_state.as_mut(),
+                                &item_id,
+                                parsed,
+                            )
+                            .await;
+                        } else {
+                            let event = AgentMessageContentDeltaEvent {
+                                thread_id: sess.thread_id.to_string(),
+                                turn_id: turn_context.sub_id.clone(),
+                                item_id,
+                                delta,
+                            };
+                            sess.send_event(
+                                &turn_context,
+                                EventMsg::AgentMessageContentDelta(event),
+                            )
+                            .await;
+                        }
+                    } else {
+                        error_or_panic("OutputTextDelta without active item".to_string());
+                    }
+                }
+                ResponseEvent::ToolCallInputDelta {
+                    item_id: _,
+                    call_id,
+                    delta,
+                } => {
+                    let Some((active_call_id, consumer)) =
+                        active_tool_argument_diff_consumer.as_mut()
+                    else {
+                        continue;
+                    };
+                    let call_id = match call_id {
+                        Some(call_id) if call_id.as_str() != active_call_id.as_str() => continue,
+                        Some(call_id) => call_id,
+                        None => active_call_id.clone(),
+                    };
+                    if let Some(event) =
+                        consumer.consume_diff(turn_context.as_ref(), call_id, &delta)
+                    {
+                        sess.send_event(&turn_context, event).await;
+                    }
+                }
+                ResponseEvent::ReasoningSummaryDelta {
+                    delta,
+                    summary_index,
+                } => {
+                    if uses_sequential_cutoff_reasoning_summaries {
                         continue;
                     }
-                    let event = ReasoningRawContentDeltaEvent {
+                    if let Some(active) = active_item.as_ref() {
+                        if !active_item_is_streaming_to_client {
+                            continue;
+                        }
+                        let event = ReasoningContentDeltaEvent {
+                            thread_id: sess.thread_id.to_string(),
+                            turn_id: turn_context.sub_id.clone(),
+                            item_id: active.id(),
+                            delta,
+                            summary_index,
+                        };
+                        sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
+                            .await;
+                    } else {
+                        error_or_panic("ReasoningSummaryDelta without active item".to_string());
+                    }
+                }
+                ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
+                    if uses_sequential_cutoff_reasoning_summaries {
+                        continue;
+                    }
+                    if let Some(active) = active_item.as_ref() {
+                        if !active_item_is_streaming_to_client {
+                            continue;
+                        }
+                        let event =
+                            EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
+                                item_id: active.id(),
+                                summary_index,
+                            });
+                        sess.send_event(&turn_context, event).await;
+                    } else {
+                        error_or_panic("ReasoningSummaryPartAdded without active item".to_string());
+                    }
+                }
+                ResponseEvent::ReasoningSummaryDone {
+                    item_id,
+                    text,
+                    summary_index,
+                } => {
+                    if !uses_sequential_cutoff_reasoning_summaries {
+                        continue;
+                    }
+                    let Some(active) = active_item.as_ref() else {
+                        continue;
+                    };
+                    if !active_item_is_streaming_to_client || active.id() != item_id {
+                        continue;
+                    }
+                    if summary_index > 0 {
+                        sess.send_event(
+                            &turn_context,
+                            EventMsg::AgentReasoningSectionBreak(AgentReasoningSectionBreakEvent {
+                                item_id: item_id.clone(),
+                                summary_index,
+                            }),
+                        )
+                        .await;
+                    }
+                    let event = ReasoningContentDeltaEvent {
                         thread_id: sess.thread_id.to_string(),
                         turn_id: turn_context.sub_id.clone(),
-                        item_id: active.id(),
-                        delta,
-                        content_index,
+                        item_id,
+                        delta: text,
+                        summary_index,
                     };
-                    sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
+                    sess.send_event(&turn_context, EventMsg::ReasoningContentDelta(event))
                         .await;
-                } else {
-                    error_or_panic("ReasoningRawContentDelta without active item".to_string());
+                }
+                ResponseEvent::ReasoningContentDelta {
+                    delta,
+                    content_index,
+                } => {
+                    if let Some(active) = active_item.as_ref() {
+                        if !active_item_is_streaming_to_client {
+                            continue;
+                        }
+                        let event = ReasoningRawContentDeltaEvent {
+                            thread_id: sess.thread_id.to_string(),
+                            turn_id: turn_context.sub_id.clone(),
+                            item_id: active.id(),
+                            delta,
+                            content_index,
+                        };
+                        sess.send_event(&turn_context, EventMsg::ReasoningRawContentDelta(event))
+                            .await;
+                    } else {
+                        error_or_panic("ReasoningRawContentDelta without active item".to_string());
+                    }
                 }
             }
-        }
-    };
-    drop(sampling_timing_guard);
-
-    flush_assistant_text_segments_all(
-        &sess,
-        &turn_context,
-        plan_mode_state.as_mut(),
-        &mut assistant_message_stream_parsers,
-    )
-    .await;
-
-    let tool_blocking_timing_guard = if in_flight.is_empty() {
-        None
-    } else {
-        Some(turn_context.turn_timing_state.begin_tool_blocking())
-    };
-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
-    drop(tool_blocking_timing_guard);
-
-    if should_emit_token_count {
-        // A tool call such as request_user_input can intentionally pause the turn. Emit token
-        // counts only after pending tools resolve so clients do not see progress events while the
-        // turn is waiting on the user. This also needs to happen before returning cancellation so
-        // token usage already recorded from the completed response is still persisted.
-        sess.send_token_count_event(&turn_context).await;
-    }
-
-    if cancellation_token.is_cancelled() {
-        return Err(CodexErr::TurnAborted);
-    }
-
-    if should_emit_turn_diff {
-        let unified_diff = {
-            let tracker = turn_diff_tracker.lock().await;
-            tracker.get_unified_diff()
         };
-        if let Some(unified_diff) = unified_diff {
-            let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
-            sess.clone().send_event(&turn_context, msg).await;
-        }
-    }
+        drop(sampling_timing_guard);
 
-    outcome
+        flush_assistant_text_segments_all(
+            &sess,
+            &turn_context,
+            plan_mode_state.as_mut(),
+            &mut assistant_message_stream_parsers,
+        )
+        .await;
+
+        let tool_blocking_timing_guard = if in_flight.is_empty() {
+            None
+        } else {
+            Some(turn_context.turn_timing_state.begin_tool_blocking())
+        };
+        drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+        drop(tool_blocking_timing_guard);
+
+        if should_emit_token_count {
+            // A tool call such as request_user_input can intentionally pause the turn. Emit token
+            // counts only after pending tools resolve so clients do not see progress events while the
+            // turn is waiting on the user. This also needs to happen before returning cancellation so
+            // token usage already recorded from the completed response is still persisted.
+            sess.send_token_count_event(&turn_context).await;
+        }
+
+        if cancellation_token.is_cancelled() {
+            return Err(CodexErr::TurnAborted);
+        }
+
+        if should_emit_turn_diff {
+            let unified_diff = {
+                let tracker = turn_diff_tracker.lock().await;
+                tracker.get_unified_diff()
+            };
+            if let Some(unified_diff) = unified_diff {
+                let msg = EventMsg::TurnDiff(TurnDiffEvent { unified_diff });
+                sess.clone().send_event(&turn_context, msg).await;
+            }
+        }
+
+        outcome
+    }
+    .await;
+    AttemptOutcome::new(result, committed)
 }
 
 pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
@@ -2597,6 +2859,83 @@ pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -
         }
     }
     None
+}
+
+#[cfg(test)]
+mod replay_safety_tests {
+    use super::*;
+
+    fn retryable_failure_after(event: ResponseEvent) -> AttemptOutcome<()> {
+        AttemptOutcome::new(
+            Err(CodexErr::Stream("retryable test failure".to_string())),
+            response_event_commits_attempt(&event),
+        )
+    }
+
+    #[test]
+    fn retryable_failure_before_observable_output_allows_retry() {
+        let outcome = retryable_failure_after(ResponseEvent::Created);
+
+        assert!(outcome.retry_allowed());
+    }
+
+    #[test]
+    fn output_text_reasoning_tool_and_item_events_commit_attempt() {
+        let committing_events = [
+            ResponseEvent::OutputItemAdded(ResponseItem::Other),
+            ResponseEvent::OutputItemDone(ResponseItem::Other),
+            ResponseEvent::OutputTextDelta("text".to_string()),
+            ResponseEvent::ToolCallInputDelta {
+                item_id: "item".to_string(),
+                call_id: Some("call".to_string()),
+                delta: "{}".to_string(),
+            },
+            ResponseEvent::ReasoningSummaryDelta {
+                delta: "summary".to_string(),
+                summary_index: 0,
+            },
+            ResponseEvent::ReasoningSummaryDone {
+                item_id: "item".to_string(),
+                text: "summary".to_string(),
+                summary_index: 0,
+            },
+            ResponseEvent::ReasoningContentDelta {
+                delta: "thinking".to_string(),
+                content_index: 0,
+            },
+            ResponseEvent::ReasoningSummaryPartAdded { summary_index: 1 },
+        ];
+
+        for event in committing_events {
+            let outcome = retryable_failure_after(event);
+            assert!(outcome.committed);
+            assert!(!outcome.retry_allowed());
+        }
+    }
+
+    #[test]
+    fn completed_commits_before_flushing_buffered_text() {
+        let outcome = retryable_failure_after(ResponseEvent::Completed {
+            response_id: "response".to_string(),
+            token_usage: None,
+            end_turn: Some(true),
+        });
+
+        assert!(outcome.committed);
+        assert!(!outcome.retry_allowed());
+    }
+
+    #[test]
+    fn metadata_only_events_do_not_cross_output_boundary() {
+        let metadata_events = [
+            ResponseEvent::Created,
+            ResponseEvent::ServerReasoningIncluded(true),
+        ];
+
+        for event in metadata_events {
+            assert!(!response_event_commits_attempt(&event));
+        }
+    }
 }
 
 #[cfg(test)]

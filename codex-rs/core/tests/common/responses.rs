@@ -20,9 +20,13 @@ use tokio_tungstenite::accept_hdr_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::extensions::ExtensionsConfig;
 use tokio_tungstenite::tungstenite::extensions::compression::deflate::DeflateConfig;
+use tokio_tungstenite::tungstenite::handshake::server::ErrorResponse;
 use tokio_tungstenite::tungstenite::handshake::server::Request;
 use tokio_tungstenite::tungstenite::handshake::server::Response;
+use tokio_tungstenite::tungstenite::http::StatusCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use wiremock::BodyPrintLimit;
 use wiremock::Match;
 use wiremock::Mock;
@@ -535,6 +539,19 @@ pub struct WebSocketConnectionConfig {
     /// Tests can disable this to simulate a peer that surfaces a terminal event but never
     /// completes the close handshake.
     pub close_after_requests: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct WebSocketCloseFrame {
+    pub code: u16,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+struct WebSocketHandshakeRejection {
+    status: u16,
+    response_headers: Vec<(String, String)>,
+    body: String,
 }
 
 pub struct WebSocketTestServer {
@@ -1276,13 +1293,59 @@ pub async fn start_websocket_server(connections: Vec<Vec<Vec<Value>>>) -> WebSoc
             close_after_requests: true,
         })
         .collect();
-    start_websocket_server_with_headers(connections).await
+    start_websocket_server_with_handshake_rejection(connections, Vec::new(), None).await
 }
 
 pub async fn start_websocket_server_with_headers(
     connections: Vec<WebSocketConnectionConfig>,
 ) -> WebSocketTestServer {
-    let start = std::time::Instant::now();
+    start_websocket_server_with_handshake_rejection(connections, Vec::new(), None).await
+}
+
+pub async fn start_websocket_server_with_close_frames(
+    connections: Vec<Vec<Vec<Value>>>,
+    close_frames: Vec<Option<WebSocketCloseFrame>>,
+) -> WebSocketTestServer {
+    let connections = connections
+        .into_iter()
+        .map(|requests| WebSocketConnectionConfig {
+            requests,
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: true,
+        })
+        .collect();
+    start_websocket_server_with_handshake_rejection(connections, close_frames, None).await
+}
+
+pub async fn start_rejecting_websocket_server(
+    status: u16,
+    response_headers: Vec<(String, String)>,
+    body: String,
+) -> WebSocketTestServer {
+    let connection = WebSocketConnectionConfig {
+        requests: Vec::new(),
+        response_headers: Vec::new(),
+        accept_delay: None,
+        close_after_requests: true,
+    };
+    start_websocket_server_with_handshake_rejection(
+        vec![connection],
+        Vec::new(),
+        Some(WebSocketHandshakeRejection {
+            status,
+            response_headers,
+            body,
+        }),
+    )
+    .await
+}
+
+async fn start_websocket_server_with_handshake_rejection(
+    connections: Vec<WebSocketConnectionConfig>,
+    close_frames: Vec<Option<WebSocketCloseFrame>>,
+    handshake_rejection: Option<WebSocketHandshakeRejection>,
+) -> WebSocketTestServer {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind websocket server");
@@ -1295,6 +1358,7 @@ pub async fn start_websocket_server_with_headers(
     let handshakes = Arc::clone(&handshakes_log);
     let request_log = Arc::clone(&request_log_updated);
     let connections = Arc::new(Mutex::new(VecDeque::from(connections)));
+    let mut close_frames = VecDeque::from(close_frames);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
     let task = tokio::spawn(async move {
@@ -1323,6 +1387,7 @@ pub async fn start_websocket_server_with_headers(
             }
 
             let response_headers = connection.response_headers.clone();
+            let handshake_rejection = handshake_rejection.clone();
             let handshake_log = Arc::clone(&handshakes);
             let callback = move |req: &Request, mut response: Response| {
                 let headers = req
@@ -1339,6 +1404,22 @@ pub async fn start_websocket_server_with_headers(
                     uri: req.uri().to_string(),
                     headers,
                 });
+
+                if let Some(rejection) = &handshake_rejection {
+                    let mut error_response = ErrorResponse::new(Some(rejection.body.clone()));
+                    *error_response.status_mut() =
+                        StatusCode::from_u16(rejection.status).expect("valid HTTP status");
+                    let headers_mut = error_response.headers_mut();
+                    for (name, value) in &rejection.response_headers {
+                        if let (Ok(name), Ok(value)) = (
+                            HeaderName::from_bytes(name.as_bytes()),
+                            HeaderValue::from_str(value),
+                        ) {
+                            headers_mut.insert(name, value);
+                        }
+                    }
+                    return Err(error_response);
+                }
 
                 let headers_mut = response.headers_mut();
                 for (name, value) in &response_headers {
@@ -1364,6 +1445,7 @@ pub async fn start_websocket_server_with_headers(
                 Err(_) => continue,
             };
             connections.lock().unwrap().pop_front();
+            let close_frame = close_frames.pop_front().flatten();
 
             let connection_index = {
                 let mut log = requests.lock().unwrap();
@@ -1379,51 +1461,10 @@ pub async fn start_websocket_server_with_headers(
                     let mut log = requests.lock().unwrap();
                     if let Some(connection_log) = log.get_mut(connection_index) {
                         connection_log.push(WebSocketRequest { body });
-                        let request_index = connection_log.len() - 1;
-                        let request = &connection_log[request_index];
-                        let request_body = request.body_json();
-                        eprintln!(
-                            "[ws test server +{}ms] connection={} received request={} type={:?} role={:?} text={:?} data={:?}",
-                            start.elapsed().as_millis(),
-                            connection_index,
-                            request_index,
-                            request_body.get("type").and_then(Value::as_str),
-                            request_body
-                                .get("item")
-                                .and_then(|item| item.get("role"))
-                                .and_then(Value::as_str),
-                            request_body
-                                .get("item")
-                                .and_then(|item| item.get("content"))
-                                .and_then(Value::as_array)
-                                .and_then(|content| content.first())
-                                .and_then(|content| content.get("text"))
-                                .and_then(Value::as_str),
-                            request_body
-                                .get("item")
-                                .and_then(|item| item.get("content"))
-                                .and_then(Value::as_array)
-                                .and_then(|content| content.first())
-                                .and_then(|content| content.get("data"))
-                                .and_then(Value::as_str),
-                        );
                     }
                     request_log.notify_waiters();
                 }
 
-                eprintln!(
-                    "[ws test server +{}ms] connection={} sending batch_size={} event_types={:?} audio_data={:?}",
-                    start.elapsed().as_millis(),
-                    connection_index,
-                    request_events.len(),
-                    request_events
-                        .iter()
-                        .map(|event| event.get("type").and_then(Value::as_str))
-                        .collect::<Vec<_>>(),
-                    request_events
-                        .iter()
-                        .find_map(|event| event.get("delta").and_then(Value::as_str)),
-                );
                 for event in &request_events {
                     let Ok(payload) = serde_json::to_string(event) else {
                         continue;
@@ -1434,7 +1475,14 @@ pub async fn start_websocket_server_with_headers(
                 }
             }
 
-            if close_after_requests {
+            if let Some(close_frame) = close_frame {
+                let _ = ws_stream
+                    .close(Some(CloseFrame {
+                        code: CloseCode::from(close_frame.code),
+                        reason: close_frame.reason.into(),
+                    }))
+                    .await;
+            } else if close_after_requests {
                 let _ = ws_stream.close(None).await;
             } else {
                 let _ = shutdown_rx.await;

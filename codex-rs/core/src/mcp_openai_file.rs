@@ -11,7 +11,6 @@
 //! The model-facing local-path schema is owned by `codex-mcp` alongside MCP tool inventory, so this
 //! module only handles uploading the files and rewriting the execution-time arguments.
 
-use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use codex_api::OPENAI_FILE_UPLOAD_LIMIT_BYTES;
 use codex_api::upload_openai_file;
@@ -21,8 +20,8 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 
 pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
-    sess: &Session,
     turn_context: &TurnContext,
+    auth: Option<&CodexAuth>,
     arguments_value: Option<JsonValue>,
     openai_file_input_optional_fields: Option<&HashMap<String, Vec<String>>>,
 ) -> Result<Option<JsonValue>, String> {
@@ -36,7 +35,6 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
     let Some(arguments) = arguments_value.as_object() else {
         return Ok(Some(arguments_value));
     };
-    let auth = sess.services.auth_manager.auth().await;
     let mut rewritten_arguments = arguments.clone();
 
     for (field_name, optional_fields) in openai_file_input_optional_fields {
@@ -45,7 +43,7 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
         };
         let Some(uploaded_value) = rewrite_argument_value_for_openai_files(
             turn_context,
-            auth.as_ref(),
+            auth,
             field_name,
             optional_fields,
             value,
@@ -236,14 +234,14 @@ mod tests {
 
     #[tokio::test]
     async fn openai_file_argument_rewrite_requires_declared_file_params() {
-        let (session, turn_context) = make_session_and_context().await;
+        let (_session, turn_context) = make_session_and_context().await;
         let arguments = Some(serde_json::json!({
             "file": "/tmp/codex-smoke-file.txt"
         }));
 
         let rewritten = rewrite_mcp_tool_arguments_for_openai_files(
-            &session,
             &Arc::new(turn_context),
+            None,
             arguments.clone(),
             /*openai_file_input_optional_fields*/ None,
         )
@@ -554,13 +552,11 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_mcp_tool_arguments_for_openai_files_surfaces_upload_failures() {
-        let (mut session, turn_context) = make_session_and_context().await;
-        session.services.auth_manager = crate::test_support::auth_manager_from_auth(
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-        );
+        let (_session, turn_context) = make_session_and_context().await;
+        let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
         let error = rewrite_mcp_tool_arguments_for_openai_files(
-            &session,
             &turn_context,
+            Some(&auth),
             Some(serde_json::json!({
                 "file": "/definitely/missing/file.csv",
             })),

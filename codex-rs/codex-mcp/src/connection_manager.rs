@@ -26,6 +26,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use crate::CodexAppsToolsCacheKey;
+
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationRequestRouter;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -46,7 +48,10 @@ use crate::tools::filter_tools;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+use codex_api::SharedAuthProvider;
 use codex_config::McpServerTransportConfig;
+use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::models::PermissionProfile;
@@ -224,11 +229,11 @@ impl McpConnectionSet {
         let static_chatgpt_auth_provider = auth
             .filter(|auth| auth.uses_codex_backend())
             .map(codex_model_provider::auth_provider_from_auth);
-        let codex_apps_auth_provider = codex_apps_auth_manager.and_then(|auth_manager| {
-            auth.filter(|auth| auth.uses_codex_backend()).map(|auth| {
-                codex_model_provider::auth_provider_from_auth_manager(auth_manager, auth)
-            })
-        });
+        let codex_apps_auth_provider = codex_apps_auth_provider_for_snapshot(
+            auth,
+            codex_apps_auth_manager,
+            &codex_apps_tools_cache_key,
+        );
         for (server_name, server) in mcp_servers
             .into_iter()
             .filter(|(_, server)| server.enabled())
@@ -661,6 +666,29 @@ impl McpConnectionSet {
         }
         server_infos
     }
+}
+
+fn codex_apps_auth_provider_for_snapshot(
+    auth: Option<&CodexAuth>,
+    auth_manager: Option<Arc<AuthManager>>,
+    cache_key: &CodexAppsToolsCacheKey,
+) -> Option<SharedAuthProvider> {
+    let auth = auth.filter(|auth| auth.uses_codex_backend())?;
+    if !cache_key.is_managed()
+        && auth.is_external_chatgpt_tokens()
+        && let Some(auth_manager) = auth_manager
+    {
+        let mut transport = cache_key.transport_binding();
+        transport.auth_mode = auth.auth_mode();
+        return Some(codex_model_provider::auth_provider_from_auth_manager(
+            auth_manager,
+            auth,
+            transport,
+            None,
+        ));
+    }
+
+    Some(codex_model_provider::auth_provider_from_auth(auth))
 }
 
 #[cfg(test)]

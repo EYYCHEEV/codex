@@ -155,6 +155,16 @@ macro_rules! serialization_scope_expr {
     ($actual_params:ident, global_shared_read($key:literal)) => {
         Some(ClientRequestSerializationScope::GlobalSharedRead($key))
     };
+    ($actual_params:ident, account_pool_list($key:literal)) => {
+        if $actual_params.thread_id.is_some()
+            || $actual_params.refresh_tokens
+            || $actual_params.refresh_usage
+        {
+            Some(ClientRequestSerializationScope::Global($key))
+        } else {
+            Some(ClientRequestSerializationScope::GlobalSharedRead($key))
+        }
+    };
     ($actual_params:ident, thread_id($params:ident . $field:ident)) => {
         Some(ClientRequestSerializationScope::Thread {
             thread_id: $actual_params.$field.clone(),
@@ -212,6 +222,15 @@ macro_rules! serialization_scope_expr {
     };
 }
 
+macro_rules! export_client_param_schema {
+    ($out_dir:ident, $params:ty) => {
+        write_json_schema::<$params>($out_dir, stringify!($params))
+    };
+    ($out_dir:ident, $params:ty, $schema_params:ty) => {
+        write_json_schema::<$schema_params>($out_dir, stringify!($schema_params))
+    };
+}
+
 /// Generates an `enum ClientRequest` where each variant is a request that the
 /// client can send to the server. Each variant has associated `params` and
 /// `response` types. Also generates a `export_client_responses()` function to
@@ -223,6 +242,7 @@ macro_rules! client_request_definitions {
             $(#[doc = $variant_doc:literal])*
             $variant:ident => $wire:literal {
                 params: $(#[$params_meta:meta])* $params:ty,
+                $(schema_params: $schema_params:ty,)?
                 $(inspect_params: $inspect_params:tt,)?
                 serialization: $serialization:ident $( ( $($serialization_args:tt)* ) )?,
                 $(manual_payload_conversion: $manual_payload_conversion:ident,)?
@@ -481,7 +501,11 @@ macro_rules! client_request_definitions {
         ) -> ::anyhow::Result<Vec<GeneratedSchema>> {
             let mut schemas = Vec::new();
             $(
-                schemas.push(write_json_schema::<$params>(out_dir, stringify!($params))?);
+                schemas.push(export_client_param_schema!(
+                    out_dir,
+                    $params
+                    $(, $schema_params)?
+                )?);
             )*
             Ok(schemas)
         }
@@ -1055,7 +1079,7 @@ client_request_definitions! {
     LoginAccount => "account/login/start" {
         params: v2::LoginAccountParams,
         inspect_params: true,
-        serialization: global("account-auth"),
+        serialization: global("account-pool"),
         response: v2::LoginAccountResponse,
     },
 
@@ -1065,9 +1089,16 @@ client_request_definitions! {
         response: v2::CancelLoginAccountResponse,
     },
 
+    ListAccounts => "account/list" {
+        params: v2::ListAccountsParams,
+        serialization: account_pool_list("account-pool"),
+        response: v2::ListAccountsResponse,
+    },
+
     LogoutAccount => "account/logout" {
-        params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
-        serialization: global("account-auth"),
+        params: #[serde(default)] Option<v2::LogoutAccountParams>,
+        schema_params: v2::LogoutAccountParams,
+        serialization: global("account-pool"),
         response: v2::LogoutAccountResponse,
     },
 
@@ -1719,6 +1750,9 @@ server_notification_definitions! {
     McpServerStatusUpdated => "mcpServer/startupStatus/updated" (v2::McpServerStatusUpdatedNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
     AccountRateLimitsUpdated => "account/rateLimits/updated" (v2::AccountRateLimitsUpdatedNotification),
+    AccountPoolUpdated => "account/pool/updated" (v2::AccountPoolUpdatedNotification),
+    AccountSelectionUpdated => "account/selection/updated" (v2::AccountSelectionUpdatedNotification),
+    AccountUsageUpdated => "account/usage/updated" (v2::AccountUsageUpdatedNotification),
     AppListUpdated => "app/list/updated" (v2::AppListUpdatedNotification),
     RemoteControlStatusChanged => "remoteControl/status/changed" (v2::RemoteControlStatusChangedNotification),
     ExternalAgentConfigImportProgress => "externalAgentConfig/import/progress" (v2::ExternalAgentConfigImportProgressNotification),
@@ -2962,6 +2996,10 @@ mod tests {
             }),
             serde_json::to_value(&request)?,
         );
+        assert_eq!(
+            request.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("account-pool")),
+        );
         Ok(())
     }
 
@@ -3020,8 +3058,432 @@ mod tests {
             json!({
                 "method": "account/logout",
                 "id": 5,
+                "params": null
             }),
             serde_json::to_value(&request)?,
+        );
+        let decoded: ClientRequest = serde_json::from_value(json!({
+            "method": "account/logout",
+            "id": 5
+        }))?;
+        assert_eq!(decoded, request);
+        assert_eq!(
+            request.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("account-pool")),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_targeted_and_all_account_logout() -> Result<()> {
+        let targeted = ClientRequest::LogoutAccount {
+            request_id: RequestId::Integer(6),
+            params: Some(v2::LogoutAccountParams {
+                account_id: Some("email:user@example.com".to_string()),
+                all: false,
+            }),
+        };
+        assert_eq!(
+            json!({
+                "method": "account/logout",
+                "id": 6,
+                "params": {
+                    "accountId": "email:user@example.com"
+                }
+            }),
+            serde_json::to_value(&targeted)?,
+        );
+        assert_eq!(
+            targeted.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("account-pool")),
+        );
+
+        let all = ClientRequest::LogoutAccount {
+            request_id: RequestId::Integer(7),
+            params: Some(v2::LogoutAccountParams {
+                account_id: None,
+                all: true,
+            }),
+        };
+        assert_eq!(
+            json!({
+                "method": "account/logout",
+                "id": 7,
+                "params": {
+                    "accountId": null,
+                    "all": true
+                }
+            }),
+            serde_json::to_value(&all)?,
+        );
+        assert_eq!(
+            all.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("account-pool")),
+        );
+        let legacy_response: v2::LogoutAccountResponse = serde_json::from_value(json!({}))?;
+        assert_eq!(
+            serde_json::to_value(legacy_response)?,
+            json!({
+                "removedAccountIds": [],
+                "accounts": [],
+                "selectedAccountId": null
+            }),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_account_list_params_response_and_scope() -> Result<()> {
+        let request = ClientRequest::ListAccounts {
+            request_id: RequestId::Integer(8),
+            params: v2::ListAccountsParams {
+                thread_id: Some("thread-1".to_string()),
+                model: Some("gpt-5".to_string()),
+                refresh_tokens: true,
+                refresh_usage: true,
+            },
+        };
+        assert_eq!(
+            json!({
+                "method": "account/list",
+                "id": 8,
+                "params": {
+                    "threadId": "thread-1",
+                    "model": "gpt-5",
+                    "refreshTokens": true,
+                    "refreshUsage": true
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+        assert_eq!(
+            request.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("account-pool")),
+        );
+        let snapshot = ClientRequest::ListAccounts {
+            request_id: RequestId::Integer(9),
+            params: v2::ListAccountsParams::default(),
+        };
+        assert_eq!(
+            snapshot.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead(
+                "account-pool"
+            )),
+        );
+        let usage_refresh = ClientRequest::ListAccounts {
+            request_id: RequestId::Integer(10),
+            params: v2::ListAccountsParams {
+                refresh_usage: true,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            usage_refresh.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("account-pool")),
+        );
+        let thread_scoped_without_refresh = ClientRequest::ListAccounts {
+            request_id: RequestId::Integer(11),
+            params: v2::ListAccountsParams {
+                thread_id: Some("thread-1".to_string()),
+                refresh_tokens: false,
+                refresh_usage: false,
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            thread_scoped_without_refresh.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global("account-pool")),
+        );
+        let defaulted: ClientRequest = serde_json::from_value(json!({
+            "method": "account/list",
+            "id": 9,
+            "params": {}
+        }))?;
+        assert_eq!(
+            serde_json::to_value(defaulted)?,
+            json!({
+                "method": "account/list",
+                "id": 9,
+                "params": {
+                    "threadId": null,
+                    "model": null
+                }
+            }),
+        );
+
+        let response = v2::ListAccountsResponse {
+            accounts: vec![
+                v2::ManagedChatgptAccountView {
+                    managed_account_id: "email:first@example.com".to_string(),
+                    chatgpt_account_id: Some("workspace-first".to_string()),
+                    email: Some("first@example.com".to_string()),
+                    plan_type: PlanType::Plus,
+                    eligible: true,
+                    eligibility_reason: None,
+                    account_revision: 11,
+                    credential_revision: 10,
+                    refresh_status: v2::ManagedChatgptAccountRefreshStatus::Healthy,
+                    block: None,
+                    usage: v2::ManagedChatgptAccountUsage {
+                        state: v2::ManagedChatgptAccountUsageState::Fresh,
+                        rate_limits: Vec::new(),
+                        token_usage: None,
+                        observed_at: Some(1_700_000_000),
+                        unavailable_reason: None,
+                        unavailable_observed_at: None,
+                    },
+                },
+                v2::ManagedChatgptAccountView {
+                    managed_account_id: "email:second@example.com".to_string(),
+                    chatgpt_account_id: Some("workspace-second".to_string()),
+                    email: Some("second@example.com".to_string()),
+                    plan_type: PlanType::Pro,
+                    eligible: false,
+                    eligibility_reason: Some("quotaBlocked".to_string()),
+                    account_revision: 22,
+                    credential_revision: 20,
+                    refresh_status: v2::ManagedChatgptAccountRefreshStatus::TransientUnavailable {
+                        observed_at: 1_700_000_010,
+                    },
+                    block: Some(v2::ManagedChatgptAccountBlock {
+                        reason: "quota".to_string(),
+                        blocked_until: Some(1_700_000_300),
+                    }),
+                    usage: v2::ManagedChatgptAccountUsage {
+                        state: v2::ManagedChatgptAccountUsageState::Unavailable,
+                        rate_limits: Vec::new(),
+                        token_usage: None,
+                        observed_at: Some(1_699_999_000),
+                        unavailable_reason: Some("usage endpoint timed out".to_string()),
+                        unavailable_observed_at: Some(1_700_000_010),
+                    },
+                },
+            ],
+            selected_account_id: Some("email:first@example.com".to_string()),
+            selection_revision: Some(7),
+            pool_revision: 23,
+        };
+        let value = serde_json::to_value(&response)?;
+        assert_eq!(
+            value["accounts"][0]["chatgptAccountId"],
+            json!("workspace-first"),
+        );
+        assert_eq!(
+            value["accounts"][1]["chatgptAccountId"],
+            json!("workspace-second"),
+        );
+        assert_eq!(
+            value["accounts"][1]["usage"]["unavailableObservedAt"],
+            json!(1_700_000_010),
+        );
+        assert_eq!(value["selectedAccountId"], json!("email:first@example.com"),);
+        assert_eq!(value["selectionRevision"], json!(7));
+        assert_eq!(value["poolRevision"], json!(23));
+        let unscoped: v2::ListAccountsResponse = serde_json::from_value(json!({
+            "accounts": [],
+            "selectedAccountId": null,
+            "poolRevision": 24
+        }))?;
+        assert_eq!(unscoped.selection_revision, None);
+        assert_eq!(
+            serde_json::to_value(unscoped)?["selectionRevision"],
+            serde_json::Value::Null,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn managed_account_refresh_status_serializes_non_secret_discriminated_union() -> Result<()> {
+        let healthy = serde_json::to_value(v2::ManagedChatgptAccountRefreshStatus::Healthy)?;
+        let transient = serde_json::to_value(
+            v2::ManagedChatgptAccountRefreshStatus::TransientUnavailable {
+                observed_at: 1_700_000_010,
+            },
+        )?;
+        let relogin =
+            serde_json::to_value(v2::ManagedChatgptAccountRefreshStatus::ReloginRequired {
+                reason_code: "refreshTokenRejected".to_string(),
+                observed_at: 1_700_000_020,
+            })?;
+
+        assert_eq!(healthy, json!({ "type": "healthy" }));
+        assert_eq!(
+            transient,
+            json!({
+                "type": "transientUnavailable",
+                "observedAt": 1_700_000_010
+            }),
+        );
+        assert_eq!(
+            relogin,
+            json!({
+                "type": "reloginRequired",
+                "reasonCode": "refreshTokenRejected",
+                "observedAt": 1_700_000_020
+            }),
+        );
+
+        for value in [&healthy, &transient, &relogin] {
+            let object = value
+                .as_object()
+                .expect("refresh status should serialize as an object");
+            assert_eq!(object.contains_key("error"), false);
+            assert_eq!(object.contains_key("message"), false);
+            assert_eq!(object.contains_key("rawError"), false);
+        }
+        assert_eq!(healthy.get("observedAt"), None);
+        assert_eq!(healthy.get("reasonCode"), None);
+        assert_eq!(transient.get("reasonCode"), None);
+        Ok(())
+    }
+
+    #[test]
+    fn existing_account_notifications_emit_null_absent_managed_identity() -> Result<()> {
+        let rate_limits = v2::RateLimitSnapshot {
+            limit_id: None,
+            limit_name: None,
+            primary: None,
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        };
+        let singular_rate_update = ServerNotification::AccountRateLimitsUpdated(
+            v2::AccountRateLimitsUpdatedNotification {
+                managed_account_id: None,
+                account_revision: None,
+                rate_limits: rate_limits.clone(),
+            },
+        );
+        assert_eq!(
+            json!({
+                "method": "account/rateLimits/updated",
+                "params": {
+                    "managedAccountId": null,
+                    "accountRevision": null,
+                    "rateLimits": {
+                        "limitId": null,
+                        "limitName": null,
+                        "primary": null,
+                        "secondary": null,
+                        "credits": null,
+                        "individualLimit": null,
+                        "planType": null,
+                        "rateLimitReachedType": null
+                    }
+                }
+            }),
+            serde_json::to_value(&singular_rate_update)?,
+        );
+        let decoded_singular_rate_update: v2::AccountRateLimitsUpdatedNotification =
+            serde_json::from_value(serde_json::to_value(&singular_rate_update)?["params"].clone())?;
+        assert_eq!(decoded_singular_rate_update.account_revision, None);
+
+        let managed_rate_update = ServerNotification::AccountRateLimitsUpdated(
+            v2::AccountRateLimitsUpdatedNotification {
+                managed_account_id: Some("email:user@example.com".to_string()),
+                account_revision: Some(44),
+                rate_limits,
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(&managed_rate_update)?["params"]["managedAccountId"],
+            json!("email:user@example.com"),
+        );
+        assert_eq!(
+            serde_json::to_value(&managed_rate_update)?["params"]["accountRevision"],
+            json!(44),
+        );
+
+        let singular_login =
+            ServerNotification::AccountLoginCompleted(v2::AccountLoginCompletedNotification {
+                login_id: Some("login-1".to_string()),
+                success: true,
+                error: None,
+                managed_account_id: None,
+            });
+        assert_eq!(
+            json!({
+                "method": "account/login/completed",
+                "params": {
+                    "managedAccountId": null,
+                    "loginId": "login-1",
+                    "success": true,
+                    "error": null
+                }
+            }),
+            serde_json::to_value(&singular_login)?,
+        );
+
+        let managed_login =
+            ServerNotification::AccountLoginCompleted(v2::AccountLoginCompletedNotification {
+                login_id: Some("login-2".to_string()),
+                success: true,
+                error: None,
+                managed_account_id: Some("email:user@example.com".to_string()),
+            });
+        assert_eq!(
+            serde_json::to_value(&managed_login)?["params"]["managedAccountId"],
+            json!("email:user@example.com"),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_managed_account_notification_routes() -> Result<()> {
+        let usage = v2::ManagedChatgptAccountUsage {
+            state: v2::ManagedChatgptAccountUsageState::Unknown,
+            rate_limits: Vec::new(),
+            token_usage: None,
+            observed_at: None,
+            unavailable_reason: None,
+            unavailable_observed_at: None,
+        };
+        let pool = ServerNotification::AccountPoolUpdated(v2::AccountPoolUpdatedNotification {
+            accounts: Vec::new(),
+            pool_revision: 23,
+        });
+        let selection =
+            ServerNotification::AccountSelectionUpdated(v2::AccountSelectionUpdatedNotification {
+                thread_id: "thread-1".to_string(),
+                selected_account_id: Some("email:user@example.com".to_string()),
+                selection_revision: 7,
+            });
+        let usage_update =
+            ServerNotification::AccountUsageUpdated(v2::AccountUsageUpdatedNotification {
+                managed_account_id: "email:user@example.com".to_string(),
+                account_revision: 55,
+                usage,
+            });
+
+        assert_eq!(
+            serde_json::to_value(&pool)?["method"],
+            json!("account/pool/updated"),
+        );
+        assert_eq!(
+            serde_json::to_value(&pool)?["params"]["poolRevision"],
+            json!(23),
+        );
+        assert_eq!(
+            serde_json::to_value(&selection)?["method"],
+            json!("account/selection/updated"),
+        );
+        assert_eq!(
+            serde_json::to_value(&selection)?["params"]["selectionRevision"],
+            json!(7),
+        );
+        assert_eq!(
+            serde_json::to_value(&usage_update)?["method"],
+            json!("account/usage/updated"),
+        );
+        assert_eq!(
+            serde_json::to_value(&usage_update)?["params"]["accountRevision"],
+            json!(55),
+        );
+        assert_eq!(
+            serde_json::to_value(&pool)?["params"].get("selectedAccountId"),
+            None,
         );
         Ok(())
     }

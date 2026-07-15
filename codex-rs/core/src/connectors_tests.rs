@@ -13,8 +13,10 @@ use codex_connectors::metadata::connector_install_url;
 use codex_connectors::metadata::sanitize_name;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ToolInfo;
+use codex_protocol::auth::AuthMode;
 use pretty_assertions::assert_eq;
 use rmcp::model::JsonObject;
 use rmcp::model::Meta;
@@ -240,7 +242,9 @@ async fn refresh_accessible_connectors_cache_from_mcp_tools_writes_latest_instal
     ];
 
     let cached = with_accessible_connectors_cache_cleared(|| {
-        refresh_accessible_connectors_cache_from_mcp_tools(&config, /*auth*/ None, &tools);
+        refresh_accessible_connectors_cache_from_mcp_tools(
+            &config, /*auth*/ None, /*exact_cache_key*/ None, &tools,
+        );
         read_cached_accessible_connectors(&cache_key).expect("cache should be populated")
     });
 
@@ -283,6 +287,53 @@ async fn refresh_accessible_connectors_cache_from_mcp_tools_writes_latest_instal
             }
         ]
     );
+}
+
+#[test]
+fn managed_accessible_connectors_cache_isolates_identity_and_credential_revision() {
+    let transport = TransportAuthBinding {
+        identity_key: "first@example.com".to_string(),
+        raw_account_id: Some("shared-workspace".to_string()),
+        fedramp: false,
+        auth_mode: AuthMode::Chatgpt,
+        route_generation: 7,
+    };
+    let first_key = ConnectorDirectoryCacheKey::from_transport_binding(
+        "https://chatgpt.example.test".to_string(),
+        transport.clone(),
+        11,
+        true,
+    );
+    let second_identity_key = ConnectorDirectoryCacheKey::from_transport_binding(
+        "https://chatgpt.example.test".to_string(),
+        TransportAuthBinding {
+            identity_key: "second@example.com".to_string(),
+            ..transport.clone()
+        },
+        11,
+        true,
+    );
+    let refreshed_credential_key = ConnectorDirectoryCacheKey::from_transport_binding(
+        "https://chatgpt.example.test".to_string(),
+        transport,
+        12,
+        true,
+    );
+    let cached = vec![app("calendar")];
+
+    with_accessible_connectors_cache_cleared(|| {
+        write_cached_accessible_connectors(first_key.clone(), &cached);
+
+        assert_eq!(read_cached_accessible_connectors(&first_key), Some(cached));
+        assert_eq!(
+            read_cached_accessible_connectors(&second_identity_key),
+            None
+        );
+        assert_eq!(
+            read_cached_accessible_connectors(&refreshed_credential_key),
+            None
+        );
+    });
 }
 
 #[test]
@@ -574,6 +625,7 @@ discoverables = [
         &config,
         &plugins_manager,
         Some(&auth),
+        None,
         &[],
         &[],
     )
@@ -612,6 +664,7 @@ apps = true
         &config,
         &plugins_manager,
         Some(&auth),
+        None,
         &[],
         &loaded_plugin_app_connector_ids,
     )

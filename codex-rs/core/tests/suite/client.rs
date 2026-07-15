@@ -1,3 +1,4 @@
+use chrono::Utc;
 use codex_config::ConfigLayerStack;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::ModelClient;
@@ -13,8 +14,13 @@ use codex_features::Feature;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptFailure;
+use codex_login::ManagedChatgptOauthCredentials;
+use codex_login::ManagedChatgptSelectionScope;
+use codex_login::TokenData;
 use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::default_client::originator;
+use codex_login::token_data::IdTokenInfo;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -1560,6 +1566,92 @@ async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
     );
 
     server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn current_mcp_runtime_returns_error_when_managed_pool_has_no_eligible_account()
+-> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let auth_manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::Direct,
+        /*auth_route_config*/ None,
+    )
+    .await;
+    auth_manager
+        .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+            tokens: TokenData {
+                id_token: IdTokenInfo {
+                    email: Some("blocked@example.com".to_string()),
+                    chatgpt_account_id: Some("workspace-blocked".to_string()),
+                    raw_jwt: fake_chatgpt_id_token("pro", "workspace-blocked"),
+                    ..Default::default()
+                },
+                access_token: "blocked-access-token".to_string(),
+                refresh_token: "blocked-refresh-token".to_string(),
+                account_id: Some("workspace-blocked".to_string()),
+            },
+            last_refresh: Utc::now(),
+            oauth_api_key: None,
+        })
+        .await?;
+
+    let selection_scope = ManagedChatgptSelectionScope::default();
+    let selected = auth_manager
+        .managed_chatgpt_auth_snapshot(&selection_scope)
+        .await?
+        .expect("managed account should be eligible before the test blocks it");
+
+    let config = load_default_config_for_test(&codex_home).await;
+    let installation_id = resolve_installation_id(&config.codex_home).await?;
+    let thread_manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(codex_core::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*agent_graph_store*/ None,
+        installation_id,
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let NewThread { thread: codex, .. } = thread_manager.start_thread(config).await?;
+
+    let recovery = auth_manager
+        .recover_failed_attempt(
+            &selected,
+            ManagedChatgptFailure::AuthInvalid,
+            /*committed*/ false,
+            &selection_scope,
+        )
+        .await?;
+    assert!(
+        matches!(recovery, codex_login::ManagedChatgptRecoveryDecision::Stop),
+        "the only managed account should become ineligible"
+    );
+
+    let error = codex
+        .current_mcp_runtime()
+        .await
+        .expect_err("an ineligible managed pool should return an error");
+    assert!(
+        matches!(
+            &error,
+            CodexErr::Io(error)
+                if error.to_string()
+                    == "managed ChatGPT account pool has no eligible account for this request"
+        ),
+        "unexpected runtime setup error: {error}"
+    );
+
+    Ok(())
 }
 
 /// Issues one streamed Responses request through a provider configured with command-backed auth.

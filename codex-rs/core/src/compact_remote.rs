@@ -1,7 +1,7 @@
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use crate::compact::CompactedHistoryMetadata;
+use crate::client::ModelClientSession;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;
@@ -48,12 +48,22 @@ use request::run_remote_compact_attempt;
 
 const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE: &str =
     "Output exceeded the available model context and was truncated";
+pub(crate) async fn emit_managed_selection_updates(
+    sess: &Session,
+    turn_context: &TurnContext,
+    client_session: &mut ModelClientSession,
+) {
+    while let Some(selection) = client_session.take_managed_selection_update() {
+        sess.send_event(turn_context, EventMsg::ManagedAccountSelected(selection))
+            .await;
+    }
+}
 
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
-    turn_state: Arc<OnceLock<String>>,
+    client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
@@ -68,7 +78,7 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         &sess,
         &step_context,
         fallback_step_context.as_ref(),
-        Some(turn_state),
+        client_session,
         initial_context_injection,
         compaction_metadata,
     )
@@ -99,11 +109,12 @@ pub(crate) async fn run_remote_compact_task(
         CompactionImplementation::ResponsesCompact,
         CompactionPhase::StandaloneTurn,
     );
+    let mut client_session = sess.services.model_client.new_session();
     run_remote_compact_task_inner(
         &sess,
         &step_context,
         /*fallback_step_context*/ None,
-        /*turn_state*/ None,
+        &mut client_session,
         InitialContextInjection::DoNotInject,
         compaction_metadata,
     )
@@ -115,7 +126,7 @@ async fn run_remote_compact_task_inner(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    turn_state: Option<Arc<OnceLock<String>>>,
+    client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
@@ -157,7 +168,7 @@ async fn run_remote_compact_task_inner(
         sess,
         step_context,
         fallback_step_context,
-        turn_state,
+        client_session,
         initial_context_injection,
         compaction_metadata,
         &mut analytics_details,
@@ -192,7 +203,7 @@ async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
-    turn_state: Option<Arc<OnceLock<String>>>,
+    client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
@@ -214,7 +225,7 @@ async fn run_remote_compact_task_inner_impl(
     let attempt = run_remote_compact_attempt(
         sess,
         step_context,
-        turn_state.clone(),
+        client_session,
         &compaction_trace,
         compaction_metadata,
         analytics_details,
@@ -240,7 +251,7 @@ async fn run_remote_compact_task_inner_impl(
             let fallback_result = run_remote_compact_attempt(
                 sess,
                 fallback_step_context,
-                turn_state,
+                client_session,
                 &fallback_compaction_trace,
                 compaction_metadata,
                 analytics_details,

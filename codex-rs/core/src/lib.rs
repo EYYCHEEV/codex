@@ -29,6 +29,7 @@ pub use codex_thread::BackgroundTerminalInfo;
 pub use codex_thread::CodexThread;
 pub use codex_thread::CodexThreadSettingsOverrides;
 pub use codex_thread::ThreadConfigSnapshot;
+pub use codex_thread::ThreadRuntimeSnapshot;
 pub use codex_thread::TryStartTurnIfIdleError;
 pub use codex_thread::TryStartTurnIfIdleRejectionReason;
 pub use session::turn_context::TurnContext;
@@ -180,6 +181,7 @@ pub use codex_protocol::protocol;
 pub use attestation::AttestationContext;
 pub use attestation::AttestationProvider;
 pub use attestation::GenerateAttestationFuture;
+pub use client::CurrentClientSetup;
 pub use client::ModelClient;
 pub use client::ModelClientSession;
 pub use client::X_CODEX_INSTALLATION_ID_HEADER;
@@ -187,6 +189,10 @@ pub use client::X_CODEX_TURN_METADATA_HEADER;
 pub use client_common::Prompt;
 pub use client_common::ResponseEvent;
 pub use client_common::ResponseStream;
+pub use codex_protocol::error::CodexErr;
+pub fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
+    session::turn::response_event_commits_attempt(event)
+}
 pub use codex_prompts::REVIEW_PROMPT;
 pub use compact::content_items_to_text;
 pub use current_time::SleepFuture;

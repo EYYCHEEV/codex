@@ -2405,6 +2405,9 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
                     model_context_window: Some(200_000),
                 }),
                 rate_limits: None,
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
             }))?,
         })
         .to_string(),

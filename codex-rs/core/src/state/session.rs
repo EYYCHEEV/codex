@@ -6,6 +6,9 @@ use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use super::AdditionalContextStore;
 use super::auto_compact_window::AutoCompactWindow;
@@ -16,17 +19,78 @@ use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
 use crate::session::time_reminder::CurrentTimeReminderState;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
+use codex_login::TransportAuthBinding;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
 
+#[derive(Clone, Debug)]
+pub(crate) struct ManagedRateLimitBinding {
+    pub(crate) managed_account_id: String,
+    pub(crate) account_state_revision: u64,
+    pub(crate) transport_binding: TransportAuthBinding,
+    pub(crate) shared_account_state_revision: Option<Arc<AtomicU64>>,
+}
+
+impl ManagedRateLimitBinding {
+    fn effective_account_state_revision(&self) -> u64 {
+        self.shared_account_state_revision
+            .as_ref()
+            .map_or(self.account_state_revision, |revision| {
+                revision.load(Ordering::Acquire)
+            })
+    }
+
+    pub(crate) fn refreshed(&self) -> Self {
+        let mut binding = self.clone();
+        binding.account_state_revision = self.effective_account_state_revision();
+        binding
+    }
+}
+
+impl PartialEq for ManagedRateLimitBinding {
+    fn eq(&self, other: &Self) -> bool {
+        if self.managed_account_id != other.managed_account_id
+            || self.transport_binding != other.transport_binding
+        {
+            return false;
+        }
+        match (
+            self.shared_account_state_revision.as_ref(),
+            other.shared_account_state_revision.as_ref(),
+        ) {
+            (Some(left), Some(right)) if Arc::ptr_eq(left, right) => true,
+            _ => {
+                self.effective_account_state_revision() == other.effective_account_state_revision()
+            }
+        }
+    }
+}
+
+impl Eq for ManagedRateLimitBinding {}
+
+#[derive(Clone)]
+pub(crate) struct LatestRateLimits {
+    pub(crate) snapshot: RateLimitSnapshot,
+    pub(crate) managed_binding: Option<ManagedRateLimitBinding>,
+}
+#[derive(Clone)]
+struct PendingManagedRateLimits {
+    snapshot: RateLimitSnapshot,
+    managed_account_id: String,
+    account_state_revision: u64,
+    transport_binding: Option<TransportAuthBinding>,
+}
+
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
     pub(crate) history: ContextManager,
-    pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
+    pub(crate) latest_rate_limits: Option<LatestRateLimits>,
+    current_managed_rate_limit_binding: Option<ManagedRateLimitBinding>,
+    pending_managed_rate_limits: Option<PendingManagedRateLimits>,
     pub(crate) server_reasoning_included: bool,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
     pub(crate) additional_context: AdditionalContextStore,
@@ -64,6 +128,8 @@ impl SessionState {
             session_configuration,
             history,
             latest_rate_limits: None,
+            current_managed_rate_limit_binding: None,
+            pending_managed_rate_limits: None,
             server_reasoning_included: false,
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
@@ -205,17 +271,121 @@ impl SessionState {
         self.history.token_info()
     }
 
-    pub(crate) fn set_rate_limits(&mut self, snapshot: RateLimitSnapshot) {
-        self.latest_rate_limits = Some(merge_rate_limit_fields(
-            self.latest_rate_limits.as_ref(),
-            snapshot,
-        ));
+    pub(crate) fn observe_managed_rate_limit_binding(
+        &mut self,
+        binding: Option<&ManagedRateLimitBinding>,
+    ) {
+        let Some(binding) = binding else {
+            self.pending_managed_rate_limits = None;
+            if self
+                .latest_rate_limits
+                .as_ref()
+                .is_some_and(|latest| latest.managed_binding.is_some())
+            {
+                self.latest_rate_limits = None;
+            }
+            self.current_managed_rate_limit_binding = None;
+            return;
+        };
+        if let Some(pending) = self.pending_managed_rate_limits.take()
+            && pending.managed_account_id == binding.managed_account_id
+            && pending.account_state_revision == binding.effective_account_state_revision()
+            && pending.transport_binding.as_ref() == Some(&binding.transport_binding)
+        {
+            self.latest_rate_limits = Some(LatestRateLimits {
+                snapshot: pending.snapshot,
+                managed_binding: Some(binding.clone()),
+            });
+        }
+        if self
+            .latest_rate_limits
+            .as_ref()
+            .is_some_and(|latest| latest.managed_binding.as_ref() != Some(binding))
+        {
+            self.latest_rate_limits = None;
+        }
+        self.current_managed_rate_limit_binding = Some(binding.clone());
+    }
+
+    pub(crate) fn set_rate_limits(
+        &mut self,
+        mut snapshot: RateLimitSnapshot,
+        managed_binding: Option<ManagedRateLimitBinding>,
+    ) {
+        normalize_rate_limit_snapshot(&mut snapshot);
+        let previous = self.latest_rate_limits.as_ref().and_then(|latest| {
+            (latest.managed_binding == managed_binding).then_some(&latest.snapshot)
+        });
+        if snapshot.limit_id.as_deref() != Some("codex")
+            && let Some(prior) = previous.filter(|prior| prior.limit_id.as_deref() == Some("codex"))
+        {
+            let mut canonical = prior.clone();
+            if snapshot.credits.is_some() {
+                canonical.credits = snapshot.credits;
+            }
+            if snapshot.individual_limit.is_some() {
+                canonical.individual_limit = snapshot.individual_limit;
+            }
+            if snapshot.plan_type.is_some() {
+                canonical.plan_type = snapshot.plan_type;
+            }
+            self.current_managed_rate_limit_binding = managed_binding.clone();
+            self.latest_rate_limits = Some(LatestRateLimits {
+                snapshot: canonical,
+                managed_binding,
+            });
+            return;
+        }
+        self.current_managed_rate_limit_binding = managed_binding.clone();
+        self.latest_rate_limits = Some(LatestRateLimits {
+            snapshot: merge_rate_limit_fields(previous, snapshot),
+            managed_binding,
+        });
     }
 
     pub(crate) fn token_info_and_rate_limits(
         &self,
-    ) -> (Option<TokenUsageInfo>, Option<RateLimitSnapshot>) {
-        (self.token_info(), self.latest_rate_limits.clone())
+    ) -> (
+        Option<TokenUsageInfo>,
+        Option<RateLimitSnapshot>,
+        Option<ManagedRateLimitBinding>,
+    ) {
+        let latest = self.latest_rate_limits.as_ref();
+        (
+            self.token_info(),
+            latest.map(|latest| latest.snapshot.clone()),
+            self.current_managed_rate_limit_binding
+                .as_ref()
+                .map(ManagedRateLimitBinding::refreshed),
+        )
+    }
+
+    pub(crate) fn restore_rate_limits(
+        &mut self,
+        mut snapshot: RateLimitSnapshot,
+        managed_binding: Option<ManagedRateLimitBinding>,
+    ) {
+        normalize_rate_limit_snapshot(&mut snapshot);
+        self.current_managed_rate_limit_binding = managed_binding.clone();
+        self.latest_rate_limits = Some(LatestRateLimits {
+            snapshot,
+            managed_binding,
+        });
+    }
+    pub(crate) fn restore_pending_managed_rate_limits(
+        &mut self,
+        mut snapshot: RateLimitSnapshot,
+        managed_account_id: String,
+        account_state_revision: u64,
+        transport_binding: Option<TransportAuthBinding>,
+    ) {
+        normalize_rate_limit_snapshot(&mut snapshot);
+        self.pending_managed_rate_limits = Some(PendingManagedRateLimits {
+            snapshot,
+            managed_account_id,
+            account_state_revision,
+            transport_binding,
+        });
     }
 
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
@@ -315,15 +485,28 @@ impl SessionState {
     }
 }
 
-// Sometimes new snapshots don't include credits or plan information.
-// Preserve those from the previous snapshot when missing. For `limit_id`, treat
-// missing values as the default `"codex"` bucket.
+fn normalize_rate_limit_snapshot(snapshot: &mut RateLimitSnapshot) {
+    if snapshot.limit_id.is_none() {
+        snapshot.limit_id = Some("codex".to_string());
+    }
+}
+
+// Sparse snapshots omit fields that were not present on a response. Preserve
+// per-window data only within the same limit bucket, while account-level
+// metadata remains shared across buckets.
 fn merge_rate_limit_fields(
     previous: Option<&RateLimitSnapshot>,
     mut snapshot: RateLimitSnapshot,
 ) -> RateLimitSnapshot {
-    if snapshot.limit_id.is_none() {
-        snapshot.limit_id = Some("codex".to_string());
+    let previous_same_limit = previous.filter(|prior| prior.limit_id == snapshot.limit_id);
+    if snapshot.limit_name.is_none() {
+        snapshot.limit_name = previous_same_limit.and_then(|prior| prior.limit_name.clone());
+    }
+    if snapshot.primary.is_none() {
+        snapshot.primary = previous_same_limit.and_then(|prior| prior.primary.clone());
+    }
+    if snapshot.secondary.is_none() {
+        snapshot.secondary = previous_same_limit.and_then(|prior| prior.secondary.clone());
     }
     if snapshot.credits.is_none() {
         snapshot.credits = previous.and_then(|prior| prior.credits.clone());
@@ -336,6 +519,10 @@ fn merge_rate_limit_fields(
     }
     if snapshot.plan_type.is_none() {
         snapshot.plan_type = previous.and_then(|prior| prior.plan_type);
+    }
+    if snapshot.rate_limit_reached_type.is_none() {
+        snapshot.rate_limit_reached_type =
+            previous_same_limit.and_then(|prior| prior.rate_limit_reached_type);
     }
     snapshot
 }

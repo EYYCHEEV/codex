@@ -665,3 +665,18 @@ fn usage_limit_reached_with_promo_message() {
         assert_eq!(err.to_string(), expected);
     });
 }
+
+#[test]
+fn websocket_close_maps_to_disconnected_protocol_error() {
+    let error = CodexErr::WebsocketClosed(Box::new(WebsocketCloseDetails {
+        code: Some(4001),
+        reason: Some("maintenance".to_string()),
+        reason_redacted: false,
+    }));
+    assert_eq!(
+        error.to_codex_protocol_error(),
+        CodexErrorInfo::ResponseStreamDisconnected {
+            http_status_code: None,
+        }
+    );
+}

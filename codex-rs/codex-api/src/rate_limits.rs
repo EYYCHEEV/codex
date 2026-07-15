@@ -254,7 +254,7 @@ fn parse_header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name)?.to_str().ok()
 }
 
-fn has_rate_limit_data(snapshot: &RateLimitSnapshot) -> bool {
+pub(crate) fn has_rate_limit_data(snapshot: &RateLimitSnapshot) -> bool {
     snapshot.primary.is_some() || snapshot.secondary.is_some() || snapshot.credits.is_some()
 }
 

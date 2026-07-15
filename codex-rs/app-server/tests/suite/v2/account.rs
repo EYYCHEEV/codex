@@ -3,6 +3,12 @@ use anyhow::bail;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
 
+use super::connection_handling_websocket::connect_websocket;
+use super::connection_handling_websocket::read_notification_for_method;
+use super::connection_handling_websocket::read_response_for_id;
+use super::connection_handling_websocket::send_initialize_request;
+use super::connection_handling_websocket::send_request;
+use super::connection_handling_websocket::spawn_websocket_server_with_env;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::ChatGptIdTokenClaims;
 use app_test_support::DEFAULT_CLIENT_NAME;
@@ -31,8 +37,11 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
+use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
+use codex_app_server_protocol::ManagedChatgptAccountRefreshStatus;
+use codex_app_server_protocol::ManagedChatgptAccountUsageState;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
@@ -41,12 +50,17 @@ use codex_app_server_protocol::TurnStatus;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_login::AuthDotJson;
 use codex_login::AuthKeyringBackendKind;
+use codex_login::AuthManager;
 use codex_login::CLIENT_ID_OVERRIDE_ENV_VAR;
+use codex_login::ManagedChatgptOauthCredentials;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_login::TokenData;
 use codex_login::auth::BedrockApiKeyAuth;
 use codex_login::load_auth_dot_json;
 use codex_login::login_with_api_key;
 use codex_login::login_with_bedrock_api_key;
+use codex_login::save_auth;
+use codex_protocol::account::AmazonBedrockCredentialSource;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::AuthMode as DomainAuthMode;
 use core_test_support::responses;
@@ -61,6 +75,7 @@ use url::Url;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
+use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
@@ -145,6 +160,7 @@ sandbox_mode = "danger-full-access"
 {chatgpt_base_url_line}
 {forced_line}
 {forced_workspace_line}
+{chatgpt_base_url_line}
 
 model_provider = "{model_provider_id}"
 
@@ -211,6 +227,71 @@ async fn assert_account_updated(
         }
     );
     Ok(())
+}
+
+pub(super) async fn seed_managed_accounts(
+    codex_home: &Path,
+    accounts: &[(&str, &str)],
+) -> Result<()> {
+    let manager = AuthManager::shared(
+        codex_home.to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    for (email, workspace_id) in accounts {
+        let mut tokens = TokenData::default();
+        tokens.id_token.email = Some((*email).to_string());
+        tokens.id_token.chatgpt_account_id = Some((*workspace_id).to_string());
+        tokens.id_token.raw_jwt = encode_id_token(
+            &ChatGptIdTokenClaims::new()
+                .email(*email)
+                .chatgpt_account_id(*workspace_id),
+        )?;
+        tokens.access_token = format!("access-{workspace_id}");
+        tokens.refresh_token = format!("refresh-{workspace_id}");
+        tokens.account_id = Some((*workspace_id).to_string());
+        manager
+            .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+                tokens,
+                last_refresh: Utc::now(),
+                oauth_api_key: None,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+fn managed_rate_response(used_percent: i64, window_seconds: i64) -> serde_json::Value {
+    json!({
+        "plan_type": "pro",
+        "rate_limit": {
+            "allowed": true,
+            "limit_reached": false,
+            "primary_window": {
+                "used_percent": used_percent,
+                "limit_window_seconds": window_seconds,
+                "reset_after_seconds": 60,
+                "reset_at": 1_800_000_000
+            }
+        }
+    })
+}
+
+fn managed_token_profile(lifetime_tokens: i64) -> serde_json::Value {
+    json!({
+        "stats": {
+            "lifetime_tokens": lifetime_tokens,
+            "peak_daily_tokens": lifetime_tokens,
+            "longest_running_turn_sec": 1,
+            "current_streak_days": 1,
+            "longest_streak_days": 1
+        }
+    })
 }
 
 async fn mock_device_code_usercode(server: &MockServer, interval_seconds: u64) {
@@ -352,6 +433,1064 @@ async fn logout_account_succeeds_when_config_reload_fails() -> Result<()> {
     assert_eq!(load_file_auth(codex_home.path())?, None);
     assert_account_updated(&mut mcp, /*auth_mode*/ None).await?;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_account_list_notifies_selection_and_targeted_logout_returns_stable_id() -> Result<()>
+{
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("access-token")
+            .account_id(WORKSPACE_ID_INITIAL)
+            .email("Managed.User@Example.com")
+            .plan_type("pro"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let model_only_id = mcp
+        .send_list_accounts_request(json!({
+            "model": "mock-model",
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let model_only_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(model_only_id)),
+    )
+    .await??;
+    let model_only: ListAccountsResponse = to_response(model_only_resp)?;
+    assert_eq!(model_only.accounts.len(), 1);
+    assert_eq!(
+        model_only.selection_revision, None,
+        "model-only account/list must remain unscoped"
+    );
+    assert!(
+        timeout(Duration::from_millis(250), mcp.read_stream_message())
+            .await
+            .is_err(),
+        "model-only account/list must not publish a selection notification"
+    );
+    let thread_request_id = mcp
+        .send_thread_start_request(codex_app_server_protocol::ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            environments: Some(Vec::new()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_request_id)),
+    )
+    .await??;
+    let thread =
+        to_response::<codex_app_server_protocol::ThreadStartResponse>(thread_response)?.thread;
+
+    let list_id = mcp
+        .send_list_accounts_request(json!({
+            "threadId": thread.id,
+            "model": "mock-model",
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let list_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+    )
+    .await??;
+    let list: ListAccountsResponse = to_response(list_resp)?;
+    assert_eq!(list.accounts.len(), 1);
+    let managed_id = list.accounts[0].managed_account_id.clone();
+    assert_eq!(managed_id, "email:managed.user@example.com");
+    assert!(list.accounts[0].credential_revision > 0);
+    assert!(
+        list.accounts[0].account_revision >= list.accounts[0].credential_revision,
+        "mutable account state must never precede its credential generation"
+    );
+    assert_eq!(
+        list.selected_account_id.as_deref(),
+        Some(managed_id.as_str())
+    );
+    let selection_revision = list
+        .selection_revision
+        .expect("scoped account list should carry a selection revision");
+    let pool_revision = list.pool_revision;
+
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/selection/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountSelectionUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.thread_id, thread.id.to_string());
+    assert_eq!(
+        payload.selected_account_id.as_deref(),
+        Some(managed_id.as_str())
+    );
+    assert_eq!(payload.selection_revision, selection_revision);
+
+    let logout_id = mcp
+        .send_logout_account_request_with_params(json!({
+            "accountId": "  MANAGED.USER@EXAMPLE.COM  ",
+            "all": false
+        }))
+        .await?;
+    let logout_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(logout_id)),
+    )
+    .await??;
+    let logout: LogoutAccountResponse = to_response(logout_resp)?;
+    assert_eq!(logout.removed_account_ids, vec![managed_id]);
+    assert!(logout.accounts.is_empty());
+    assert_eq!(logout.selected_account_id, None);
+
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/pool/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountPoolUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert!(payload.accounts.is_empty());
+    assert!(payload.pool_revision > pool_revision);
+
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/selection/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountSelectionUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.thread_id, thread.id.to_string());
+    assert_eq!(payload.selected_account_id, None);
+    assert!(payload.selection_revision > selection_revision);
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_to_api_key_login_publishes_monotonic_pool_clearing() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("access-token")
+            .account_id(WORKSPACE_ID_INITIAL)
+            .email("managed@example.com")
+            .plan_type("pro"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_request_id = mcp
+        .send_thread_start_request(codex_app_server_protocol::ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            environments: Some(Vec::new()),
+            ..Default::default()
+        })
+        .await?;
+    let thread_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_request_id)),
+    )
+    .await??;
+    let thread =
+        to_response::<codex_app_server_protocol::ThreadStartResponse>(thread_response)?.thread;
+    let list_id = mcp
+        .send_list_accounts_request(json!({
+            "threadId": thread.id,
+            "model": "mock-model",
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let before: ListAccountsResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+        )
+        .await??,
+    )?;
+    assert_eq!(before.accounts.len(), 1);
+    assert!(before.selected_account_id.is_some());
+    let selection_revision = before
+        .selection_revision
+        .expect("managed scoped list must expose a selection revision");
+    let initial_selection = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/selection/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = initial_selection.try_into()?;
+    let ServerNotification::AccountSelectionUpdated(initial_selection) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(initial_selection.selection_revision, selection_revision);
+    let login_id = mcp
+        .send_login_account_api_key_request("sk-replacement-key")
+        .await?;
+    let mut login_response = None;
+    let mut account_updated = false;
+    let mut login_completed = false;
+    let mut clearing = None;
+    let mut selection_removal = None;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        while login_response.is_none()
+            || !account_updated
+            || !login_completed
+            || clearing.is_none()
+            || selection_removal.is_none()
+        {
+            match mcp.read_stream_message().await? {
+                JSONRPCMessage::Response(response)
+                    if response.id == RequestId::Integer(login_id) =>
+                {
+                    login_response = Some(response);
+                }
+                JSONRPCMessage::Notification(notification)
+                    if notification.method == "account/login/completed" =>
+                {
+                    login_completed = true;
+                }
+                JSONRPCMessage::Notification(notification)
+                    if notification.method == "account/updated" =>
+                {
+                    account_updated = true;
+                }
+                JSONRPCMessage::Notification(notification)
+                    if notification.method == "account/pool/updated" =>
+                {
+                    let parsed: ServerNotification = notification.try_into()?;
+                    let ServerNotification::AccountPoolUpdated(payload) = parsed else {
+                        unreachable!("method matched account/pool/updated");
+                    };
+                    clearing = Some(payload);
+                }
+                JSONRPCMessage::Notification(notification)
+                    if notification.method == "account/selection/updated" =>
+                {
+                    let parsed: ServerNotification = notification.try_into()?;
+                    let ServerNotification::AccountSelectionUpdated(payload) = parsed else {
+                        unreachable!("method matched account/selection/updated");
+                    };
+                    selection_removal = Some(payload);
+                }
+                message => {
+                    bail!("unexpected message during managed-to-API-key cutover: {message:?}")
+                }
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await??;
+    let _: LoginAccountResponse = to_response(login_response.expect("login response observed"))?;
+    let clearing = clearing.expect("pool clearing notification observed");
+    assert!(clearing.accounts.is_empty());
+    assert!(
+        clearing.pool_revision > before.pool_revision,
+        "managed-to-nonmanaged cutover must advance the durable pool generation"
+    );
+    let selection_removal = selection_removal.expect("selection removal notification observed");
+    assert_eq!(selection_removal.thread_id, thread.id.to_string());
+    assert_eq!(selection_removal.selected_account_id, None);
+    assert!(
+        selection_removal.selection_revision > selection_revision,
+        "managed-to-nonmanaged cutover must advance the scoped selection generation"
+    );
+    assert!(
+        timeout(Duration::from_millis(250), mcp.read_stream_message())
+            .await
+            .is_err(),
+        "managed-to-API-key cutover must publish one clearing pool update"
+    );
+
+    let scoped_id = mcp
+        .send_list_accounts_request(json!({
+            "threadId": thread.id,
+            "model": "mock-model",
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let after: ListAccountsResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(scoped_id)),
+        )
+        .await??,
+    )?;
+    assert!(after.accounts.is_empty());
+    assert_eq!(after.pool_revision, clearing.pool_revision);
+    assert_eq!(after.selection_revision, None);
+    assert!(
+        timeout(Duration::from_millis(250), mcp.read_stream_message())
+            .await
+            .is_err(),
+        "scoped nonpooled list must not publish a selection update"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_auth_overlay_hides_and_preserves_managed_account_pool() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    seed_managed_accounts(
+        codex_home.path(),
+        &[("persistent@example.com", WORKSPACE_ID_INITIAL)],
+    )
+    .await?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let before_id = mcp
+        .send_list_accounts_request(json!({
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let before: ListAccountsResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(before_id)),
+        )
+        .await??,
+    )?;
+    assert_eq!(before.accounts.len(), 1);
+
+    let access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("external@example.com")
+            .chatgpt_account_id(WORKSPACE_ID_EMBEDDED),
+    )?;
+    let set_id = mcp
+        .send_chatgpt_auth_tokens_login_request(
+            access_token,
+            WORKSPACE_ID_EMBEDDED.to_string(),
+            Some("pro".to_string()),
+        )
+        .await?;
+    let set_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(set_id)),
+    )
+    .await??;
+    let response: LoginAccountResponse = to_response(set_resp)?;
+    assert_eq!(response, LoginAccountResponse::ChatgptAuthTokens {});
+    let _updated = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    assert!(
+        timeout(
+            Duration::from_millis(250),
+            mcp.read_stream_until_notification_message("account/pool/updated"),
+        )
+        .await
+        .is_err(),
+        "external overlay activation must not publish hidden managed rows"
+    );
+
+    let list_id = mcp
+        .send_list_accounts_request(json!({
+            "threadId": "external-overlay-thread",
+            "refreshTokens": true,
+            "refreshUsage": true
+        }))
+        .await?;
+    let list_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+    )
+    .await??;
+    let hidden: ListAccountsResponse = to_response(list_resp)?;
+    assert!(hidden.accounts.is_empty());
+    assert_eq!(hidden.selected_account_id, None);
+    assert_eq!(hidden.selection_revision, None);
+    assert_eq!(
+        hidden.pool_revision, before.pool_revision,
+        "the hidden overlay response must preserve the durable stored pool revision"
+    );
+
+    let logout_id = mcp.send_logout_account_request().await?;
+    let logout_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(logout_id)),
+    )
+    .await??;
+    let logout: LogoutAccountResponse = to_response(logout_resp)?;
+    assert!(logout.removed_account_ids.is_empty());
+    assert_eq!(logout.accounts.len(), 1);
+    assert_eq!(
+        logout.accounts[0].managed_account_id,
+        "email:persistent@example.com"
+    );
+
+    let reveal_id = mcp
+        .send_list_accounts_request(json!({
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let reveal_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(reveal_id)),
+    )
+    .await??;
+    let revealed: ListAccountsResponse = to_response(reveal_resp)?;
+    assert_eq!(revealed.accounts.len(), 1);
+    assert_eq!(
+        revealed.accounts[0].managed_account_id,
+        "email:persistent@example.com"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn targeted_logout_resolves_stored_alias_raw_id_and_unicode_email_under_overlay() -> Result<()>
+{
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    seed_managed_accounts(
+        codex_home.path(),
+        &[
+            ("legacy@example.com", WORKSPACE_ID_INITIAL),
+            ("Current@Example.com", WORKSPACE_ID_INITIAL),
+            ("raw@example.com", WORKSPACE_ID_ALLOWED),
+            ("Üser@Example.com", WORKSPACE_ID_SECOND_ALLOWED),
+        ],
+    )
+    .await?;
+    let mut stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )?
+    .expect("seeded managed auth");
+    let pool = stored
+        .managed_chatgpt
+        .as_mut()
+        .expect("seeded managed pool");
+    pool.accounts
+        .retain(|account| account.identity_key != "email:legacy@example.com");
+    pool.accounts
+        .iter_mut()
+        .find(|account| account.identity_key == "email:current@example.com")
+        .expect("current managed identity")
+        .identity_aliases
+        .push("email:legacy@example.com".to_string());
+    save_auth(
+        codex_home.path(),
+        &stored,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("external@example.com")
+            .chatgpt_account_id(WORKSPACE_ID_EMBEDDED),
+    )?;
+    let set_id = mcp
+        .send_chatgpt_auth_tokens_login_request(
+            access_token,
+            WORKSPACE_ID_EMBEDDED.to_string(),
+            Some("pro".to_string()),
+        )
+        .await?;
+    let _: LoginAccountResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(set_id)),
+        )
+        .await??,
+    )?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/updated"),
+    )
+    .await??;
+
+    let alias_id = mcp
+        .send_logout_account_request_with_params(json!({
+            "accountId": "email:legacy@example.com",
+            "all": false
+        }))
+        .await?;
+    let alias_logout: LogoutAccountResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(alias_id)),
+        )
+        .await??,
+    )?;
+    assert_eq!(
+        alias_logout.removed_account_ids,
+        vec!["email:current@example.com"]
+    );
+    assert_eq!(
+        alias_logout
+            .accounts
+            .iter()
+            .map(|account| account.managed_account_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["email:raw@example.com", "email:üser@example.com"]
+    );
+    assert_eq!(alias_logout.selected_account_id, None);
+
+    let raw_id = mcp
+        .send_logout_account_request_with_params(json!({
+            "accountId": WORKSPACE_ID_ALLOWED,
+            "all": false
+        }))
+        .await?;
+    let raw_logout: LogoutAccountResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(raw_id)),
+        )
+        .await??,
+    )?;
+    assert_eq!(
+        raw_logout.removed_account_ids,
+        vec!["email:raw@example.com"]
+    );
+    assert_eq!(raw_logout.accounts.len(), 1);
+    assert_eq!(
+        raw_logout.accounts[0].managed_account_id,
+        "email:üser@example.com"
+    );
+
+    let unicode_email_id = mcp
+        .send_logout_account_request_with_params(json!({
+            "accountId": "ÜSER@EXAMPLE.COM",
+            "all": false
+        }))
+        .await?;
+    let unicode_logout: LogoutAccountResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(unicode_email_id)),
+        )
+        .await??,
+    )?;
+    assert_eq!(
+        unicode_logout.removed_account_ids,
+        vec!["email:üser@example.com"]
+    );
+    assert!(unicode_logout.accounts.is_empty());
+    assert_eq!(unicode_logout.selected_account_id, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_list_timeout_does_not_suppress_a_healthy_sibling() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            base_url: Some(mock_server.uri()),
+            chatgpt_base_url: Some(mock_server.uri()),
+            ..Default::default()
+        },
+    )?;
+    seed_managed_accounts(
+        codex_home.path(),
+        &[
+            ("a@example.com", WORKSPACE_ID_ALLOWED),
+            ("b@example.com", WORKSPACE_ID_SECOND_ALLOWED),
+        ],
+    )
+    .await?;
+
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .and(header(
+            "authorization",
+            format!("Bearer access-{WORKSPACE_ID_ALLOWED}"),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(30))
+                .set_body_json(managed_rate_response(90, 900)),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/profiles/me"))
+        .and(header(
+            "authorization",
+            format!("Bearer access-{WORKSPACE_ID_ALLOWED}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(managed_token_profile(10)))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .and(header(
+            "authorization",
+            format!("Bearer access-{WORKSPACE_ID_SECOND_ALLOWED}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(managed_rate_response(20, 3600)))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/profiles/me"))
+        .and(header(
+            "authorization",
+            format!("Bearer access-{WORKSPACE_ID_SECOND_ALLOWED}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(managed_token_profile(20)))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_list_accounts_request(json!({
+            "refreshTokens": false,
+            "refreshUsage": true
+        }))
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        Duration::from_secs(25),
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let response: ListAccountsResponse = to_response(response)?;
+    assert_eq!(response.accounts.len(), 2);
+    let healthy = response
+        .accounts
+        .iter()
+        .find(|account| account.managed_account_id == "email:b@example.com")
+        .expect("healthy sibling must remain in the response");
+    assert_eq!(healthy.usage.state, ManagedChatgptAccountUsageState::Fresh);
+    assert_eq!(healthy.usage.rate_limits.len(), 1);
+    assert_eq!(
+        healthy.usage.rate_limits[0]
+            .primary
+            .as_ref()
+            .and_then(|window| window.window_duration_mins),
+        Some(60)
+    );
+    assert_eq!(
+        healthy
+            .usage
+            .token_usage
+            .as_ref()
+            .and_then(|usage| usage.lifetime_tokens),
+        Some(20)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            base_url: Some(mock_server.uri()),
+            chatgpt_base_url: Some(mock_server.uri()),
+            ..Default::default()
+        },
+    )?;
+
+    let manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    let mut tokens = TokenData::default();
+    tokens.id_token.email = Some("timeout@example.com".to_string());
+    tokens.id_token.chatgpt_account_id = Some(WORKSPACE_ID_ALLOWED.to_string());
+    tokens.id_token.raw_jwt = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("timeout@example.com")
+            .chatgpt_account_id(WORKSPACE_ID_ALLOWED),
+    )?;
+    tokens.access_token = "expired-access-token".to_string();
+    tokens.refresh_token = "refresh-timeout".to_string();
+    tokens.account_id = Some(WORKSPACE_ID_ALLOWED.to_string());
+    manager
+        .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+            tokens,
+            last_refresh: Utc::now() - ChronoDuration::days(9),
+            oauth_api_key: None,
+        })
+        .await?;
+    drop(manager);
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(30)))
+        .expect(1..=2)
+        .mount(&mock_server)
+        .await;
+    let refresh_url = format!("{}/oauth/token", mock_server.uri());
+    let (mut process, bind_addr) = spawn_websocket_server_with_env(
+        codex_home.path(),
+        &[
+            (REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, refresh_url.as_str()),
+            ("OPENAI_API_KEY", ""),
+        ],
+    )
+    .await?;
+    let mut requester = connect_websocket(bind_addr).await?;
+    let mut observer = connect_websocket(bind_addr).await?;
+    send_initialize_request(&mut requester, 1, "refresh_requester").await?;
+    read_response_for_id(&mut requester, 1).await?;
+    send_initialize_request(&mut observer, 2, "refresh_observer").await?;
+    read_response_for_id(&mut observer, 2).await?;
+
+    send_request(
+        &mut requester,
+        "account/list",
+        3,
+        Some(json!({
+            "refreshTokens": true,
+            "refreshUsage": false
+        })),
+    )
+    .await?;
+    let notification = timeout(
+        Duration::from_secs(25),
+        read_notification_for_method(&mut observer, "account/pool/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = notification.try_into()?;
+    let ServerNotification::AccountPoolUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.accounts.len(), 1);
+    let timeout_status = payload.accounts[0].refresh_status.clone();
+    assert!(matches!(
+        &timeout_status,
+        ManagedChatgptAccountRefreshStatus::TransientUnavailable { .. }
+    ));
+
+    let first: ListAccountsResponse = to_response(
+        timeout(
+            Duration::from_secs(25),
+            read_response_for_id(&mut requester, 3),
+        )
+        .await??,
+    )?;
+    assert_eq!(first.accounts.len(), 1);
+    assert_eq!(first.accounts[0].refresh_status, timeout_status);
+
+    send_request(
+        &mut observer,
+        "account/list",
+        4,
+        Some(json!({
+            "refreshTokens": false,
+            "refreshUsage": false
+        })),
+    )
+    .await?;
+    let next: ListAccountsResponse =
+        to_response(timeout(DEFAULT_READ_TIMEOUT, read_response_for_id(&mut observer, 4)).await??)?;
+    assert_eq!(next.accounts.len(), 1);
+    assert_eq!(next.accounts[0].refresh_status, timeout_status);
+
+    mock_server.verify().await;
+    process.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_list_usage_only_skips_oauth_and_maps_missing_plan_to_unknown() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            base_url: Some(mock_server.uri()),
+            chatgpt_base_url: Some(mock_server.uri()),
+            ..Default::default()
+        },
+    )?;
+    let manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    let mut tokens = TokenData::default();
+    tokens.id_token.email = Some("usage-only@example.com".to_string());
+    tokens.id_token.chatgpt_account_id = Some(WORKSPACE_ID_ALLOWED.to_string());
+    tokens.id_token.raw_jwt = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("usage-only@example.com")
+            .chatgpt_account_id(WORKSPACE_ID_ALLOWED),
+    )?;
+    tokens.access_token = "expired-usage-access-token".to_string();
+    tokens.refresh_token = "unused-refresh-token".to_string();
+    tokens.account_id = Some(WORKSPACE_ID_ALLOWED.to_string());
+    manager
+        .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+            tokens,
+            last_refresh: Utc::now() - ChronoDuration::days(9),
+            oauth_api_key: None,
+        })
+        .await?;
+    drop(manager);
+
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(2)
+        .mount(&mock_server)
+        .await;
+
+    let refresh_url = format!("{}/oauth/token", mock_server.uri());
+    let (mut process, bind_addr) = spawn_websocket_server_with_env(
+        codex_home.path(),
+        &[
+            (REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, refresh_url.as_str()),
+            ("OPENAI_API_KEY", ""),
+        ],
+    )
+    .await?;
+    let mut requester = connect_websocket(bind_addr).await?;
+    send_initialize_request(&mut requester, 1, "usage_only_requester").await?;
+    read_response_for_id(&mut requester, 1).await?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            if mock_server
+                .received_requests()
+                .await
+                .is_some_and(|requests| requests.len() >= 2)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    mock_server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(managed_rate_response(15, 3600)))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/profiles/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(managed_token_profile(42)))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    send_request(
+        &mut requester,
+        "account/list",
+        2,
+        Some(json!({
+            "refreshTokens": false,
+            "refreshUsage": true
+        })),
+    )
+    .await?;
+    let response: ListAccountsResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            read_response_for_id(&mut requester, 2),
+        )
+        .await??,
+    )?;
+    assert_eq!(response.accounts.len(), 1);
+    assert_eq!(response.accounts[0].plan_type, AccountPlanType::Unknown);
+    assert_eq!(
+        response.accounts[0].usage.state,
+        ManagedChatgptAccountUsageState::Fresh
+    );
+    assert_eq!(
+        response.accounts[0]
+            .usage
+            .token_usage
+            .as_ref()
+            .and_then(|usage| usage.lifetime_tokens),
+        Some(42)
+    );
+    mock_server.verify().await;
+    process.kill().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn account_list_transient_refresh_preserves_prior_usage() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    create_config_toml(
+        codex_home.path(),
+        CreateConfigTomlParams {
+            base_url: Some(mock_server.uri()),
+            chatgpt_base_url: Some(mock_server.uri()),
+            ..Default::default()
+        },
+    )?;
+    seed_managed_accounts(
+        codex_home.path(),
+        &[("preserved@example.com", WORKSPACE_ID_ALLOWED)],
+    )
+    .await?;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(managed_rate_response(25, 3600)))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/profiles/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(managed_token_profile(25)))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let request_id = mcp
+        .send_list_accounts_request(json!({
+            "refreshTokens": false,
+            "refreshUsage": true
+        }))
+        .await?;
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/usage/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountUsageUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.managed_account_id, "email:preserved@example.com");
+    assert!(
+        !payload.usage.rate_limits.is_empty(),
+        "the row-revision update must carry refreshed rate limits with usage"
+    );
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let first: ListAccountsResponse = to_response(response)?;
+    let known_usage = first.accounts[0].usage.clone();
+    assert_eq!(known_usage.state, ManagedChatgptAccountUsageState::Fresh);
+
+    mock_server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/usage"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/codex/profiles/me"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let request_id = mcp
+        .send_list_accounts_request(json!({
+            "refreshTokens": false,
+            "refreshUsage": true
+        }))
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let second: ListAccountsResponse = to_response(response)?;
+    assert_eq!(second.accounts.len(), 1);
+    assert_eq!(
+        second.accounts[0].usage.rate_limits,
+        known_usage.rate_limits
+    );
+    assert_eq!(
+        second.accounts[0].usage.token_usage,
+        known_usage.token_usage
+    );
+    assert_eq!(
+        second.accounts[0].usage.state,
+        ManagedChatgptAccountUsageState::Unavailable
+    );
     Ok(())
 }
 
@@ -1796,6 +2935,10 @@ async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()>
     assert_eq!(payload.login_id, Some(login_id));
     assert_eq!(payload.success, true);
     assert_eq!(payload.error, None);
+    assert_eq!(
+        payload.managed_account_id.as_deref(),
+        Some("email:device@example.com")
+    );
 
     let note = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -1808,6 +2951,22 @@ async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()>
     };
     assert_eq!(payload.auth_mode, Some(AuthMode::Chatgpt));
     assert_eq!(payload.plan_type, Some(AccountPlanType::Pro));
+
+    let note = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("account/pool/updated"),
+    )
+    .await??;
+    let parsed: ServerNotification = note.try_into()?;
+    let ServerNotification::AccountPoolUpdated(payload) = parsed else {
+        bail!("unexpected notification: {parsed:?}");
+    };
+    assert_eq!(payload.accounts.len(), 1);
+    assert_eq!(
+        payload.accounts[0].managed_account_id,
+        "email:device@example.com"
+    );
+    assert!(payload.pool_revision > 0);
     assert!(
         codex_home.path().join("auth.json").exists(),
         "auth.json should be created when device code login succeeds"
@@ -2192,6 +3351,59 @@ async fn set_auth_token_cancels_active_chatgpt_login() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(login_port)]
+async fn targeted_logout_does_not_cancel_an_unrelated_active_login() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let login_request_id = mcp.send_login_account_chatgpt_request().await?;
+    let login_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(login_request_id)),
+    )
+    .await??;
+    let login: LoginAccountResponse = to_response(login_resp)?;
+    let LoginAccountResponse::Chatgpt { login_id, .. } = login else {
+        bail!("unexpected login response: {login:?}");
+    };
+
+    let logout_id = mcp
+        .send_logout_account_request_with_params(json!({
+            "accountId": "email:other@example.com",
+            "all": false
+        }))
+        .await?;
+    let logout_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(logout_id)),
+    )
+    .await??;
+    let logout: LogoutAccountResponse = to_response(logout_resp)?;
+    assert!(logout.removed_account_ids.is_empty());
+
+    let cancel_id = mcp
+        .send_cancel_login_account_request(CancelLoginAccountParams {
+            login_id: login_id.clone(),
+        })
+        .await?;
+    let cancel_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(cancel_id)),
+    )
+    .await??;
+    let cancel: CancelLoginAccountResponse = to_response(cancel_resp)?;
+    assert_eq!(cancel.status, CancelLoginAccountStatus::Canceled);
+    Ok(())
+}
+
+#[tokio::test]
 // Serialize tests that launch the login server since it binds to a fixed port.
 #[serial(login_port)]
 async fn login_account_chatgpt_includes_forced_workspace_query_param() -> Result<()> {
@@ -2316,8 +3528,58 @@ async fn get_account_with_api_key() -> Result<()> {
     let req_id = mcp
         .send_login_account_api_key_request("sk-test-key")
         .await?;
-    let _login_ok: LoginAccountResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(req_id)).await??;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(req_id)),
+    )
+    .await??;
+    let _login_ok = to_response::<LoginAccountResponse>(resp)?;
+    let mut login_completed = false;
+    let mut account_updated = false;
+    for _ in 0..2 {
+        let message = timeout(DEFAULT_READ_TIMEOUT, mcp.read_stream_message()).await??;
+        let JSONRPCMessage::Notification(notification) = message else {
+            bail!("expected API key login notification, got {message:?}");
+        };
+        match notification.method.as_str() {
+            "account/login/completed" => login_completed = true,
+            "account/updated" => account_updated = true,
+            method => bail!("unexpected notification after API key login: {method}"),
+        }
+    }
+    assert!(login_completed);
+    assert!(account_updated);
+    assert!(
+        timeout(Duration::from_millis(250), mcp.read_stream_message())
+            .await
+            .is_err(),
+        "API key login must not publish a managed account pool notification"
+    );
+
+    let list_id = mcp
+        .send_list_accounts_request(json!({
+            "threadId": "api-key-thread",
+            "model": "mock-model",
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let list_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+    )
+    .await??;
+    let list: ListAccountsResponse = to_response(list_resp)?;
+    assert!(list.accounts.is_empty());
+    assert_eq!(list.pool_revision, 0);
+    assert_eq!(list.selected_account_id, None);
+    assert_eq!(list.selection_revision, None);
+    assert!(
+        timeout(Duration::from_millis(250), mcp.read_stream_message())
+            .await
+            .is_err(),
+        "scoped account/list in API key mode must not publish a selection notification"
+    );
 
     let params = GetAccountParams {
         refresh_token: false,
@@ -2332,6 +3594,78 @@ async fn get_account_with_api_key() -> Result<()> {
         requires_openai_auth: true,
     };
     assert_eq!(received, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn scoped_account_list_is_singular_in_personal_access_token_mode() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let mock_server = MockServer::start().await;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    save_auth(
+        codex_home.path(),
+        &AuthDotJson {
+            auth_mode: None,
+            openai_api_key: None,
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            managed_chatgpt: None,
+            personal_access_token: Some("at-app-server-test".to_string()),
+            bedrock_api_key: None,
+        },
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )?;
+    Mock::given(method("GET"))
+        .and(path("/v1/user-auth-credential/whoami"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "email": "pat@example.com",
+            "chatgpt_user_id": "user-123",
+            "chatgpt_account_id": WORKSPACE_ID_ALLOWED,
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_is_fedramp": false
+        })))
+        .expect(1..=2)
+        .mount(&mock_server)
+        .await;
+    let authapi_base_url = mock_server.uri();
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", None),
+            ("CODEX_AUTHAPI_BASE_URL", Some(authapi_base_url.as_str())),
+        ])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let list_id = mcp
+        .send_list_accounts_request(json!({
+            "threadId": "pat-thread",
+            "model": "mock-model",
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let list: ListAccountsResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+        )
+        .await??,
+    )?;
+    assert!(list.accounts.is_empty());
+    assert_eq!(list.pool_revision, 0);
+    assert_eq!(list.selection_revision, None);
+    assert!(
+        timeout(Duration::from_millis(250), mcp.read_stream_message())
+            .await
+            .is_err(),
+        "scoped account/list in PAT mode must not publish managed notifications"
+    );
+    mock_server.verify().await;
     Ok(())
 }
 
@@ -2547,6 +3881,31 @@ async fn get_account_with_managed_bedrock_provider() -> Result<()> {
             }),
             requires_openai_auth: false,
         }
+    );
+
+    let list_id = mcp
+        .send_list_accounts_request(json!({
+            "threadId": "bedrock-thread",
+            "model": "mock-model",
+            "refreshTokens": false,
+            "refreshUsage": false
+        }))
+        .await?;
+    let list: ListAccountsResponse = to_response(
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_response_message(RequestId::Integer(list_id)),
+        )
+        .await??,
+    )?;
+    assert!(list.accounts.is_empty());
+    assert_eq!(list.pool_revision, 0);
+    assert_eq!(list.selection_revision, None);
+    assert!(
+        timeout(Duration::from_millis(250), mcp.read_stream_message())
+            .await
+            .is_err(),
+        "scoped account/list in Bedrock mode must not publish managed notifications"
     );
     Ok(())
 }

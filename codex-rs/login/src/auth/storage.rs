@@ -1,5 +1,6 @@
 use chrono::DateTime;
 use chrono::Utc;
+use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -54,10 +55,160 @@ pub struct AuthDotJson {
     pub agent_identity: Option<AgentIdentityStorage>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_chatgpt: Option<ManagedChatgptStorage>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personal_access_token: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bedrock_api_key: Option<BedrockApiKeyAuth>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ManagedChatgptStorage {
+    pub version: u32,
+    #[serde(default)]
+    pub revision: u64,
+    /// Next durable per-account generation. This survives row deletion so a
+    /// remove/re-add cycle cannot make stale snapshots current again.
+    #[serde(default)]
+    pub next_account_revision: u64,
+    #[serde(default)]
+    pub accounts: Vec<ManagedChatgptAccount>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ManagedChatgptAccount {
+    pub identity_key: String,
+    #[serde(default)]
+    pub identity_aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chatgpt_account_id: Option<String>,
+    pub tokens: TokenData,
+    /// Monotonic row-state revision used to order account notifications.
+    pub revision: u64,
+    /// Changes only when credential or identity-bearing transport data changes.
+    #[serde(default)]
+    pub credential_revision: u64,
+    pub last_refresh: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_identity: Option<AgentIdentityStorage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mutation_lease: Option<ManagedChatgptMutationLease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tombstone: Option<ManagedChatgptTombstone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block: Option<ManagedChatgptBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_usage: Option<ManagedChatgptObservedUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_unavailable: Option<ManagedChatgptUnavailableObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_failure: Option<ManagedChatgptRefreshFailure>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedChatgptMutationLease {
+    pub operation_id: String,
+    pub kind: ManagedChatgptMutationKind,
+    pub expected_revision: u64,
+    pub expected_refresh_token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedChatgptMutationKind {
+    Refresh,
+    Remove,
+    Upsert,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedChatgptTombstone {
+    pub operation_id: String,
+    pub revision: u64,
+    pub refresh_token: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedChatgptBlockKind {
+    AuthInvalid,
+    Quota,
+    Workspace,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedChatgptBlock {
+    pub kind: ManagedChatgptBlockKind,
+    pub blocked_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<DateTime<Utc>>,
+    pub credential_revision: u64,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedChatgptLimitKind {
+    Primary,
+    Secondary,
+    Additional,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ManagedChatgptRateWindow {
+    pub limit_id: String,
+    pub kind: ManagedChatgptLimitKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_duration_mins: Option<i64>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedChatgptUnavailableObservation {
+    pub observed_at: DateTime<Utc>,
+    pub reason: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedChatgptRefreshFailure {
+    pub observed_at: DateTime<Utc>,
+    pub permanent: bool,
+    /// Stable, secret-free classification suitable for persistence and UI mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    /// Identifies the refresh lease that produced this failure. Older documents
+    /// omit it; new transitions use it to make cancellation idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct ManagedChatgptTokenUsageSummary {
+    pub lifetime_tokens: Option<i64>,
+    pub peak_daily_tokens: Option<i64>,
+    pub longest_running_turn_sec: Option<i64>,
+    pub current_streak_days: Option<i64>,
+    pub longest_streak_days: Option<i64>,
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+pub struct ManagedChatgptObservedUsage {
+    pub observed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub rate_windows: Vec<ManagedChatgptRateWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<ManagedChatgptUnavailableObservation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<ManagedChatgptTokenUsageSummary>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
@@ -160,10 +311,137 @@ pub(super) fn delete_file_if_exists(codex_home: &Path) -> std::io::Result<bool> 
     }
 }
 
+pub(super) enum AuthStorageMutation {
+    Save(AuthDotJson),
+    /// Persists coordination metadata without publishing another pool generation.
+    /// Callers must not change credentials or begin a new public state transition.
+    SaveInternalState(AuthDotJson),
+    Keep(Option<AuthDotJson>),
+    Delete,
+}
+
+fn prepare_managed_save(
+    auth: &mut AuthDotJson,
+    previous_pool_revision: u64,
+    previous_next_account_revision: u64,
+) {
+    let Some(pool) = auth.managed_chatgpt.as_mut() else {
+        return;
+    };
+    pool.revision = pool.revision.max(previous_pool_revision.saturating_add(1));
+    let row_floor = pool
+        .accounts
+        .iter()
+        .map(|row| row.revision.max(row.credential_revision))
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1);
+    pool.next_account_revision = pool
+        .next_account_revision
+        .max(previous_next_account_revision)
+        .max(row_floor)
+        .max(1);
+    if auth.auth_mode == Some(AuthMode::Chatgpt) {
+        auth.openai_api_key = None;
+        auth.tokens = None;
+        auth.last_refresh = None;
+        auth.agent_identity = None;
+        auth.personal_access_token = None;
+        auth.bedrock_api_key = None;
+    }
+}
+
 pub(super) trait AuthStorageBackend: Debug + Send + Sync {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>>;
     fn save(&self, auth: &AuthDotJson) -> std::io::Result<()>;
     fn delete(&self) -> std::io::Result<bool>;
+    fn codex_home(&self) -> &Path;
+    fn delete_locked(&self) -> std::io::Result<bool> {
+        with_codex_home_lock(self.codex_home(), || self.delete())
+    }
+
+    fn mutate(
+        &self,
+        action: &mut dyn FnMut(Option<AuthDotJson>) -> std::io::Result<AuthStorageMutation>,
+    ) -> std::io::Result<Option<AuthDotJson>> {
+        with_codex_home_lock(self.codex_home(), || {
+            let current = self.load()?;
+            let previous_pool_revision = current
+                .as_ref()
+                .and_then(|auth| auth.managed_chatgpt.as_ref())
+                .map(|pool| pool.revision)
+                .unwrap_or(0);
+            let previous_next_account_revision = current
+                .as_ref()
+                .and_then(|auth| auth.managed_chatgpt.as_ref())
+                .map(|pool| pool.next_account_revision)
+                .unwrap_or(0);
+            match action(current)? {
+                AuthStorageMutation::Save(mut auth) => {
+                    prepare_managed_save(
+                        &mut auth,
+                        previous_pool_revision,
+                        previous_next_account_revision,
+                    );
+                    self.save(&auth)?;
+                    Ok(Some(auth))
+                }
+                AuthStorageMutation::SaveInternalState(auth) => {
+                    self.save(&auth)?;
+                    Ok(Some(auth))
+                }
+                AuthStorageMutation::Keep(auth) => Ok(auth),
+                AuthStorageMutation::Delete => {
+                    self.delete()?;
+                    Ok(None)
+                }
+            }
+        })
+    }
+}
+
+fn with_codex_home_lock<T>(
+    codex_home: &Path,
+    action: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    std::fs::create_dir_all(codex_home)?;
+    let lock_path = codex_home.join(".auth.json.lock");
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(lock_path)?;
+    lock_file.lock()?;
+    let result = action();
+    let unlock_result = lock_file.unlock();
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(err), _) | (Ok(_), Err(err)) => Err(err),
+    }
+}
+
+fn save_file_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("auth file has no parent directory"))?;
+    std::fs::create_dir_all(parent)?;
+    let random: u64 = rand::rng().random();
+    let temp_path = parent.join(format!(".auth.json.{random:016x}.tmp"));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut temp_file = options.open(&temp_path)?;
+    let write_result = (|| {
+        temp_file.write_all(contents)?;
+        temp_file.sync_all()?;
+        std::fs::rename(&temp_path, path)?;
+        File::open(parent)?.sync_all()
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    write_result
 }
 
 #[derive(Clone, Debug)]
@@ -199,23 +477,14 @@ impl AuthStorageBackend for FileAuthStorage {
         Ok(Some(auth_dot_json))
     }
 
+    fn codex_home(&self) -> &Path {
+        &self.codex_home
+    }
+
     fn save(&self, auth_dot_json: &AuthDotJson) -> std::io::Result<()> {
         let auth_file = get_auth_file(&self.codex_home);
-
-        if let Some(parent) = auth_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json_data = serde_json::to_string_pretty(auth_dot_json)?;
-        let mut options = OpenOptions::new();
-        options.truncate(true).write(true).create(true);
-        #[cfg(unix)]
-        {
-            options.mode(0o600);
-        }
-        let mut file = options.open(auth_file)?;
-        file.write_all(json_data.as_bytes())?;
-        file.flush()?;
-        Ok(())
+        let json_data = serde_json::to_vec_pretty(auth_dot_json)?;
+        save_file_atomically(&auth_file, &json_data)
     }
 
     fn delete(&self) -> std::io::Result<bool> {
@@ -299,22 +568,28 @@ impl AuthStorageBackend for DirectKeyringAuthStorage {
         // Simpler error mapping per style: prefer method reference over closure
         let serialized = serde_json::to_string(auth).map_err(std::io::Error::other)?;
         self.save_to_keyring(&key, &serialized)?;
-        if let Err(err) = delete_file_if_exists(&self.codex_home) {
-            warn!("failed to remove CLI auth fallback file: {err}");
-        }
+        delete_file_if_exists(&self.codex_home)?;
         Ok(())
+    }
+
+    fn codex_home(&self) -> &Path {
+        &self.codex_home
     }
 
     fn delete(&self) -> std::io::Result<bool> {
         let key = compute_store_key(&self.codex_home)?;
-        let keyring_removed = self
+        let keyring_result = self
             .keyring_store
             .delete(KEYRING_SERVICE, &key)
             .map_err(|err| {
                 std::io::Error::other(format!("failed to delete auth from keyring: {err}"))
-            })?;
-        let file_removed = delete_file_if_exists(&self.codex_home)?;
-        Ok(keyring_removed || file_removed)
+            });
+        let file_result = delete_file_if_exists(&self.codex_home);
+        let removed = keyring_result.as_ref().copied().unwrap_or(false)
+            || file_result.as_ref().copied().unwrap_or(false);
+        keyring_result?;
+        file_result?;
+        Ok(removed)
     }
 }
 
@@ -380,24 +655,32 @@ impl AuthStorageBackend for SecretsKeyringAuthStorage {
                 warn!("{message}");
                 std::io::Error::other(message)
             })?;
-        if let Err(err) = delete_file_if_exists(&self.codex_home) {
-            warn!("failed to remove CLI auth fallback file: {err}");
-        }
+        delete_file_if_exists(&self.codex_home)?;
         Ok(())
     }
 
+    fn codex_home(&self) -> &Path {
+        &self.codex_home
+    }
+
     fn delete(&self) -> std::io::Result<bool> {
-        let keyring_removed = self
+        let secrets_result = self
             .secrets_manager
             .delete(&SecretScope::Global, &CODEX_AUTH_SECRET_NAME)
             .map_err(|err| {
                 std::io::Error::other(format!(
                     "failed to delete auth from encrypted auth storage: {err}"
                 ))
-            })?;
-        let file_removed = delete_file_if_exists(&self.codex_home)?;
-        let direct_removed = self.direct_storage.delete()?;
-        Ok(keyring_removed || file_removed || direct_removed)
+            });
+        let file_result = delete_file_if_exists(&self.codex_home);
+        let direct_result = self.direct_storage.delete();
+        let removed = secrets_result.as_ref().copied().unwrap_or(false)
+            || file_result.as_ref().copied().unwrap_or(false)
+            || direct_result.as_ref().copied().unwrap_or(false);
+        secrets_result?;
+        file_result?;
+        direct_result?;
+        Ok(removed)
     }
 }
 
@@ -422,18 +705,30 @@ impl AutoAuthStorage {
             file_storage: Arc::new(FileAuthStorage::new(codex_home)),
         }
     }
+
+    fn load_reconciled_under_lock(&self) -> std::io::Result<Option<AuthDotJson>> {
+        // A successful keyring save removes the fallback file. A present file
+        // is therefore newer file-mode/fallback state and must not be shadowed
+        // when an old keyring value becomes readable again.
+        if let Some(file_auth) = self.file_storage.load()? {
+            if let Err(err) = self.keyring_storage.save(&file_auth) {
+                warn!("failed to reconcile newer file auth into keyring: {err}");
+            }
+            return Ok(Some(file_auth));
+        }
+        match self.keyring_storage.load() {
+            Ok(auth) => Ok(auth),
+            Err(err) => {
+                warn!("failed to load CLI auth from keyring, falling back to file storage: {err}");
+                Ok(None)
+            }
+        }
+    }
 }
 
 impl AuthStorageBackend for AutoAuthStorage {
     fn load(&self) -> std::io::Result<Option<AuthDotJson>> {
-        match self.keyring_storage.load() {
-            Ok(Some(auth)) => Ok(Some(auth)),
-            Ok(None) => self.file_storage.load(),
-            Err(err) => {
-                warn!("failed to load CLI auth from keyring, falling back to file storage: {err}");
-                self.file_storage.load()
-            }
-        }
+        with_codex_home_lock(self.codex_home(), || self.load_reconciled_under_lock())
     }
 
     fn save(&self, auth: &AuthDotJson) -> std::io::Result<()> {
@@ -441,6 +736,11 @@ impl AuthStorageBackend for AutoAuthStorage {
             Ok(()) => Ok(()),
             Err(err) => {
                 warn!("failed to save auth to keyring, falling back to file storage: {err}");
+                self.keyring_storage.delete().map_err(|delete_err| {
+                    std::io::Error::other(format!(
+                        "failed to save auth to keyring ({err}) and could not remove the stale keyring credential before file fallback: {delete_err}"
+                    ))
+                })?;
                 self.file_storage.save(auth)
             }
         }
@@ -450,11 +750,88 @@ impl AuthStorageBackend for AutoAuthStorage {
         // Keyring storage will delete from disk as well
         self.keyring_storage.delete()
     }
+
+    fn codex_home(&self) -> &Path {
+        self.file_storage.codex_home()
+    }
+
+    fn mutate(
+        &self,
+        action: &mut dyn FnMut(Option<AuthDotJson>) -> std::io::Result<AuthStorageMutation>,
+    ) -> std::io::Result<Option<AuthDotJson>> {
+        with_codex_home_lock(self.codex_home(), || {
+            let current = self.load_reconciled_under_lock()?;
+            let previous_pool_revision = current
+                .as_ref()
+                .and_then(|auth| auth.managed_chatgpt.as_ref())
+                .map(|pool| pool.revision)
+                .unwrap_or(0);
+            let previous_next_account_revision = current
+                .as_ref()
+                .and_then(|auth| auth.managed_chatgpt.as_ref())
+                .map(|pool| pool.next_account_revision)
+                .unwrap_or(0);
+            match action(current)? {
+                AuthStorageMutation::Save(mut auth) => {
+                    prepare_managed_save(
+                        &mut auth,
+                        previous_pool_revision,
+                        previous_next_account_revision,
+                    );
+                    self.save(&auth)?;
+                    Ok(Some(auth))
+                }
+                AuthStorageMutation::SaveInternalState(auth) => {
+                    self.save(&auth)?;
+                    Ok(Some(auth))
+                }
+                AuthStorageMutation::Keep(auth) => Ok(auth),
+                AuthStorageMutation::Delete => {
+                    self.delete()?;
+                    Ok(None)
+                }
+            }
+        })
+    }
 }
 
 // A global in-memory store for mapping codex_home -> AuthDotJson.
 static EPHEMERAL_AUTH_STORE: Lazy<Mutex<HashMap<String, AuthDotJson>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+static EXTERNAL_CHATGPT_AUTH_STORE: Lazy<Mutex<HashMap<String, AuthDotJson>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+pub(super) fn load_external_chatgpt_auth(
+    codex_home: &Path,
+) -> std::io::Result<Option<AuthDotJson>> {
+    let key = compute_store_key(codex_home)?;
+    EXTERNAL_CHATGPT_AUTH_STORE
+        .lock()
+        .map_err(|_| std::io::Error::other("failed to lock external ChatGPT auth storage"))
+        .map(|store| store.get(&key).cloned())
+}
+
+pub(super) fn save_external_chatgpt_auth(
+    codex_home: &Path,
+    auth: &AuthDotJson,
+) -> std::io::Result<()> {
+    let key = compute_store_key(codex_home)?;
+    EXTERNAL_CHATGPT_AUTH_STORE
+        .lock()
+        .map_err(|_| std::io::Error::other("failed to lock external ChatGPT auth storage"))?
+        .insert(key, auth.clone());
+    Ok(())
+}
+
+pub(super) fn delete_external_chatgpt_auth(codex_home: &Path) -> std::io::Result<bool> {
+    let key = compute_store_key(codex_home)?;
+    Ok(EXTERNAL_CHATGPT_AUTH_STORE
+        .lock()
+        .map_err(|_| std::io::Error::other("failed to lock external ChatGPT auth storage"))?
+        .remove(&key)
+        .is_some())
+}
 
 #[derive(Clone, Debug)]
 struct EphemeralAuthStorage {
@@ -490,8 +867,54 @@ impl AuthStorageBackend for EphemeralAuthStorage {
         })
     }
 
+    fn codex_home(&self) -> &Path {
+        &self.codex_home
+    }
+
     fn delete(&self) -> std::io::Result<bool> {
         self.with_store(|store, key| Ok(store.remove(&key).is_some()))
+    }
+    fn delete_locked(&self) -> std::io::Result<bool> {
+        self.delete()
+    }
+
+    fn mutate(
+        &self,
+        action: &mut dyn FnMut(Option<AuthDotJson>) -> std::io::Result<AuthStorageMutation>,
+    ) -> std::io::Result<Option<AuthDotJson>> {
+        self.with_store(|store, key| {
+            let current = store.get(&key).cloned();
+            let previous_pool_revision = current
+                .as_ref()
+                .and_then(|auth| auth.managed_chatgpt.as_ref())
+                .map(|pool| pool.revision)
+                .unwrap_or(0);
+            let previous_next_account_revision = current
+                .as_ref()
+                .and_then(|auth| auth.managed_chatgpt.as_ref())
+                .map(|pool| pool.next_account_revision)
+                .unwrap_or(0);
+            match action(current)? {
+                AuthStorageMutation::Save(mut auth) => {
+                    prepare_managed_save(
+                        &mut auth,
+                        previous_pool_revision,
+                        previous_next_account_revision,
+                    );
+                    store.insert(key, auth.clone());
+                    Ok(Some(auth))
+                }
+                AuthStorageMutation::SaveInternalState(auth) => {
+                    store.insert(key, auth.clone());
+                    Ok(Some(auth))
+                }
+                AuthStorageMutation::Keep(auth) => Ok(auth),
+                AuthStorageMutation::Delete => {
+                    store.remove(&key);
+                    Ok(None)
+                }
+            }
+        })
     }
 }
 

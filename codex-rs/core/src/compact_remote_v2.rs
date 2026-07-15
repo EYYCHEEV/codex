@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::Prompt;
 use crate::ResponseStream;
+use crate::client::CurrentClientSetup;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
@@ -11,6 +12,7 @@ use crate::compact::InitialContextInjection;
 use crate::compact::compaction_status_from_result;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
+use crate::compact_remote::emit_managed_selection_updates;
 use crate::compact_remote::process_compacted_history;
 use crate::compact_remote::should_keep_compacted_history_item;
 use crate::hook_runtime::PostCompactHookOutcome;
@@ -19,15 +21,15 @@ use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CompactionTurnMetadata;
-use crate::responses_retry::ResponsesStreamRequest;
-use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::session::turn::AttemptOutcome;
 use crate::session::turn_context::TurnContext;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -333,61 +335,84 @@ async fn run_remote_compaction_request_v2(
     client_session: &mut ModelClientSession,
     prompt: &Prompt,
     responses_metadata: &CodexResponsesMetadata,
-) -> CodexResult<RemoteCompactionV2Output> {
-    let max_retries = turn_context
-        .provider
-        .info()
-        .stream_max_retries()
-        .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
-    let mut retries = 0;
-    loop {
-        let result = match client_session
-            .stream(
-                prompt,
-                &turn_context.model_info,
-                &turn_context.session_telemetry,
-                turn_context.reasoning_effort.clone(),
-                turn_context.reasoning_summary,
-                turn_context.config.service_tier.clone(),
-                responses_metadata,
-                &InferenceTraceContext::disabled(),
+    request_setup: CurrentClientSetup,
+) -> AttemptOutcome<RemoteCompactionV2Output> {
+    let service_tier = if request_setup
+        .effective_auth
+        .as_ref()
+        .is_some_and(|auth| auth.auth_mode() == AuthMode::ApiKey)
+    {
+        None
+    } else {
+        turn_context.config.service_tier.clone()
+    };
+    let stream_result = client_session
+        .stream_attempt_with_setup(
+            prompt,
+            &turn_context.model_info,
+            &turn_context.session_telemetry,
+            turn_context.reasoning_effort.clone(),
+            turn_context.reasoning_summary,
+            service_tier,
+            responses_metadata,
+            &InferenceTraceContext::disabled(),
+            request_setup,
+        )
+        .await;
+    emit_managed_selection_updates(sess, turn_context, client_session).await;
+    let managed_rate_limit_binding = client_session.managed_rate_limit_binding();
+    sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.clone())
+        .await;
+    let outcome = match stream_result {
+        Ok(stream) => {
+            collect_compaction_output_inner(
+                stream,
+                Some((sess, turn_context, managed_rate_limit_binding.clone())),
             )
             .await
-        {
-            Ok(stream) => collect_compaction_output(stream).await,
-            Err(err) => Err(err),
-        };
-
-        match result {
-            Ok(compaction_output) => return Ok(compaction_output),
-            Err(err) if !err.is_retryable() => return Err(err),
-            Err(err) => {
-                handle_retryable_response_stream_error(
-                    &mut retries,
-                    max_retries,
-                    err,
-                    client_session,
-                    sess,
+        }
+        Err(err) => AttemptOutcome::uncommitted(Err(err)),
+    };
+    match &outcome.result {
+        Err(error) => {
+            if let CodexErrorDetails::UsageLimitReached(details) = error.details()
+                && let Some(rate_limits) = details.rate_limits.as_ref()
+            {
+                sess.update_rate_limits(
                     turn_context,
-                    ResponsesStreamRequest::RemoteCompactionV2,
+                    (**rate_limits).clone(),
+                    managed_rate_limit_binding,
                 )
-                .await?;
+                .await;
             }
         }
+        Ok(_) => {}
     }
+    outcome
 }
 
-async fn collect_compaction_output(
+async fn collect_compaction_output_inner(
     mut stream: ResponseStream,
-) -> CodexResult<RemoteCompactionV2Output> {
+    rate_target: Option<(
+        &Session,
+        &TurnContext,
+        Option<crate::state::ManagedRateLimitBinding>,
+    )>,
+) -> AttemptOutcome<RemoteCompactionV2Output> {
     let mut output_item_count = 0usize;
     let mut compaction_count = 0usize;
     let mut compaction_output = None;
     let mut saw_completed = false;
     let mut completed_response_id = None;
+    let mut committed = false;
     let mut completed_token_usage = None;
     while let Some(event) = stream.next().await {
-        match event? {
+        let event = match event {
+            Ok(event) => event,
+            Err(err) => return AttemptOutcome::new(Err(err), committed),
+        };
+        committed |= crate::session::turn::response_event_commits_attempt(&event);
+        match event {
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
                 if let ResponseItem::Compaction { .. } = item {
@@ -397,6 +422,17 @@ async fn collect_compaction_output(
                     }
                 }
             }
+            ResponseEvent::RateLimits(rate_limits) => {
+                if let Some((sess, turn_context, managed_rate_limit_binding)) = &rate_target {
+                    sess.update_rate_limits(
+                        turn_context,
+                        rate_limits,
+                        managed_rate_limit_binding.clone(),
+                    )
+                    .await;
+                }
+            }
+
             ResponseEvent::Completed {
                 response_id,
                 token_usage,
@@ -412,15 +448,21 @@ async fn collect_compaction_output(
     }
 
     if !saw_completed {
-        return Err(CodexErr::Stream(
-            "remote compaction v2 stream closed before response.completed".to_string(),
-        ));
+        return AttemptOutcome::new(
+            Err(CodexErr::Stream(
+                "remote compaction v2 stream closed before response.completed".to_string(),
+            )),
+            committed,
+        );
     }
 
     if compaction_count != 1 {
-        return Err(CodexErr::Fatal(format!(
-            "remote compaction v2 expected exactly one compaction output item, got {compaction_count} from {output_item_count} output items"
-        )));
+        return AttemptOutcome::new(
+            Err(CodexErr::Fatal(format!(
+                "remote compaction v2 expected exactly one compaction output item, got {compaction_count} from {output_item_count} output items"
+            ))),
+            committed,
+        );
     }
 
     let Some(compaction_output) = compaction_output else {
@@ -429,11 +471,20 @@ async fn collect_compaction_output(
     let Some(response_id) = completed_response_id else {
         unreachable!("response id must exist after response.completed");
     };
-    Ok(RemoteCompactionV2Output {
-        compaction_output,
-        response_id,
-        token_usage: completed_token_usage,
-    })
+    AttemptOutcome::new(
+        Ok(RemoteCompactionV2Output {
+            compaction_output,
+            response_id,
+            token_usage: completed_token_usage,
+        }),
+        committed,
+    )
+}
+#[cfg(test)]
+async fn collect_compaction_output(
+    stream: ResponseStream,
+) -> AttemptOutcome<RemoteCompactionV2Output> {
+    collect_compaction_output_inner(stream, None).await
 }
 
 fn build_v2_compacted_history(
@@ -816,6 +867,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn buffered_output_failure_is_committed_and_not_retryable_by_owner() {
+        let compaction = ResponseItem::Compaction {
+            id: None,
+            encrypted_content: "buffered".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        };
+        let stream = response_stream(vec![
+            Ok(ResponseEvent::OutputItemDone(compaction)),
+            Err(CodexErr::Stream(
+                "retryable buffered failure".to_string(),
+            )),
+        ]);
+
+        let outcome = collect_compaction_output(stream).await;
+
+        assert!(outcome.committed);
+        let Err(err) = outcome.result else {
+            panic!("buffered stream failure should be returned");
+        };
+        assert!(err.is_retryable());
+    }
+
+    #[tokio::test]
     async fn collect_compaction_output_accepts_additional_output_items() {
         let compaction = ResponseItem::Compaction {
             id: None,
@@ -843,9 +917,9 @@ mod tests {
             }),
         ]);
 
-        let output = collect_compaction_output(stream)
-            .await
-            .expect("compaction should be collected");
+        let outcome = collect_compaction_output(stream).await;
+        assert!(outcome.committed);
+        let output = outcome.result.expect("compaction should be collected");
 
         assert_eq!(output.compaction_output, compaction);
         assert_eq!(output.response_id, "resp-compact");

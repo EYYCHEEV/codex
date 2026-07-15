@@ -118,6 +118,7 @@ async fn list_apps_returns_empty_with_api_key_auth() -> Result<()> {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: None,
         },
@@ -183,6 +184,7 @@ async fn list_apps_uses_external_chatgpt_auth() -> Result<()> {
         Duration::ZERO,
         /*workspace_plugins_enabled*/ true,
         &access_token,
+        "account-123",
     )
     .await?;
 
@@ -334,6 +336,12 @@ async fn list_apps_includes_plugin_apps_for_chatgpt_auth() -> Result<()> {
 
 #[tokio::test]
 async fn list_apps_uses_thread_feature_flag_when_thread_id_is_provided() -> Result<()> {
+    let access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("feature-snapshot@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id("account-123"),
+    )?;
     let connectors = vec![AppInfo {
         id: "beta".to_string(),
         name: "Beta".to_string(),
@@ -353,23 +361,31 @@ async fn list_apps_uses_thread_feature_flag_when_thread_id_is_provided() -> Resu
     }];
     let tools = vec![connector_tool("beta", "Beta App")?];
     let (server_url, server_handle) =
-        start_apps_server_with_delays(connectors, tools, Duration::ZERO, Duration::ZERO).await?;
+        start_apps_server_with_auth(connectors, tools, &access_token, "account-123").await?;
 
     let codex_home = TempDir::new()?;
     write_connectors_config(codex_home.path(), &server_url)?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized_with_timeout(DEFAULT_TIMEOUT)
         .await?;
+    let login_id = mcp
+        .send_chatgpt_auth_tokens_login_request(
+            access_token,
+            "account-123".to_string(),
+            Some("pro".to_string()),
+        )
+        .await?;
+    let login_response = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(login_id)),
+    )
+    .await??;
+    assert_eq!(
+        to_response::<LoginAccountResponse>(login_response)?,
+        LoginAccountResponse::ChatgptAuthTokens {}
+    );
 
     let start_request = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams::default())
@@ -1590,6 +1606,25 @@ impl ServerHandler for AppListMcpServer {
     }
 }
 
+pub(super) async fn start_apps_server_with_auth(
+    connectors: Vec<AppInfo>,
+    tools: Vec<Tool>,
+    expected_bearer: &str,
+    expected_account_id: &str,
+) -> Result<(String, JoinHandle<()>)> {
+    let (server_url, server_handle, _) = start_apps_server_with_delays_and_control_inner(
+        connectors,
+        tools,
+        Duration::ZERO,
+        Duration::ZERO,
+        true,
+        expected_bearer,
+        expected_account_id,
+    )
+    .await?;
+    Ok((server_url, server_handle))
+}
+
 pub(super) async fn start_apps_server_with_delays(
     connectors: Vec<AppInfo>,
     tools: Vec<Tool>,
@@ -1615,6 +1650,7 @@ async fn start_apps_server_with_workspace_plugins_enabled(
             Duration::ZERO,
             workspace_plugins_enabled,
             "chatgpt-token",
+            "account-123",
         )
         .await?;
     Ok((server_url, server_handle))
@@ -1633,6 +1669,7 @@ async fn start_apps_server_with_delays_and_control(
         tools_delay,
         /*workspace_plugins_enabled*/ true,
         "chatgpt-token",
+        "account-123",
     )
     .await
 }
@@ -1644,6 +1681,7 @@ async fn start_apps_server_with_delays_and_control_inner(
     tools_delay: Duration,
     workspace_plugins_enabled: bool,
     expected_bearer: &str,
+    expected_account_id: &str,
 ) -> Result<(String, JoinHandle<()>, AppsServerControl)> {
     let response = Arc::new(StdMutex::new(
         json!({ "apps": connectors, "next_token": null }),
@@ -1651,7 +1689,7 @@ async fn start_apps_server_with_delays_and_control_inner(
     let tools = Arc::new(StdMutex::new(tools));
     let state = AppsServerState {
         expected_bearer: format!("Bearer {expected_bearer}"),
-        expected_account_id: "account-123".to_string(),
+        expected_account_id: expected_account_id.to_string(),
         response: response.clone(),
         directory_delay,
         workspace_plugins_enabled,

@@ -20,25 +20,29 @@ use crate::test_support::PathBufExt;
 use crate::test_support::test_path_buf;
 use crate::token_usage::TokenUsage;
 use crate::token_usage::TokenUsageInfo;
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::write_chatgpt_auth;
-use app_test_support::write_models_cache;
 use chrono::Duration as ChronoDuration;
 use chrono::Local;
 use chrono::TimeZone;
 use chrono::Utc;
+use codex_app_server_protocol::AccountTokenUsageSummary;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::CreditsSnapshot;
+use codex_app_server_protocol::ListAccountsResponse;
+use codex_app_server_protocol::ManagedChatgptAccountBlock;
+use codex_app_server_protocol::ManagedChatgptAccountRefreshStatus;
+use codex_app_server_protocol::ManagedChatgptAccountUsage;
+use codex_app_server_protocol::ManagedChatgptAccountUsageState;
+use codex_app_server_protocol::ManagedChatgptAccountView;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RateLimitWindow;
 use codex_app_server_protocol::SpendControlLimitSnapshot;
 use codex_config::LoaderOverrides;
-use codex_config::types::AuthCredentialsStoreMode;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::test_support::construct_model_info_offline_for_tests;
 use codex_models_manager::test_support::get_model_offline_for_tests;
 use codex_protocol::ThreadId;
+use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::models::ActivePermissionProfile;
@@ -379,37 +383,14 @@ async fn status_snapshot_includes_reasoning_details() {
 #[tokio::test]
 async fn status_snapshot_shows_chatgpt_plan_without_email() {
     let temp_home = TempDir::new().expect("temp home");
-    write_models_cache(temp_home.path()).expect("write models cache");
     let mut config = test_config(&temp_home).await;
     config.model = Some("gpt-5.1-codex-max".to_string());
     config.model_provider_id = "openai".to_string();
-    config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
     set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
-
-    write_chatgpt_auth(
-        temp_home.path(),
-        ChatGptAuthFixture::new("access-chatgpt").plan_type("enterprise"),
-        AuthCredentialsStoreMode::File,
-    )
-    .expect("write email-less ChatGPT auth");
-    let mut app_server = crate::start_embedded_app_server_for_picker(&config)
-        .await
-        .expect("start embedded app server");
-    let bootstrap = app_server
-        .bootstrap(&config)
-        .await
-        .expect("bootstrap app server session");
-    app_server.shutdown().await.expect("shut down app server");
-    let account_display = bootstrap
-        .status_account_display
-        .expect("bootstrap should return ChatGPT account display");
-    assert_eq!(
-        account_display,
-        StatusAccountDisplay::ChatGpt {
-            email: None,
-            plan: Some("Enterprise".to_string()),
-        }
-    );
+    let account_display = StatusAccountDisplay::ChatGpt {
+        email: None,
+        plan: Some("Enterprise".to_string()),
+    };
     let usage = TokenUsage::default();
     let captured_at = chrono::Local
         .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
@@ -434,6 +415,134 @@ async fn status_snapshot_shows_chatgpt_plan_without_email() {
     );
     let sanitized =
         sanitize_directory(render_lines(&composite.display_lines(/*width*/ 80))).join("\n");
+    assert_snapshot!(sanitized);
+}
+
+#[tokio::test]
+async fn status_snapshot_lists_managed_accounts_with_truthful_usage_states() {
+    let temp_home = TempDir::new().expect("temp home");
+    let mut config = test_config(&temp_home).await;
+    config.model = Some("gpt-5.1-codex-max".to_string());
+    config.model_provider_id = "openai".to_string();
+    set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
+    let observed_at = 1_704_164_645;
+    let quota = |used_percent, duration, resets_at| RateLimitWindow {
+        used_percent,
+        window_duration_mins: Some(duration),
+        resets_at: Some(resets_at),
+    };
+    let accounts = crate::status::ManagedAccountsState::from_response(ListAccountsResponse {
+        accounts: vec![
+            ManagedChatgptAccountView {
+                managed_account_id: "email:alice@example.com".to_string(),
+                chatgpt_account_id: Some("workspace-alice".to_string()),
+                email: Some("alice@example.com".to_string()),
+                plan_type: PlanType::Plus,
+                eligible: true,
+                eligibility_reason: None,
+                account_revision: 3,
+                credential_revision: 1,
+                block: None,
+                refresh_status: ManagedChatgptAccountRefreshStatus::Healthy,
+                usage: ManagedChatgptAccountUsage {
+                    state: ManagedChatgptAccountUsageState::Fresh,
+                    rate_limits: vec![
+                        RateLimitSnapshot {
+                            limit_id: Some("codex".to_string()),
+                            limit_name: Some("Codex".to_string()),
+                            primary: Some(quota(25, 300, observed_at + 3_600)),
+                            secondary: Some(quota(60, 10_080, observed_at + 86_400)),
+                            credits: None,
+                            individual_limit: None,
+                            plan_type: Some(PlanType::Plus),
+                            rate_limit_reached_type: None,
+                        },
+                        RateLimitSnapshot {
+                            limit_id: Some("other".to_string()),
+                            limit_name: Some("Other limit".to_string()),
+                            primary: Some(quota(50, 60, observed_at + 1_800)),
+                            secondary: None,
+                            credits: None,
+                            individual_limit: None,
+                            plan_type: Some(PlanType::Plus),
+                            rate_limit_reached_type: None,
+                        },
+                    ],
+                    token_usage: Some(AccountTokenUsageSummary {
+                        lifetime_tokens: Some(1_250_000),
+                        peak_daily_tokens: Some(84_000),
+                        longest_running_turn_sec: Some(91),
+                        current_streak_days: Some(7),
+                        longest_streak_days: Some(12),
+                    }),
+                    observed_at: Some(observed_at),
+                    unavailable_reason: None,
+                    unavailable_observed_at: None,
+                },
+            },
+            ManagedChatgptAccountView {
+                managed_account_id: "legacy:stable-bob".to_string(),
+                chatgpt_account_id: None,
+                email: None,
+                plan_type: PlanType::Free,
+                eligible: false,
+                eligibility_reason: Some("workspace policy".to_string()),
+                account_revision: 1,
+                credential_revision: 1,
+                refresh_status: ManagedChatgptAccountRefreshStatus::ReloginRequired {
+                    reason_code: "refreshTokenRejected".to_string(),
+                    observed_at,
+                },
+                block: Some(ManagedChatgptAccountBlock {
+                    reason: "quota cooldown".to_string(),
+                    blocked_until: Some(observed_at + 600),
+                }),
+                usage: ManagedChatgptAccountUsage {
+                    state: ManagedChatgptAccountUsageState::Unavailable,
+                    rate_limits: Vec::new(),
+                    token_usage: None,
+                    observed_at: None,
+                    unavailable_reason: Some("initial usage fetch failed".to_string()),
+                    unavailable_observed_at: Some(observed_at),
+                },
+            },
+        ],
+        selected_account_id: Some("email:alice@example.com".to_string()),
+        selection_revision: Some(4),
+        pool_revision: 7,
+    });
+    let account_display = StatusAccountDisplay::ManagedChatGpt(accounts);
+    let captured_at = Local
+        .with_ymd_and_hms(2024, 1, 2, 3, 4, 5)
+        .single()
+        .expect("timestamp");
+    let model_slug = get_model_offline_for_tests(config.model.as_deref());
+    let composite = new_status_output(
+        &config,
+        Some(&account_display),
+        /*token_info*/ None,
+        &TokenUsage::default(),
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        /*rate_limits*/ None,
+        None,
+        captured_at,
+        &model_slug,
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+    );
+
+    let sanitized =
+        sanitize_directory(render_lines(&composite.display_lines(/*width*/ 110))).join("\n");
+    assert!(sanitized.contains("Quota: unavailable; no retained quota windows"));
+    assert!(sanitized.contains("Usage: unavailable · initial usage fetch failed"));
+    assert!(sanitized.contains("Credential: sign-in required"));
+    assert!(sanitized.contains("Eligibility: ineligible (sign-in required)"));
+    assert!(sanitized.contains("primary 5h: 75% left"));
+    assert!(sanitized.contains("secondary weekly: 40% left"));
+    assert!(sanitized.contains("Other limit (fresh) — primary 1h: 50% left"));
+    assert!(!sanitized.contains("exhausted"));
     assert_snapshot!(sanitized);
 }
 

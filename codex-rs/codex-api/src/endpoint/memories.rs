@@ -1,16 +1,25 @@
+use crate::api_bridge::parse_rate_limit_headers;
 use crate::auth::SharedAuthProvider;
 use crate::common::MemorySummarizeInput;
 use crate::common::MemorySummarizeOutput;
 use crate::endpoint::session::EndpointSession;
 use crate::error::ApiError;
 use crate::provider::Provider;
+use crate::rate_limits::has_rate_limit_data;
 use codex_client::HttpTransport;
 use codex_client::RequestTelemetry;
+use codex_protocol::protocol::RateLimitSnapshot;
 use http::HeaderMap;
 use http::Method;
 use serde::Deserialize;
 use serde_json::to_value;
 use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApiMemoryResponse {
+    pub output: Vec<MemorySummarizeOutput>,
+    pub rate_limits: Option<RateLimitSnapshot>,
+}
 
 pub struct MemoriesClient<T: HttpTransport> {
     session: EndpointSession<T>,
@@ -37,21 +46,25 @@ impl<T: HttpTransport> MemoriesClient<T> {
         &self,
         body: serde_json::Value,
         extra_headers: HeaderMap,
-    ) -> Result<Vec<MemorySummarizeOutput>, ApiError> {
+    ) -> Result<ApiMemoryResponse, ApiError> {
         let resp = self
             .session
             .execute(Method::POST, Self::path(), extra_headers, Some(body))
             .await?;
+        let rate_limits = parse_rate_limit_headers(&resp.headers).filter(has_rate_limit_data);
         let parsed: SummarizeResponse =
             serde_json::from_slice(&resp.body).map_err(|e| ApiError::Stream(e.to_string()))?;
-        Ok(parsed.output)
+        Ok(ApiMemoryResponse {
+            output: parsed.output,
+            rate_limits,
+        })
     }
 
     pub async fn summarize_input(
         &self,
         input: &MemorySummarizeInput,
         extra_headers: HeaderMap,
-    ) -> Result<Vec<MemorySummarizeOutput>, ApiError> {
+    ) -> Result<ApiMemoryResponse, ApiError> {
         let body = to_value(input).map_err(|e| {
             ApiError::Stream(format!("failed to encode memory summarize input: {e}"))
         })?;
@@ -76,6 +89,7 @@ mod tests {
     use codex_client::Response;
     use codex_client::StreamResponse;
     use codex_client::TransportError;
+    use codex_protocol::error::CodexErr;
     use http::HeaderMap;
     use http::Method;
     use http::StatusCode;
@@ -109,13 +123,19 @@ mod tests {
     struct CapturingTransport {
         last_request: Arc<Mutex<Option<Request>>>,
         response_body: Arc<Vec<u8>>,
+        response_headers: Arc<HeaderMap>,
     }
 
     impl CapturingTransport {
         fn new(response_body: Vec<u8>) -> Self {
+            Self::with_headers(response_body, HeaderMap::new())
+        }
+
+        fn with_headers(response_body: Vec<u8>, response_headers: HeaderMap) -> Self {
             Self {
                 last_request: Arc::new(Mutex::new(None)),
                 response_body: Arc::new(response_body),
+                response_headers: Arc::new(response_headers),
             }
         }
     }
@@ -125,8 +145,29 @@ mod tests {
             *self.last_request.lock().expect("lock request store") = Some(req);
             Ok(Response {
                 status: StatusCode::OK,
-                headers: HeaderMap::new(),
+                headers: self.response_headers.as_ref().clone(),
                 body: self.response_body.as_ref().clone().into(),
+            })
+        }
+
+        async fn stream(&self, _req: Request) -> Result<StreamResponse, TransportError> {
+            Err(TransportError::Build("stream should not run".to_string()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct ErrorTransport {
+        headers: HeaderMap,
+        body: String,
+    }
+
+    impl HttpTransport for ErrorTransport {
+        async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
+            Err(TransportError::Http {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                url: Some("https://example.com/api/codex/memories/trace_summarize".to_string()),
+                headers: Some(self.headers.clone()),
+                body: Some(self.body.clone()),
             })
         }
 
@@ -191,13 +232,14 @@ mod tests {
             reasoning: None,
         };
 
-        let output = client
+        let response = client
             .summarize_input(&input, HeaderMap::new())
             .await
             .expect("summarize input request should succeed");
-        assert_eq!(output.len(), 1);
-        assert_eq!(output[0].raw_memory, "raw summary");
-        assert_eq!(output[0].memory_summary, "memory summary");
+        assert_eq!(response.output.len(), 1);
+        assert_eq!(response.output[0].raw_memory, "raw summary");
+        assert_eq!(response.output[0].memory_summary, "memory summary");
+        assert_eq!(response.rate_limits, None);
 
         let request = transport
             .last_request
@@ -220,6 +262,86 @@ mod tests {
         assert_eq!(
             body["traces"][0]["metadata"]["source_path"],
             "/tmp/trace.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn summarize_returns_active_rate_limit_from_success_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-active-limit",
+            http::HeaderValue::from_static("codex-other"),
+        );
+        headers.insert(
+            "x-codex-other-primary-used-percent",
+            http::HeaderValue::from_static("42.5"),
+        );
+        headers.insert(
+            "x-codex-other-primary-window-minutes",
+            http::HeaderValue::from_static("300"),
+        );
+        headers.insert(
+            "x-codex-other-primary-reset-at",
+            http::HeaderValue::from_static("1770000000"),
+        );
+        let transport = CapturingTransport::with_headers(br#"{"output":[]}"#.to_vec(), headers);
+        let response = MemoriesClient::new(
+            transport,
+            provider("https://example.com/api/codex"),
+            Arc::new(DummyAuth),
+        )
+        .summarize(json!({"model": "gpt-test", "traces": []}), HeaderMap::new())
+        .await
+        .expect("summarize request should succeed");
+
+        assert!(response.output.is_empty());
+        let rate_limits = response.rate_limits.expect("rate limit snapshot");
+        assert_eq!(rate_limits.limit_id.as_deref(), Some("codex_other"));
+        let primary = rate_limits.primary.expect("primary window");
+        assert_eq!(primary.used_percent, 42.5);
+        assert_eq!(primary.window_minutes, Some(300));
+        assert_eq!(primary.resets_at, Some(1770000000));
+    }
+
+    #[tokio::test]
+    async fn summarize_preserves_usage_limit_rate_snapshot() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-active-limit",
+            http::HeaderValue::from_static("codex-other"),
+        );
+        headers.insert(
+            "x-codex-other-primary-used-percent",
+            http::HeaderValue::from_static("100"),
+        );
+        headers.insert(
+            "x-codex-other-primary-window-minutes",
+            http::HeaderValue::from_static("300"),
+        );
+        let body = json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "plan_type": "pro"
+            }
+        })
+        .to_string();
+        let error = MemoriesClient::new(
+            ErrorTransport { headers, body },
+            provider("https://example.com/api/codex"),
+            Arc::new(DummyAuth),
+        )
+        .summarize(json!({"model": "gpt-test", "traces": []}), HeaderMap::new())
+        .await
+        .expect_err("summarize request should fail");
+
+        let CodexErr::UsageLimitReached(usage_limit) = crate::map_api_error(error) else {
+            panic!("expected usage limit error");
+        };
+        let rate_limits = usage_limit.rate_limits.expect("rate limit snapshot");
+        assert_eq!(rate_limits.limit_id.as_deref(), Some("codex_other"));
+        assert_eq!(
+            rate_limits.primary.expect("primary window").used_percent,
+            100.0
         );
     }
 }

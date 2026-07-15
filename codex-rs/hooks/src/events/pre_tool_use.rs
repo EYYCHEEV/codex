@@ -199,12 +199,15 @@ pub(crate) async fn run(
         .await,
         &request.tool_use_id,
     );
+    let additional_contexts = output_spiller
+        .maybe_spill_additional_contexts(session_id, outcome.additional_contexts)
+        .await;
 
     PreToolUseOutcome {
         hook_events: outcome.hook_events,
         should_block: outcome.should_block,
         block_reason: outcome.block_reason,
-        additional_contexts: outcome.additional_contexts,
+        additional_contexts,
         updated_input: outcome.updated_input,
     }
 }
@@ -213,7 +216,7 @@ struct CollectedOutcome {
     hook_events: Vec<HookCompletedEvent>,
     should_block: bool,
     block_reason: Option<String>,
-    additional_contexts: Vec<String>,
+    additional_contexts: Vec<AdditionalContext>,
     updated_input: Option<Value>,
 }
 
@@ -230,9 +233,6 @@ fn collect_outcome(
             .iter()
             .map(|result| result.data.additional_contexts_for_model.as_slice()),
     );
-    let additional_contexts = output_spiller
-        .maybe_spill_additional_contexts(session_id, additional_contexts)
-        .await;
     let updated_input = if should_block {
         None
     } else {
@@ -648,7 +648,7 @@ fn build_completed(
     entries: Vec<HookOutputEntry>,
     should_block: bool,
     block_reason: Option<String>,
-    additional_contexts_for_model: Vec<String>,
+    additional_contexts_for_model: Vec<AdditionalContext>,
     updated_input: Option<Value>,
 ) -> dispatcher::ParsedHandler<PreToolUseHandlerData> {
     let completed = HookCompletedEvent {

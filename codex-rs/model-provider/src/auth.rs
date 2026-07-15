@@ -10,6 +10,8 @@ use codex_api::SharedAuthProvider;
 use codex_login::AuthHeaders;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptAuthSnapshot;
+use codex_login::TransportAuthBinding;
 use codex_login::auth::AgentIdentityAuth;
 use codex_login::auth::AgentIdentityAuthError;
 use codex_login::auth::AgentIdentityAuthPolicy;
@@ -29,6 +31,9 @@ pub struct ProviderAuthScope {
     pub agent_identity_policy: AgentIdentityAuthPolicy,
     pub session_source: SessionSource,
     pub agent_identity_session_fallback: AgentIdentitySessionFallback,
+    pub thread_id: Option<String>,
+    pub session_id: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -50,13 +55,15 @@ impl AgentIdentitySessionFallback {
 #[derive(Clone)]
 pub struct ResolvedProviderAuth {
     pub auth: SharedAuthProvider,
+    pub effective_auth: Option<CodexAuth>,
     pub agent_identity_telemetry: Option<AgentIdentityTelemetry>,
 }
 
 impl ResolvedProviderAuth {
-    pub(crate) fn new(auth: SharedAuthProvider) -> Self {
+    pub(crate) fn new(auth: SharedAuthProvider, effective_auth: Option<CodexAuth>) -> Self {
         Self {
             auth,
+            effective_auth,
             agent_identity_telemetry: None,
         }
     }
@@ -64,7 +71,8 @@ impl ResolvedProviderAuth {
     fn for_agent_identity(auth: AgentIdentityAuth) -> Self {
         let agent_identity_telemetry = agent_identity_telemetry(&auth);
         Self {
-            auth: Arc::new(AgentIdentityAuthProvider { auth }),
+            auth: Arc::new(AgentIdentityAuthProvider { auth: auth.clone() }),
+            effective_auth: Some(CodexAuth::AgentIdentity(auth)),
             agent_identity_telemetry: Some(agent_identity_telemetry),
         }
     }
@@ -123,9 +131,9 @@ impl AuthProvider for HeaderAuthProvider {
 
 struct AuthManagerAuthProvider {
     auth_manager: Arc<AuthManager>,
-    // Startup auth is only the account-scoped identity anchor. Request
-    // headers always come from the current AuthManager snapshot below.
     expected_auth: CodexAuth,
+    expected_binding: TransportAuthBinding,
+    expected_credential_revision: Option<u64>,
 }
 
 impl AuthProvider for AuthManagerAuthProvider {
@@ -137,14 +145,34 @@ impl AuthProvider for AuthManagerAuthProvider {
         else {
             return;
         };
-        // The caller's account-scoped state was built for the expected
-        // identity. Follow token refreshes for that identity, but never cross
-        // an account or workspace boundary without rebuilding that state.
+        // Follow token refreshes only while every non-secret binding and revision
+        // still identifies the exact runtime snapshot that created this provider.
         if auth.get_account_id() != self.expected_auth.get_account_id()
             || auth.get_chatgpt_user_id() != self.expected_auth.get_chatgpt_user_id()
             || auth.is_workspace_account() != self.expected_auth.is_workspace_account()
+            || auth.get_account_id() != self.expected_binding.raw_account_id
+            || auth.is_fedramp_account() != self.expected_binding.fedramp
+            || auth.auth_mode() != self.expected_binding.auth_mode
         {
             return;
+        }
+        if let Some(expected_credential_revision) = self.expected_credential_revision {
+            let Ok(accounts) = self.auth_manager.managed_chatgpt_accounts() else {
+                return;
+            };
+            let Some(account) = accounts
+                .iter()
+                .find(|account| account.identity_key == self.expected_binding.identity_key)
+            else {
+                return;
+            };
+            if account.credential_revision != expected_credential_revision
+                || account.chatgpt_account_id != self.expected_binding.raw_account_id
+                || account.fedramp != self.expected_binding.fedramp
+                || self.expected_binding.route_generation != expected_credential_revision
+            {
+                return;
+            }
         }
         auth_provider_from_auth(&auth).add_auth_headers(headers);
     }
@@ -163,16 +191,20 @@ pub fn unauthenticated_auth_provider() -> SharedAuthProvider {
     Arc::new(UnauthenticatedAuthProvider)
 }
 
-/// Returns the provider-scoped auth manager when this provider uses command-backed auth.
+/// Returns the only auth manager that the configured provider is allowed to observe.
 ///
-/// Providers without custom auth continue using the caller-supplied base manager, when present.
+/// Command-backed auth owns its isolated manager. The caller-supplied manager is
+/// available only to the first-party OpenAI auth path; static bearer/env providers
+/// and providers that do not require OpenAI auth must not inherit managed recovery,
+/// attestation, or catalog auth from unrelated global state.
 pub(crate) fn auth_manager_for_provider(
     auth_manager: Option<Arc<AuthManager>>,
     provider: &ModelProviderInfo,
 ) -> Option<Arc<AuthManager>> {
     match provider.auth.clone() {
         Some(config) => Some(AuthManager::external_bearer_only(config)),
-        None => auth_manager,
+        None if crate::provider::provider_uses_first_party_auth_path(provider) => auth_manager,
+        None => None,
     }
 }
 
@@ -198,6 +230,7 @@ pub(crate) fn resolve_provider_auth(
 
 pub(crate) async fn resolve_provider_auth_for_scope(
     auth_manager: Option<Arc<AuthManager>>,
+    managed_snapshot: Option<&ManagedChatgptAuthSnapshot>,
     auth: Option<&CodexAuth>,
     provider: &ModelProviderInfo,
     scope: ProviderAuthScope,
@@ -206,7 +239,14 @@ pub(crate) async fn resolve_provider_auth_for_scope(
         agent_identity_policy,
         session_source,
         agent_identity_session_fallback,
+        thread_id: _,
+        session_id: _,
+        model: _,
     } = scope;
+    if let Some(bearer_auth) = bearer_auth_for_provider(provider)? {
+        return Ok(ResolvedProviderAuth::new(Arc::new(bearer_auth), None));
+    }
+
     if let Some(CodexAuth::AgentIdentity(agent_identity_auth)) = auth {
         return Ok(ResolvedProviderAuth::for_agent_identity(
             agent_identity_auth.clone(),
@@ -216,21 +256,33 @@ pub(crate) async fn resolve_provider_auth_for_scope(
     if !should_bootstrap_chatgpt_agent_identity(agent_identity_policy, auth)
         || agent_identity_session_fallback.is_engaged()
     {
-        return resolve_provider_auth(auth, provider).map(ResolvedProviderAuth::new);
+        return resolve_provider_auth(auth, provider)
+            .map(|resolved| ResolvedProviderAuth::new(resolved, auth.cloned()));
     }
 
     let Some(auth_manager) = auth_manager else {
-        return resolve_provider_auth(auth, provider).map(ResolvedProviderAuth::new);
+        return resolve_provider_auth(auth, provider)
+            .map(|resolved| ResolvedProviderAuth::new(resolved, auth.cloned()));
     };
 
-    match auth_manager
-        .agent_identity_auth(agent_identity_policy, session_source)
-        .await
-    {
+    let agent_identity_result = match managed_snapshot {
+        Some(snapshot) => {
+            auth_manager
+                .agent_identity_auth_for_snapshot(snapshot, agent_identity_policy, session_source)
+                .await
+        }
+        None => {
+            auth_manager
+                .agent_identity_auth(agent_identity_policy, session_source)
+                .await
+        }
+    };
+    match agent_identity_result {
         Ok(Some(agent_identity_auth)) => Ok(ResolvedProviderAuth::for_agent_identity(
             agent_identity_auth,
         )),
-        Ok(None) => resolve_provider_auth(auth, provider).map(ResolvedProviderAuth::new),
+        Ok(None) => resolve_provider_auth(auth, provider)
+            .map(|resolved| ResolvedProviderAuth::new(resolved, auth.cloned())),
         Err(err) => {
             if let Some(AgentIdentityAuthError::BootstrapUnavailable {
                 operation,
@@ -248,7 +300,8 @@ pub(crate) async fn resolve_provider_auth_for_scope(
                     newly_engaged,
                     "agent identity bootstrap unavailable; using ChatGPT bearer auth for this session"
                 );
-                resolve_provider_auth(auth, provider).map(ResolvedProviderAuth::new)
+                resolve_provider_auth(auth, provider)
+                    .map(|resolved| ResolvedProviderAuth::new(resolved, auth.cloned()))
             } else {
                 Err(err.into())
             }
@@ -305,10 +358,14 @@ pub fn auth_provider_from_auth(auth: &CodexAuth) -> SharedAuthProvider {
 pub fn auth_provider_from_auth_manager(
     auth_manager: Arc<AuthManager>,
     expected_auth: &CodexAuth,
+    expected_binding: TransportAuthBinding,
+    expected_credential_revision: Option<u64>,
 ) -> SharedAuthProvider {
     Arc::new(AuthManagerAuthProvider {
         auth_manager,
         expected_auth: expected_auth.clone(),
+        expected_binding,
+        expected_credential_revision,
     })
 }
 
@@ -370,6 +427,9 @@ mod tests {
             agent_identity_policy: policy,
             session_source: SessionSource::Cli,
             agent_identity_session_fallback: fallback,
+            thread_id: None,
+            session_id: None,
+            model: None,
         }
     }
 
@@ -507,7 +567,12 @@ mod tests {
         let expected_auth = auth_manager
             .auth_cached()
             .expect("initial auth should be cached");
-        let provider = auth_provider_from_auth_manager(Arc::clone(&auth_manager), &expected_auth);
+        let provider = auth_provider_from_auth_manager(
+            Arc::clone(&auth_manager),
+            &expected_auth,
+            crate::provider::transport_binding_for_auth(Some(&expected_auth)),
+            /*expected_credential_revision*/ None,
+        );
 
         assert_eq!(
             provider.to_auth_headers().get(AUTHORIZATION),
@@ -549,6 +614,7 @@ mod tests {
 
         let auth = resolve_provider_auth_for_scope(
             /*auth_manager*/ None,
+            /*managed_snapshot*/ None,
             Some(&auth),
             &provider,
             provider_auth_scope(
@@ -618,6 +684,7 @@ mod tests {
 
         let provider_auth = resolve_provider_auth_for_scope(
             Some(auth_manager),
+            None,
             Some(&auth),
             &provider,
             provider_auth_scope(AgentIdentityAuthPolicy::ChatGptAuth, fallback.clone()),
@@ -658,6 +725,7 @@ mod tests {
 
         resolve_provider_auth_for_scope(
             Some(Arc::clone(&auth_manager)),
+            None,
             Some(&auth),
             &provider,
             provider_auth_scope(AgentIdentityAuthPolicy::ChatGptAuth, fallback.clone()),
@@ -666,6 +734,7 @@ mod tests {
         .expect("first fallback should resolve bearer auth");
         resolve_provider_auth_for_scope(
             Some(auth_manager),
+            None,
             Some(&auth),
             &provider,
             provider_auth_scope(AgentIdentityAuthPolicy::ChatGptAuth, fallback),
@@ -693,6 +762,7 @@ mod tests {
 
         resolve_provider_auth_for_scope(
             Some(Arc::clone(&auth_manager)),
+            None,
             Some(&auth),
             &provider,
             provider_auth_scope(AgentIdentityAuthPolicy::ChatGptAuth, first_fallback.clone()),
@@ -701,6 +771,7 @@ mod tests {
         .expect("first session fallback should resolve bearer auth");
         resolve_provider_auth_for_scope(
             Some(auth_manager),
+            None,
             Some(&auth),
             &provider,
             provider_auth_scope(

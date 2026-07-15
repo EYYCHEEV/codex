@@ -2046,6 +2046,7 @@ mod tests {
             }),
             last_refresh: Some(Utc::now()),
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: None,
         }

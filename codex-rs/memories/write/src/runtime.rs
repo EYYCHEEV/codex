@@ -1,14 +1,17 @@
+use codex_core::CodexErr;
 use codex_core::CodexThread;
 use codex_core::ModelClient;
 use codex_core::NewThread;
 use codex_core::Prompt;
 use codex_core::ResponseEvent;
+use codex_core::ResponseStream;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::content_items_to_text;
 use codex_core::detached_memory_responses_metadata;
 use codex_core::resolve_installation_id;
+use codex_core::response_event_commits_attempt;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -268,7 +271,7 @@ impl MemoryStartupContext {
         let window_id = format!("{}:0", self.thread_id);
         let responses_metadata = detached_memory_responses_metadata(
             installation_id,
-            session_id_string,
+            session_id_string.clone(),
             self.thread_id.to_string(),
             window_id,
             &session_source,
@@ -276,43 +279,42 @@ impl MemoryStartupContext {
             /*sandbox*/ None,
         )
         .await;
-        let mut stream = client_session
-            .stream(
-                prompt,
-                &context.model_info,
-                &context.session_telemetry,
-                context.reasoning_effort.clone(),
-                context.reasoning_summary,
-                context.service_tier.clone(),
-                &responses_metadata,
-                &InferenceTraceContext::disabled(),
-            )
-            .await?;
+        loop {
+            let request_setup = client_session
+                .current_client_setup(
+                    Some(context.model_info.slug.as_str()),
+                    Some(session_id_string.as_str()),
+                )
+                .await?;
+            let stream_result = client_session
+                .stream_attempt_with_setup(
+                    prompt,
+                    &context.model_info,
+                    &context.session_telemetry,
+                    context.reasoning_effort.clone(),
+                    context.reasoning_summary,
+                    context.service_tier.clone(),
+                    &responses_metadata,
+                    &InferenceTraceContext::disabled(),
+                    request_setup,
+                )
+                .await;
+            let (attempt_result, committed) = match stream_result {
+                Ok(stream) => drain_stage_one_stream(stream).await,
+                Err(error) => (Err(error), false),
+            };
 
-        let mut result = String::new();
-        let mut token_usage = None;
-        while let Some(message) = stream.next().await.transpose()? {
-            match message {
-                ResponseEvent::OutputTextDelta(delta) => result.push_str(&delta),
-                ResponseEvent::OutputItemDone(item) => {
-                    if result.is_empty()
-                        && let codex_protocol::models::ResponseItem::Message { content, .. } = item
-                        && let Some(text) = content_items_to_text(&content)
-                    {
-                        result.push_str(&text);
-                    }
-                }
-                ResponseEvent::Completed {
-                    token_usage: usage, ..
-                } => {
-                    token_usage = usage;
-                    break;
-                }
-                _ => {}
+            if let Err(error) = &attempt_result
+                && !committed
+                && client_session
+                    .recover_last_managed_attempt(error, committed)
+                    .await
+            {
+                continue;
             }
-        }
 
-        Ok((result, token_usage))
+            return attempt_result.map_err(Into::into);
+        }
     }
 
     pub(crate) async fn spawn_consolidation_agent(
@@ -374,5 +376,42 @@ impl MemoryStartupContext {
             })??;
 
         Ok(())
+    }
+}
+
+async fn drain_stage_one_stream(
+    mut stream: ResponseStream,
+) -> (Result<(String, Option<TokenUsage>), CodexErr>, bool) {
+    let mut committed = false;
+    let mut result = String::new();
+    loop {
+        let Some(message) = stream.next().await else {
+            return (
+                Err(CodexErr::Stream(
+                    "stream closed before response.completed".to_string(),
+                )),
+                committed,
+            );
+        };
+        let event = match message {
+            Ok(event) => event,
+            Err(error) => return (Err(error), committed),
+        };
+        committed |= response_event_commits_attempt(&event);
+        match event {
+            ResponseEvent::OutputTextDelta(delta) => result.push_str(&delta),
+            ResponseEvent::OutputItemDone(item) => {
+                if result.is_empty()
+                    && let codex_protocol::models::ResponseItem::Message { content, .. } = item
+                    && let Some(text) = content_items_to_text(&content)
+                {
+                    result.push_str(&text);
+                }
+            }
+            ResponseEvent::Completed {
+                token_usage: usage, ..
+            } => return (Ok((result, usage)), committed),
+            _ => {}
+        }
     }
 }

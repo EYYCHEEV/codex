@@ -166,8 +166,13 @@ impl ChatWidget {
         });
         self.bump_active_cell_revision();
         self.request_redraw();
-        self.app_event_tx
-            .send(AppEvent::RefreshTokenActivity { request_id });
+        if self.managed_accounts().is_some() {
+            self.app_event_tx
+                .send(AppEvent::RefreshManagedTokenActivity { request_id });
+        } else {
+            self.app_event_tx
+                .send(AppEvent::RefreshTokenActivity { request_id });
+        }
     }
 
     /// Returns the transient token activity card that should render above the composer.
@@ -192,6 +197,28 @@ impl ChatWidget {
     /// slot. Late responses return `false`, including responses for cards replaced
     /// by a newer `/usage` invocation or cleared during transcript changes.
     pub(crate) fn finish_token_activity_refresh(
+        &mut self,
+        request_id: u64,
+        result: Result<GetAccountTokenUsageResponse, String>,
+    ) -> bool {
+        if self.managed_accounts().is_some() {
+            return false;
+        }
+        self.finish_token_activity_refresh_inner(request_id, result)
+    }
+
+    pub(crate) fn finish_managed_token_activity_refresh(
+        &mut self,
+        request_id: u64,
+        result: Result<GetAccountTokenUsageResponse, String>,
+    ) -> bool {
+        if self.managed_accounts().is_none() {
+            return false;
+        }
+        self.finish_token_activity_refresh_inner(request_id, result)
+    }
+
+    fn finish_token_activity_refresh_inner(
         &mut self,
         request_id: u64,
         result: Result<GetAccountTokenUsageResponse, String>,

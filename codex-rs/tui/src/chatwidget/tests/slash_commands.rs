@@ -1692,6 +1692,44 @@ async fn slash_quit_requests_exit() {
     assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
 }
 
+fn managed_logout_account(
+    id: &str,
+    email: Option<&str>,
+) -> codex_app_server_protocol::ManagedChatgptAccountView {
+    codex_app_server_protocol::ManagedChatgptAccountView {
+        managed_account_id: id.to_string(),
+        chatgpt_account_id: Some(format!("workspace-{id}")),
+        email: email.map(str::to_string),
+        plan_type: codex_protocol::account::PlanType::Plus,
+        eligible: true,
+        eligibility_reason: None,
+        account_revision: 1,
+        credential_revision: 1,
+        refresh_status: codex_app_server_protocol::ManagedChatgptAccountRefreshStatus::Healthy,
+        block: None,
+        usage: codex_app_server_protocol::ManagedChatgptAccountUsage {
+            state: codex_app_server_protocol::ManagedChatgptAccountUsageState::Unknown,
+            rate_limits: Vec::new(),
+            token_usage: None,
+            observed_at: None,
+            unavailable_reason: None,
+            unavailable_observed_at: None,
+        },
+    }
+}
+
+fn install_managed_logout_accounts(chat: &mut ChatWidget) {
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![
+            managed_logout_account("managed-a", Some("alice@example.com")),
+            managed_logout_account("managed-b", None),
+        ],
+        selected_account_id: Some("managed-a".to_string()),
+        pool_revision: 3,
+        selection_revision: Some(1),
+    });
+}
+
 #[tokio::test]
 async fn slash_logout_requests_app_server_logout() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
@@ -1699,6 +1737,82 @@ async fn slash_logout_requests_app_server_logout() {
     chat.dispatch_command(SlashCommand::Logout);
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::Logout));
+}
+
+#[tokio::test]
+async fn slash_logout_targets_the_only_managed_account_without_exiting() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_logout_account(
+            "managed-only",
+            Some("only@example.com"),
+        )],
+        selected_account_id: Some("managed-only".to_string()),
+        pool_revision: 1,
+        selection_revision: Some(1),
+    });
+
+    chat.dispatch_command(SlashCommand::Logout);
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::LogoutManagedAccount { managed_account_id })
+            if managed_account_id == "managed-only"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "targeted logout must not request exit"
+    );
+}
+
+#[tokio::test]
+async fn slash_logout_multi_account_picker_cancel_is_side_effect_free() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_managed_logout_accounts(&mut chat);
+
+    chat.dispatch_command(SlashCommand::Logout);
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(popup.contains("alice@example.com"));
+    assert!(popup.contains("Managed account managed-b"));
+    assert!(popup.contains("Log out all accounts"));
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    assert!(rx.try_recv().is_err());
+    assert!(!render_bottom_popup(&chat, /*width*/ 80).contains("Log out of ChatGPT"));
+}
+
+#[tokio::test]
+async fn slash_logout_multi_account_picker_targets_stable_managed_id() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_managed_logout_accounts(&mut chat);
+
+    chat.dispatch_command(SlashCommand::Logout);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::LogoutManagedAccount { managed_account_id })
+            if managed_account_id == "managed-b"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "targeted logout must not request exit"
+    );
+}
+
+#[tokio::test]
+async fn slash_logout_multi_account_picker_has_explicit_all_choice() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    install_managed_logout_accounts(&mut chat);
+
+    chat.dispatch_command(SlashCommand::Logout);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::LogoutAllAccounts));
 }
 
 #[tokio::test]

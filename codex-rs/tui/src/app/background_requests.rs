@@ -7,12 +7,15 @@
 use super::plugin_mentions::fetch_plugin_mentions;
 use super::*;
 use crate::app_event::ConnectorsSnapshot;
+use crate::app_event::ManagedAccountRequestOrigin;
 use crate::app_info::app_info_from_api;
 use crate::config_update::format_config_error;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditParams;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
+use codex_app_server_protocol::ListAccountsParams;
+use codex_app_server_protocol::ListAccountsResponse;
 use codex_app_server_protocol::MarketplaceAddParams;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::MarketplaceRemoveParams;
@@ -103,6 +106,172 @@ impl App {
                 result,
             });
         });
+    }
+
+    pub(super) fn managed_account_request_origin(&mut self) -> ManagedAccountRequestOrigin {
+        let thread_id = self.chat_widget.thread_id();
+        let model = self.chat_widget.current_model().to_string();
+        let scope = (thread_id, model.clone());
+        if self.managed_account_request_scope.as_ref() != Some(&scope) {
+            self.cancel_managed_account_logout_refresh();
+            self.managed_account_request_scope = Some(scope);
+            self.managed_account_scope_generation =
+                self.managed_account_scope_generation.wrapping_add(1);
+        }
+        self.managed_account_request_sequence =
+            self.managed_account_request_sequence.wrapping_add(1);
+        ManagedAccountRequestOrigin {
+            thread_id,
+            model,
+            scope_generation: self.managed_account_scope_generation,
+            request_id: self.managed_account_request_sequence,
+        }
+    }
+
+    pub(super) fn invalidate_managed_account_requests(&mut self) {
+        self.cancel_managed_account_logout_refresh();
+        self.managed_account_scope_generation =
+            self.managed_account_scope_generation.wrapping_add(1);
+    }
+
+    pub(super) fn begin_managed_account_logout_refresh(
+        &mut self,
+        origin: ManagedAccountRequestOrigin,
+    ) {
+        self.pending_managed_account_logout_refresh = Some(origin);
+        self.chat_widget.suspend_managed_account_updates();
+    }
+
+    pub(super) fn finish_managed_account_logout_refresh(
+        &mut self,
+        origin: &ManagedAccountRequestOrigin,
+    ) -> bool {
+        if self.pending_managed_account_logout_refresh.as_ref() != Some(origin) {
+            return false;
+        }
+        self.pending_managed_account_logout_refresh = None;
+        self.chat_widget.enable_managed_account_updates();
+        true
+    }
+
+    pub(super) fn cancel_managed_account_logout_refresh(&mut self) {
+        if self.pending_managed_account_logout_refresh.take().is_some() {
+            self.chat_widget.enable_managed_account_updates();
+        }
+    }
+
+    pub(super) fn is_current_managed_account_request(
+        &self,
+        origin: &ManagedAccountRequestOrigin,
+    ) -> bool {
+        origin.scope_generation == self.managed_account_scope_generation
+            && origin.request_id == self.managed_account_request_sequence
+            && origin.thread_id == self.chat_widget.thread_id()
+            && origin.model == self.chat_widget.current_model()
+    }
+
+    pub(super) fn refresh_managed_accounts_for_status(&mut self, app_server: &AppServerSession) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        let origin = self.managed_account_request_origin();
+        tokio::spawn(async move {
+            let result = fetch_managed_accounts(
+                request_handle,
+                origin.thread_id,
+                Some(origin.model.clone()),
+                /*refresh_usage*/ true,
+            )
+            .await
+            .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::ManagedAccountsLoadedForStatus { origin, result });
+        });
+    }
+
+    pub(super) fn refresh_managed_token_activity(
+        &mut self,
+        app_server: &AppServerSession,
+        request_id: u64,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        let origin = self.managed_account_request_origin();
+        tokio::spawn(async move {
+            let result = fetch_managed_accounts(
+                request_handle,
+                origin.thread_id,
+                Some(origin.model.clone()),
+                /*refresh_usage*/ true,
+            )
+            .await
+            .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::ManagedTokenActivityLoaded {
+                origin,
+                request_id,
+                result,
+            });
+        });
+    }
+
+    pub(super) fn refresh_managed_accounts_cache(&mut self, app_server: &AppServerSession) {
+        let origin = self.managed_account_request_origin();
+        self.refresh_managed_accounts_cache_from(app_server, origin, /*refresh_usage*/ false);
+    }
+
+    pub(super) fn refresh_managed_accounts_usage_cache(&mut self, app_server: &AppServerSession) {
+        let origin = self.managed_account_request_origin();
+        self.refresh_managed_accounts_cache_from(app_server, origin, /*refresh_usage*/ true);
+    }
+
+    pub(super) fn refresh_managed_accounts_cache_from(
+        &self,
+        app_server: &AppServerSession,
+        origin: ManagedAccountRequestOrigin,
+        refresh_usage: bool,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = fetch_managed_accounts(
+                request_handle,
+                origin.thread_id,
+                Some(origin.model.clone()),
+                refresh_usage,
+            )
+            .await
+            .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::ManagedAccountsLoadedForCache { origin, result });
+        });
+    }
+
+    pub(super) fn handle_managed_accounts_loaded_for_cache(
+        &mut self,
+        origin: ManagedAccountRequestOrigin,
+        result: std::result::Result<ListAccountsResponse, String>,
+    ) {
+        self.finish_managed_account_logout_refresh(&origin);
+        if !self.is_current_managed_account_request(&origin) {
+            tracing::debug!(
+                thread_id = ?origin.thread_id,
+                model = origin.model,
+                scope_generation = origin.scope_generation,
+                "discarding stale managed account cache response"
+            );
+            return;
+        }
+        match result {
+            Ok(response)
+                if self.chat_widget.managed_accounts().is_some()
+                    || !response.accounts.is_empty() =>
+            {
+                self.chat_widget.replace_managed_accounts(response);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::debug!(
+                    "account/list unavailable while refreshing managed account cache: {err}"
+                );
+            }
+        }
     }
 
     pub(super) fn refresh_token_activity(
@@ -757,6 +926,35 @@ pub(super) async fn fetch_all_mcp_server_statuses(
     Ok(statuses)
 }
 
+pub(super) async fn fetch_managed_accounts(
+    request_handle: AppServerRequestHandle,
+    thread_id: Option<ThreadId>,
+    model: Option<String>,
+    refresh_usage: bool,
+) -> Result<ListAccountsResponse> {
+    let request_id = RequestId::String(format!("account-list-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::ListAccounts {
+            request_id,
+            params: managed_accounts_list_params(thread_id, model, refresh_usage),
+        })
+        .await
+        .wrap_err("account/list failed in TUI")
+}
+
+fn managed_accounts_list_params(
+    thread_id: Option<ThreadId>,
+    model: Option<String>,
+    refresh_usage: bool,
+) -> ListAccountsParams {
+    ListAccountsParams {
+        thread_id: thread_id.map(|thread_id| thread_id.to_string()),
+        model,
+        refresh_tokens: refresh_usage,
+        refresh_usage,
+    }
+}
+
 pub(super) async fn fetch_account_rate_limits(
     request_handle: AppServerRequestHandle,
 ) -> Result<GetAccountRateLimitsResponse> {
@@ -1290,6 +1488,33 @@ mod tests {
 
     fn test_absolute_path(path: &str) -> AbsolutePathBuf {
         AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
+    }
+
+    #[test]
+    fn status_managed_account_params_refresh_tokens_before_usage_and_decode_response() {
+        let thread_id = ThreadId::new();
+        let params = managed_accounts_list_params(
+            Some(thread_id),
+            Some("gpt-5.2".to_string()),
+            /*refresh_usage*/ true,
+        );
+        assert_eq!(
+            params.thread_id.as_deref(),
+            Some(thread_id.to_string().as_str())
+        );
+        assert_eq!(params.model.as_deref(), Some("gpt-5.2"));
+        assert!(params.refresh_tokens);
+        assert!(params.refresh_usage);
+
+        let response: ListAccountsResponse = serde_json::from_value(serde_json::json!({
+            "accounts": [],
+            "selectedAccountId": null,
+            "selectionRevision": null,
+            "poolRevision": 7
+        }))
+        .expect("account/list response should decode");
+        assert!(response.accounts.is_empty());
+        assert_eq!(response.pool_revision, 7);
     }
 
     #[test]

@@ -5,6 +5,8 @@ use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use std::time::Instant;
 
+use codex_login::TransportAuthBinding;
+use codex_protocol::auth::AuthMode;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -60,25 +62,85 @@ pub const CONNECTOR_METADATA_CACHE_TTL: Duration = CONNECTORS_CACHE_TTL;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorDirectoryCacheKey {
     chatgpt_base_url: String,
-    account_id: Option<String>,
-    chatgpt_user_id: Option<String>,
+    transport: TransportAuthBinding,
+    credential_revision: u64,
     is_workspace_account: bool,
 }
 
 impl ConnectorDirectoryCacheKey {
+    /// Builds a compatibility key for callers without a managed account
+    /// snapshot.
     pub fn new(
         chatgpt_base_url: String,
         account_id: Option<String>,
         chatgpt_user_id: Option<String>,
         is_workspace_account: bool,
     ) -> Self {
+        let identity_key = chatgpt_user_id
+            .or_else(|| account_id.clone())
+            .unwrap_or_else(|| "unmanaged".to_string());
         Self {
-            chatgpt_base_url,
-            account_id,
-            chatgpt_user_id,
+            chatgpt_base_url: normalize_cache_base_url(chatgpt_base_url),
+            transport: TransportAuthBinding {
+                identity_key,
+                raw_account_id: account_id,
+                fedramp: false,
+                auth_mode: AuthMode::Chatgpt,
+                route_generation: 0,
+            },
+            credential_revision: 0,
             is_workspace_account,
         }
     }
+
+    /// Builds the exact cache identity for a managed account snapshot.
+    pub fn from_transport_binding(
+        chatgpt_base_url: String,
+        transport: TransportAuthBinding,
+        credential_revision: u64,
+        is_workspace_account: bool,
+    ) -> Self {
+        Self::from_runtime_binding(
+            chatgpt_base_url,
+            transport,
+            Some(credential_revision),
+            is_workspace_account,
+        )
+    }
+
+    /// Builds an exact runtime identity.
+    ///
+    /// `None` is reserved for an explicitly authenticated, nonmanaged runtime
+    /// whose binding is singular and has no credential revision. Managed
+    /// callers must provide their nonzero revision.
+    pub fn from_runtime_binding(
+        chatgpt_base_url: String,
+        transport: TransportAuthBinding,
+        credential_revision: Option<u64>,
+        is_workspace_account: bool,
+    ) -> Self {
+        if let Some(credential_revision) = credential_revision {
+            assert!(
+                credential_revision > 0,
+                "managed connector cache keys require a credential revision"
+            );
+        }
+        let chatgpt_base_url = normalize_cache_base_url(chatgpt_base_url);
+        assert!(
+            !chatgpt_base_url.is_empty(),
+            "runtime connector cache keys require a base URL"
+        );
+        Self {
+            chatgpt_base_url,
+            transport,
+            credential_revision: credential_revision.unwrap_or(0),
+            is_workspace_account,
+        }
+    }
+}
+
+fn normalize_cache_base_url(base_url: String) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
 }
 
 #[derive(Clone)]
@@ -552,6 +614,109 @@ mod tests {
         *cache_guard = None;
     }
 
+    #[test]
+    fn managed_directory_cache_key_segregates_full_transport_identity() {
+        let codex_home = TempDir::new().expect("tempdir");
+        let transport = TransportAuthBinding {
+            identity_key: "stable-user".to_string(),
+            raw_account_id: Some("workspace-one".to_string()),
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 4,
+        };
+        let exact = ConnectorDirectoryCacheKey::from_transport_binding(
+            " https://chatgpt.example/ ".to_string(),
+            transport.clone(),
+            7,
+            true,
+        );
+        let normalized = ConnectorDirectoryCacheKey::from_transport_binding(
+            "https://chatgpt.example".to_string(),
+            transport.clone(),
+            7,
+            true,
+        );
+        assert_eq!(exact, normalized);
+
+        let variants = [
+            ConnectorDirectoryCacheKey::from_transport_binding(
+                "https://chatgpt.example".to_string(),
+                TransportAuthBinding {
+                    raw_account_id: Some("workspace-two".to_string()),
+                    ..transport.clone()
+                },
+                7,
+                true,
+            ),
+            ConnectorDirectoryCacheKey::from_transport_binding(
+                "https://chatgpt.example".to_string(),
+                TransportAuthBinding {
+                    fedramp: true,
+                    ..transport.clone()
+                },
+                7,
+                true,
+            ),
+            ConnectorDirectoryCacheKey::from_transport_binding(
+                "https://chatgpt.example".to_string(),
+                TransportAuthBinding {
+                    auth_mode: AuthMode::ChatgptAuthTokens,
+                    ..transport.clone()
+                },
+                7,
+                true,
+            ),
+            ConnectorDirectoryCacheKey::from_transport_binding(
+                "https://chatgpt.example".to_string(),
+                TransportAuthBinding {
+                    route_generation: 5,
+                    ..transport.clone()
+                },
+                7,
+                true,
+            ),
+            ConnectorDirectoryCacheKey::from_transport_binding(
+                "https://chatgpt.example".to_string(),
+                transport.clone(),
+                8,
+                true,
+            ),
+            ConnectorDirectoryCacheKey::from_transport_binding(
+                "https://chatgpt.other".to_string(),
+                transport,
+                7,
+                true,
+            ),
+        ];
+        let exact_path =
+            ConnectorDirectoryCacheContext::new(codex_home.path().to_path_buf(), exact)
+                .cache_path();
+        for variant in variants {
+            assert_ne!(
+                exact_path,
+                ConnectorDirectoryCacheContext::new(codex_home.path().to_path_buf(), variant)
+                    .cache_path()
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "managed connector cache keys require a credential revision")]
+    fn managed_directory_cache_key_rejects_zero_revision() {
+        let _ = ConnectorDirectoryCacheKey::from_transport_binding(
+            "https://chatgpt.example".to_string(),
+            TransportAuthBinding {
+                identity_key: "stable-user".to_string(),
+                raw_account_id: Some("workspace".to_string()),
+                fedramp: false,
+                auth_mode: AuthMode::Chatgpt,
+                route_generation: 1,
+            },
+            0,
+            true,
+        );
+    }
+
     fn app(id: &str, name: &str) -> DirectoryApp {
         DirectoryApp {
             id: id.to_string(),
@@ -661,6 +826,84 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(first, second);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "test serializes access to the shared connector cache for its full duration"
+    )]
+    async fn external_runtime_binding_uses_zero_revision_cache_identity() -> anyhow::Result<()> {
+        let _cache_guard = CONNECTOR_DIRECTORY_CACHE_TEST_LOCK.lock().await;
+        clear_directory_memory_cache();
+        let codex_home = TempDir::new()?;
+        let transport = TransportAuthBinding {
+            identity_key: "external-user".to_string(),
+            raw_account_id: Some("external-account".to_string()),
+            fedramp: false,
+            auth_mode: AuthMode::ChatgptAuthTokens,
+            route_generation: 0,
+        };
+        let key = ConnectorDirectoryCacheKey::from_runtime_binding(
+            "https://chatgpt.example".to_string(),
+            transport.clone(),
+            None,
+            true,
+        );
+        assert_eq!(key.credential_revision, 0);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let first_calls = Arc::clone(&calls);
+        let first_context =
+            ConnectorDirectoryCacheContext::new(codex_home.path().to_path_buf(), key.clone());
+        let first = list_all_connectors_with_options(first_context, true, false, move |_path| {
+            let calls = Arc::clone(&first_calls);
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(DirectoryListResponse {
+                    apps: vec![app("external", "External")],
+                    next_token: None,
+                })
+            }
+        })
+        .await?;
+        let first_call_count = calls.load(Ordering::SeqCst);
+
+        let exact_context =
+            ConnectorDirectoryCacheContext::new(codex_home.path().to_path_buf(), key);
+        let exact =
+            list_all_connectors_with_options(exact_context, true, false, move |_path| async move {
+                anyhow::bail!("same external binding should use cache");
+            })
+            .await?;
+        assert_eq!(first, exact);
+        assert_eq!(calls.load(Ordering::SeqCst), first_call_count);
+
+        let changed_base = ConnectorDirectoryCacheKey::from_runtime_binding(
+            "https://chatgpt.other".to_string(),
+            transport,
+            None,
+            true,
+        );
+        let changed_calls = Arc::clone(&calls);
+        let changed = list_all_connectors_with_options(
+            ConnectorDirectoryCacheContext::new(codex_home.path().to_path_buf(), changed_base),
+            true,
+            false,
+            move |_path| {
+                let calls = Arc::clone(&changed_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(DirectoryListResponse {
+                        apps: vec![app("other", "Other")],
+                        next_token: None,
+                    })
+                }
+            },
+        )
+        .await?;
+        assert_eq!(changed[0].id, "other");
+        assert!(calls.load(Ordering::SeqCst) > first_call_count);
         Ok(())
     }
 

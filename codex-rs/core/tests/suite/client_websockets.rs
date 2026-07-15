@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)]
 use codex_api::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 use codex_api::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
+use codex_core::CodexErr;
 use codex_core::CodexResponsesMetadata;
 use codex_core::ModelClient;
 use codex_core::ModelClientSession;
@@ -31,6 +32,10 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ResponsesWebsocketCloseDiagnostic;
+use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::UserInput;
@@ -41,12 +46,15 @@ use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
 use core_test_support::TestCodexResponsesRequestKind;
 use core_test_support::load_default_config_for_test;
+use core_test_support::responses::WebSocketCloseFrame;
 use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::WebSocketTestServer;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::start_rejecting_websocket_server;
 use core_test_support::responses::start_websocket_server;
+use core_test_support::responses::start_websocket_server_with_close_frames;
 use core_test_support::responses::start_websocket_server_with_headers;
 use core_test_support::responses_metadata as test_responses_metadata;
 use core_test_support::skip_if_no_network;
@@ -74,6 +82,22 @@ const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const TEST_WINDOW_ID: &str = "test-thread:0";
 const X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY: &str =
     "x-codex-ws-stream-request-start-ms";
+
+fn websocket_close_diagnostics(
+    rollout_path: &std::path::Path,
+) -> Vec<(String, ResponsesWebsocketCloseDiagnostic)> {
+    std::fs::read_to_string(rollout_path)
+        .expect("read rollout")
+        .lines()
+        .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse rollout line"))
+        .filter_map(|line| match line.item {
+            RolloutItem::EventMsg(EventMsg::StreamError(event)) => event
+                .websocket_close_diagnostic()
+                .map(|diagnostic| (line.timestamp, diagnostic)),
+            _ => None,
+        })
+        .collect()
+}
 
 fn assert_request_trace_matches(body: &serde_json::Value, expected_trace: &W3cTraceContext) {
     let client_metadata = body["client_metadata"]
@@ -484,6 +508,10 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
+    let request_setup = client_session
+        .current_client_setup(Some(&harness.model_info.slug), None)
+        .await
+        .expect("current client setup");
     client_session
         .prewarm_websocket(
             &prompt,
@@ -493,6 +521,7 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
             harness.summary,
             /*service_tier*/ None,
             &responses_metadata,
+            request_setup,
         )
         .await
         .expect("websocket prewarm failed");
@@ -556,6 +585,10 @@ async fn responses_websocket_request_prewarm_uses_caller_supplied_metadata() {
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
+    let request_setup = client_session
+        .current_client_setup(Some(&harness.model_info.slug), None)
+        .await
+        .expect("current client setup");
     client_session
         .prewarm_websocket(
             &prompt,
@@ -565,6 +598,7 @@ async fn responses_websocket_request_prewarm_uses_caller_supplied_metadata() {
             harness.summary,
             /*service_tier*/ None,
             &responses_metadata,
+            request_setup,
         )
         .await
         .expect("websocket prewarm failed");
@@ -600,6 +634,10 @@ async fn responses_websocket_request_prewarm_traces_logical_request() {
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let prewarm_responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
 
+    let request_setup = client_session
+        .current_client_setup(Some(&harness.model_info.slug), None)
+        .await
+        .expect("current client setup");
     client_session
         .prewarm_websocket(
             &prompt,
@@ -609,6 +647,7 @@ async fn responses_websocket_request_prewarm_traces_logical_request() {
             harness.summary,
             /*service_tier*/ None,
             &prewarm_responses_metadata,
+            request_setup,
         )
         .await
         .expect("websocket prewarm failed");
@@ -858,6 +897,10 @@ async fn responses_websocket_request_prewarm_is_reused_even_with_header_changes(
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let prewarm_responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
+    let request_setup = client_session
+        .current_client_setup(Some(&harness.model_info.slug), None)
+        .await
+        .expect("current client setup");
     client_session
         .prewarm_websocket(
             &prompt,
@@ -867,6 +910,7 @@ async fn responses_websocket_request_prewarm_is_reused_even_with_header_changes(
             harness.summary,
             /*service_tier*/ None,
             &prewarm_responses_metadata,
+            request_setup,
         )
         .await
         .expect("websocket prewarm failed");
@@ -926,6 +970,10 @@ async fn responses_websocket_prewarm_uses_v2_when_provider_supports_websockets()
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
+    let request_setup = client_session
+        .current_client_setup(Some(&harness.model_info.slug), None)
+        .await
+        .expect("current client setup");
     client_session
         .prewarm_websocket(
             &prompt,
@@ -935,6 +983,7 @@ async fn responses_websocket_prewarm_uses_v2_when_provider_supports_websockets()
             harness.summary,
             /*service_tier*/ None,
             &responses_metadata,
+            request_setup,
         )
         .await
         .expect("websocket prewarm failed");
@@ -1401,6 +1450,14 @@ async fn responses_websocket_emits_rate_limit_events() {
         response_headers: vec![
             ("X-Models-Etag".to_string(), "etag-123".to_string()),
             ("X-Reasoning-Included".to_string(), "true".to_string()),
+            (
+                "x-codex-primary-used-percent".to_string(),
+                "17.0".to_string(),
+            ),
+            (
+                "x-codex-primary-window-minutes".to_string(),
+                "15".to_string(),
+            ),
         ],
         accept_delay: None,
         close_after_requests: true,
@@ -1426,14 +1483,14 @@ async fn responses_websocket_emits_rate_limit_events() {
         .await
         .expect("websocket stream failed");
 
-    let mut saw_rate_limits = None;
+    let mut saw_rate_limits = Vec::new();
     let mut saw_models_etag = None;
     let mut saw_reasoning_included = false;
 
     while let Some(event) = stream.next().await {
         match event.expect("event") {
             ResponseEvent::RateLimits(snapshot) => {
-                saw_rate_limits = Some(snapshot);
+                saw_rate_limits.push(snapshot);
             }
             ResponseEvent::ModelsEtag(etag) => {
                 saw_models_etag = Some(etag);
@@ -1446,7 +1503,29 @@ async fn responses_websocket_emits_rate_limit_events() {
         }
     }
 
-    let rate_limits = saw_rate_limits.expect("missing rate limits");
+    let handshake_rate_limits = saw_rate_limits
+        .iter()
+        .find(|snapshot| {
+            snapshot
+                .primary
+                .as_ref()
+                .is_some_and(|window| window.used_percent == 17.0)
+        })
+        .expect("missing handshake rate limits");
+    let handshake_primary = handshake_rate_limits
+        .primary
+        .as_ref()
+        .expect("missing handshake primary window");
+    assert_eq!(handshake_primary.window_minutes, Some(15));
+    let rate_limits = saw_rate_limits
+        .into_iter()
+        .find(|snapshot| {
+            snapshot
+                .primary
+                .as_ref()
+                .is_some_and(|window| window.used_percent == 42.0)
+        })
+        .expect("missing stream rate limits");
     let primary = rate_limits.primary.expect("missing primary window");
     assert_eq!(primary.used_percent, 42.0);
     assert_eq!(primary.window_minutes, Some(60));
@@ -1458,6 +1537,66 @@ async fn responses_websocket_emits_rate_limit_events() {
     assert_eq!(credits.balance.as_deref(), Some("123"));
     assert_eq!(saw_models_etag.as_deref(), Some("etag-123"));
     assert!(saw_reasoning_included);
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_handshake_usage_limit_preserves_rate_limits() {
+    skip_if_no_network!();
+
+    let server = start_rejecting_websocket_server(
+        429,
+        vec![
+            ("content-type".to_string(), "application/json".to_string()),
+            (
+                "x-codex-primary-used-percent".to_string(),
+                "100.0".to_string(),
+            ),
+            (
+                "x-codex-primary-window-minutes".to_string(),
+                "15".to_string(),
+            ),
+        ],
+        json!({
+            "error": {
+                "type": "usage_limit_reached",
+                "message": "The usage limit has been reached"
+            }
+        })
+        .to_string(),
+    )
+    .await;
+    let harness = websocket_harness(&server).await;
+    let mut client_session = harness.client.new_session();
+    let prompt = prompt_with_input(vec![message_item("hello")]);
+    let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
+
+    let error = match client_session
+        .stream(
+            &prompt,
+            &harness.model_info,
+            &harness.session_telemetry,
+            harness.effort.clone(),
+            harness.summary,
+            /*service_tier*/ None,
+            &responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await
+    {
+        Ok(_) => panic!("handshake rejection should fail the websocket stream"),
+        Err(error) => error,
+    };
+
+    let CodexErr::UsageLimitReached(error) = error else {
+        panic!("expected usage-limit error");
+    };
+    let snapshot = error.rate_limits.as_deref().expect("rate-limit snapshot");
+    let primary = snapshot.primary.as_ref().expect("primary rate window");
+    assert_eq!(primary.used_percent, 100.0);
+    assert_eq!(primary.window_minutes, Some(15));
+    assert_eq!(server.handshakes().len(), 1);
 
     server.shutdown().await;
 }
@@ -1627,6 +1766,238 @@ async fn responses_websocket_invalid_request_error_with_status_is_forwarded() {
             .contains("does not support image inputs"),
         "unexpected error message for submission {submission_id}: {}",
         error_event.message
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_close_after_output_persists_no_replay_diagnostic() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server_with_close_frames(
+        vec![vec![
+            vec![
+                ev_response_created("resp-prewarm"),
+                ev_completed("resp-prewarm"),
+            ],
+            vec![
+                ev_response_created("resp-1"),
+                ev_assistant_message("msg-1", "partial"),
+            ],
+        ]],
+        vec![Some(WebSocketCloseFrame {
+            code: 4001,
+            reason: "maintenance".to_string(),
+        })],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit turn");
+    let error_event = wait_for_event(&test.codex, |msg| matches!(msg, EventMsg::Error(_))).await;
+    let EventMsg::Error(error_event) = error_event else {
+        unreachable!();
+    };
+    assert!(
+        error_event
+            .message
+            .contains("websocket closed by server before response.completed"),
+        "unexpected terminal error: {}",
+        error_event.message
+    );
+    test.codex.flush_rollout().await.expect("flush rollout");
+    assert_eq!(server.handshakes().len(), 1);
+    assert_eq!(server.single_connection().len(), 2);
+
+    let rollout_path = test.codex.rollout_path().expect("rollout path");
+    let diagnostics = websocket_close_diagnostics(&rollout_path);
+    assert_eq!(diagnostics.len(), 1);
+    let (timestamp, diagnostic) = &diagnostics[0];
+    assert!(!timestamp.is_empty());
+    assert_eq!(diagnostic.close_code, Some(4001));
+    assert_eq!(diagnostic.close_reason.as_deref(), Some("maintenance"));
+    assert!(!diagnostic.close_reason_redacted);
+    assert!(diagnostic.output_committed);
+    assert_eq!(diagnostic.attempt_number, 1);
+    assert_eq!(diagnostic.max_retries, 1);
+    assert_eq!(
+        diagnostic.recovery_decision,
+        ResponsesWebsocketCloseRecovery::NoReplayAfterOutput
+    );
+    assert!(diagnostic.request_binding_fingerprint.is_some());
+    assert_eq!(
+        diagnostic.handshake_binding_fingerprint,
+        diagnostic.request_binding_fingerprint
+    );
+    assert_eq!(diagnostic.binding_matched, Some(true));
+    assert!(!diagnostic.connection_reused);
+    let rollout = std::fs::read_to_string(rollout_path).expect("read rollout");
+    assert!(!rollout.contains("access_token"));
+    assert!(!rollout.contains("refresh_token"));
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_close_before_output_persists_retry_diagnostic() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server_with_close_frames(
+        vec![
+            vec![
+                vec![
+                    ev_response_created("resp-prewarm"),
+                    ev_completed("resp-prewarm"),
+                ],
+                vec![],
+            ],
+            vec![vec![ev_response_created("resp-2"), ev_completed("resp-2")]],
+        ],
+        vec![
+            Some(WebSocketCloseFrame {
+                code: 4002,
+                reason: "restart".to_string(),
+            }),
+            None,
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.submit_turn("hello")
+        .await
+        .expect("submission should retry after an uncommitted close");
+    test.codex.flush_rollout().await.expect("flush rollout");
+
+    let diagnostics =
+        websocket_close_diagnostics(&test.codex.rollout_path().expect("rollout path"));
+    assert_eq!(diagnostics.len(), 1);
+    let (_, diagnostic) = &diagnostics[0];
+    assert_eq!(diagnostic.close_code, Some(4002));
+    assert_eq!(diagnostic.close_reason.as_deref(), Some("restart"));
+    assert!(!diagnostic.output_committed);
+    assert_eq!(diagnostic.attempt_number, 1);
+    assert_eq!(
+        diagnostic.recovery_decision,
+        ResponsesWebsocketCloseRecovery::ReconnectWebsocket
+    );
+    assert!(!diagnostic.connection_reused);
+    assert_eq!(server.handshakes().len(), 2);
+    assert_eq!(
+        server
+            .connections()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_success_persists_no_close_diagnostic() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server(vec![vec![
+        vec![
+            ev_response_created("resp-prewarm"),
+            ev_completed("resp-prewarm"),
+        ],
+        vec![ev_response_created("resp-1"), ev_completed("resp-1")],
+    ]])
+    .await;
+    let mut builder = test_codex();
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.submit_turn("hello")
+        .await
+        .expect("complete websocket turn");
+    test.codex.flush_rollout().await.expect("flush rollout");
+
+    let diagnostics =
+        websocket_close_diagnostics(&test.codex.rollout_path().expect("rollout path"));
+    assert!(diagnostics.is_empty());
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_zero_retry_budget_does_not_fallback_to_http() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server_with_close_frames(
+        vec![vec![
+            vec![
+                ev_response_created("resp-prewarm"),
+                ev_completed("resp-prewarm"),
+            ],
+            vec![],
+        ]],
+        vec![None],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit turn");
+    wait_for_event(&test.codex, |msg| matches!(msg, EventMsg::Error(_))).await;
+    test.codex.flush_rollout().await.expect("flush rollout");
+
+    let diagnostics =
+        websocket_close_diagnostics(&test.codex.rollout_path().expect("rollout path"));
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].1.close_code, None);
+    assert_eq!(diagnostics[0].1.close_reason, None);
+    assert_eq!(
+        diagnostics[0].1.recovery_decision,
+        ResponsesWebsocketCloseRecovery::RetryExhausted
     );
 
     server.shutdown().await;

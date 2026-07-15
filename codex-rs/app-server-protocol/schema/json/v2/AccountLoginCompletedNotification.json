@@ -13,6 +13,13 @@
         "null"
       ]
     },
+    "managedAccountId": {
+      "description": "Stable managed OAuth identity, or `null` for API-key and externally managed login.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "success": {
       "type": "boolean"
     }

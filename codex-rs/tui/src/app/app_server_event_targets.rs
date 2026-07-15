@@ -168,6 +168,9 @@ pub(super) fn server_notification_thread_target(
         | ServerNotification::McpServerOauthLoginCompleted(_)
         | ServerNotification::AccountUpdated(_)
         | ServerNotification::AccountRateLimitsUpdated(_)
+        | ServerNotification::AccountPoolUpdated(_)
+        | ServerNotification::AccountSelectionUpdated(_)
+        | ServerNotification::AccountUsageUpdated(_)
         | ServerNotification::AppListUpdated(_)
         | ServerNotification::EnvironmentConnected(_)
         | ServerNotification::EnvironmentDisconnected(_)
@@ -202,6 +205,8 @@ mod tests {
     use super::server_notification_thread_target;
     use crate::test_support::PathBufExt;
     use crate::test_support::test_path_buf;
+    use codex_app_server_protocol::AccountPoolUpdatedNotification;
+    use codex_app_server_protocol::AccountSelectionUpdatedNotification;
     use codex_app_server_protocol::GuardianWarningNotification;
     use codex_app_server_protocol::McpServerStartupState;
     use codex_app_server_protocol::McpServerStatusUpdatedNotification;
@@ -326,5 +331,28 @@ mod tests {
         let target = server_notification_thread_target(&notification);
 
         assert_eq!(target, ServerNotificationThreadTarget::Thread(thread_id));
+    }
+
+    #[test]
+    fn managed_account_notifications_are_globally_delivered_for_active_thread_filtering() {
+        let pool = ServerNotification::AccountPoolUpdated(AccountPoolUpdatedNotification {
+            accounts: Vec::new(),
+            pool_revision: 1,
+        });
+        let selection =
+            ServerNotification::AccountSelectionUpdated(AccountSelectionUpdatedNotification {
+                thread_id: "thread-a".to_string(),
+                selected_account_id: None,
+                selection_revision: 1,
+            });
+
+        assert_eq!(
+            server_notification_thread_target(&pool),
+            ServerNotificationThreadTarget::Global
+        );
+        assert_eq!(
+            server_notification_thread_target(&selection),
+            ServerNotificationThreadTarget::Global
+        );
     }
 }

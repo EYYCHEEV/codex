@@ -30,6 +30,7 @@ pub fn login_with_bedrock_api_key(
         tokens: None,
         last_refresh: None,
         agent_identity: None,
+        managed_chatgpt: None,
         personal_access_token: None,
         bedrock_api_key: Some(BedrockApiKeyAuth {
             api_key: api_key.to_string(),

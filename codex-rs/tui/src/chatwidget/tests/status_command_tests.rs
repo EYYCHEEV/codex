@@ -2,54 +2,93 @@ use super::*;
 use assert_matches::assert_matches;
 use codex_utils_path_uri::PathUri;
 
+fn managed_status_account() -> codex_app_server_protocol::ManagedChatgptAccountView {
+    codex_app_server_protocol::ManagedChatgptAccountView {
+        managed_account_id: "managed-b".to_string(),
+        chatgpt_account_id: Some("workspace-b".to_string()),
+        email: Some("b@example.com".to_string()),
+        plan_type: codex_protocol::account::PlanType::Plus,
+        eligible: true,
+        eligibility_reason: None,
+        account_revision: 1,
+        credential_revision: 1,
+        refresh_status: codex_app_server_protocol::ManagedChatgptAccountRefreshStatus::Healthy,
+        block: None,
+        usage: codex_app_server_protocol::ManagedChatgptAccountUsage {
+            state: codex_app_server_protocol::ManagedChatgptAccountUsageState::Fresh,
+            rate_limits: Vec::new(),
+            token_usage: None,
+            observed_at: None,
+            unavailable_reason: None,
+            unavailable_observed_at: None,
+        },
+    }
+}
+
+fn install_managed_status_account(chat: &mut ChatWidget) {
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_status_account()],
+        selected_account_id: Some("managed-b".to_string()),
+        pool_revision: 1,
+        selection_revision: Some(1),
+    });
+}
+
 #[tokio::test]
 async fn status_command_renders_immediately_and_refreshes_rate_limits_for_chatgpt_auth() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     set_chatgpt_auth(&mut chat);
 
     chat.dispatch_command(SlashCommand::Status);
-
     let rendered = match rx.try_recv() {
         Ok(AppEvent::InsertHistoryCell(cell)) => {
             lines_to_single_string(&cell.display_lines(/*width*/ 80))
         }
-        other => panic!("expected status output before refresh request, got {other:?}"),
+        other => panic!("expected immediate status output, got {other:?}"),
     };
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::RefreshRateLimits {
+            origin: RateLimitRefreshOrigin::StatusCommand { .. }
+        })
+    );
     assert!(
         !rendered.contains("refreshing limits"),
         "expected /status to avoid transient refresh text in terminal history, got: {rendered}"
     );
-    let request_id = match rx.try_recv() {
-        Ok(AppEvent::RefreshRateLimits {
-            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
-        }) => request_id,
-        other => panic!("expected rate-limit refresh request, got {other:?}"),
-    };
-    pretty_assertions::assert_eq!(request_id, 0);
 }
 
 #[tokio::test]
 async fn status_command_refresh_updates_cached_limits_for_future_status_outputs() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     set_chatgpt_auth(&mut chat);
+    install_managed_status_account(&mut chat);
 
     chat.dispatch_command(SlashCommand::Status);
-
+    assert_matches!(rx.try_recv(), Ok(AppEvent::RefreshManagedAccountsForStatus));
+    chat.add_status_output(
+        /*refreshing_rate_limits*/ false, /*request_id*/ None,
+    );
     match rx.try_recv() {
         Ok(AppEvent::InsertHistoryCell(_)) => {}
-        other => panic!("expected status output before refresh request, got {other:?}"),
+        other => panic!("expected status output after account refresh, got {other:?}"),
     }
-    let first_request_id = match rx.try_recv() {
-        Ok(AppEvent::RefreshRateLimits {
-            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
-        }) => request_id,
-        other => panic!("expected rate-limit refresh request, got {other:?}"),
-    };
-
-    chat.finish_status_rate_limit_refresh(first_request_id, vec![snapshot(/*percent*/ 92.0)]);
+    let mut refreshed_account = managed_status_account();
+    refreshed_account.account_revision = 2;
+    refreshed_account.usage.rate_limits = vec![snapshot(/*percent*/ 92.0)];
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![refreshed_account],
+        selected_account_id: Some("managed-b".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(1),
+    });
     drain_insert_history(&mut rx);
 
     chat.dispatch_command(SlashCommand::Status);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::RefreshManagedAccountsForStatus));
+    chat.add_status_output(
+        /*refreshing_rate_limits*/ false, /*request_id*/ None,
+    );
     let refreshed = match rx.try_recv() {
         Ok(AppEvent::InsertHistoryCell(cell)) => {
             lines_to_single_string(&cell.display_lines(/*width*/ 80))
@@ -133,67 +172,56 @@ async fn status_command_renders_native_and_foreign_instruction_sources() {
 }
 
 #[tokio::test]
-async fn status_command_overlapping_refreshes_update_matching_cells_only() {
+async fn status_command_overlapping_managed_refreshes_render_each_output() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     set_chatgpt_auth(&mut chat);
+    install_managed_status_account(&mut chat);
 
     chat.dispatch_command(SlashCommand::Status);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::RefreshManagedAccountsForStatus));
+    chat.add_status_output(
+        /*refreshing_rate_limits*/ false, /*request_id*/ None,
+    );
     match rx.try_recv() {
         Ok(AppEvent::InsertHistoryCell(_)) => {}
         other => panic!("expected first status output, got {other:?}"),
     }
-    let first_request_id = match rx.try_recv() {
-        Ok(AppEvent::RefreshRateLimits {
-            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
-        }) => request_id,
-        other => panic!("expected first refresh request, got {other:?}"),
-    };
 
     chat.dispatch_command(SlashCommand::Status);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::RefreshManagedAccountsForStatus));
+    chat.add_status_output(
+        /*refreshing_rate_limits*/ false, /*request_id*/ None,
+    );
     let second_rendered = match rx.try_recv() {
         Ok(AppEvent::InsertHistoryCell(cell)) => {
             lines_to_single_string(&cell.display_lines(/*width*/ 80))
         }
         other => panic!("expected second status output, got {other:?}"),
     };
-    let second_request_id = match rx.try_recv() {
-        Ok(AppEvent::RefreshRateLimits {
-            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
-        }) => request_id,
-        other => panic!("expected second refresh request, got {other:?}"),
-    };
-
-    assert_ne!(first_request_id, second_request_id);
     assert!(
         !second_rendered.contains("refreshing limits"),
         "expected /status to avoid transient refresh text in terminal history, got: {second_rendered}"
     );
-
-    chat.finish_status_rate_limit_refresh(first_request_id, Vec::new());
-    pretty_assertions::assert_eq!(chat.refreshing_status_outputs.len(), 1);
-
-    chat.finish_status_rate_limit_refresh(second_request_id, vec![snapshot(/*percent*/ 92.0)]);
     assert!(chat.refreshing_status_outputs.is_empty());
 }
 
 #[tokio::test]
-async fn account_update_rejects_stale_status_rate_limit_snapshots() {
+async fn account_update_clears_stale_status_rate_limit_snapshots() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     set_chatgpt_auth(&mut chat);
+    install_managed_status_account(&mut chat);
     chat.dispatch_command(SlashCommand::Status);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::RefreshManagedAccountsForStatus));
+    chat.add_status_output(
+        /*refreshing_rate_limits*/ false, /*request_id*/ None,
+    );
     assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
-    let request_id = match rx.try_recv() {
-        Ok(AppEvent::RefreshRateLimits {
-            origin: RateLimitRefreshOrigin::StatusCommand { request_id },
-        }) => request_id,
-        other => panic!("expected status refresh request, got {other:?}"),
-    };
+    chat.on_rate_limit_snapshot(Some(snapshot(/*percent*/ 92.0)));
 
     chat.update_account_state(
         /*status_account_display*/ None, /*plan_type*/ None,
         /*has_chatgpt_account*/ true, /*has_codex_backend_auth*/ true,
     );
-    chat.finish_status_rate_limit_refresh(request_id, vec![snapshot(/*percent*/ 92.0)]);
 
     assert!(chat.rate_limit_snapshots_by_limit_id.is_empty());
 }

@@ -8,8 +8,7 @@ use codex_protocol::mcp::ResourceContent;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::model::ReadResourceRequestParams;
 
-use crate::McpRuntime;
-use crate::connection_manager::McpConnectionSet;
+use crate::McpBinding;
 
 /// One page of resources returned by an MCP server.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,15 +26,18 @@ pub struct McpResourceReadResult {
     pub contents: Vec<ResourceContent>,
 }
 
-/// Access to MCP resources through the latest runtime.
+/// Session-scoped access to MCP resources through one captured binding.
+///
+/// Resource calls and cache identity always use that same request binding, even if a newer runtime is
+/// published concurrently.
 #[derive(Clone)]
 pub struct McpResourceClient {
-    runtime: Arc<McpRuntime>,
+    binding: Arc<McpBinding>,
 }
 
-/// Opaque identity for the connection set currently used by an MCP resource client.
+/// Opaque identity for the manager currently used by an MCP resource client.
 #[derive(Clone)]
-pub struct McpResourceClientCacheKey(Weak<McpConnectionSet>);
+pub struct McpResourceClientCacheKey(Weak<McpBinding>);
 
 impl PartialEq for McpResourceClientCacheKey {
     fn eq(&self, other: &Self) -> bool {
@@ -54,21 +56,21 @@ impl std::fmt::Debug for McpResourceClient {
 }
 
 impl McpResourceClient {
-    /// Creates a resource client that follows the thread's latest published runtime.
-    pub fn new(runtime: Arc<McpRuntime>) -> Self {
-        Self { runtime }
+    /// Creates a resource client backed by one exact request binding.
+    pub fn new(binding: Arc<McpBinding>) -> Self {
+        Self { binding }
     }
 
-    /// Returns the identity of the connection set used by this client.
+    /// Returns the identity of the captured binding.
     pub fn cache_key(&self) -> McpResourceClientCacheKey {
-        McpResourceClientCacheKey(Arc::downgrade(&self.runtime.latest_connections()))
+        McpResourceClientCacheKey(Arc::downgrade(&self.binding))
     }
 
-    /// Returns whether this client can address the named server.
+    /// Returns whether the captured binding contains the named server.
     ///
     /// This does not wait for server startup.
     pub async fn has_server(&self, server: &str) -> bool {
-        self.runtime.latest_connections().contains_server(server)
+        self.binding.has_server(server)
     }
 
     /// Lists one resource page from the named server.
@@ -79,11 +81,7 @@ impl McpResourceClient {
     ) -> Result<McpResourcePage> {
         let params =
             cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
-        let result = self
-            .runtime
-            .latest_connections()
-            .list_resources(server, params)
-            .await?;
+        let result = self.binding.list_resources(server, params).await?;
         let resources = result
             .resources
             .into_iter()
@@ -98,11 +96,7 @@ impl McpResourceClient {
     /// Reads one resource from the named server.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
         let params = ReadResourceRequestParams::new(uri.to_string());
-        let result = self
-            .runtime
-            .latest_connections()
-            .read_resource(server, params)
-            .await?;
+        let result = self.binding.read_resource(server, params).await?;
         let contents = result
             .contents
             .into_iter()
@@ -121,4 +115,37 @@ fn resource_content_from_rmcp(content: rmcp::model::ResourceContents) -> Result<
     let value =
         serde_json::to_value(content).context("failed to serialize MCP resource content")?;
     serde_json::from_value(value).context("failed to convert MCP resource content")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_config::Constrained;
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::AskForApproval;
+
+    fn test_manager() -> Arc<McpConnectionManager> {
+        Arc::new(
+            McpConnectionManager::new_uninitialized_with_permission_profile(
+                &Constrained::allow_any(AskForApproval::OnRequest),
+                &PermissionProfile::default(),
+                /*prefix_mcp_tool_names*/ true,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn resource_client_retains_exact_manager_snapshot_and_cache_identity() {
+        let first_manager = test_manager();
+        let first = McpResourceClient::new(Arc::clone(&first_manager));
+        let first_clone = first.clone();
+        let replacement = McpResourceClient::new(test_manager());
+
+        assert!(first.cache_key() == first_clone.cache_key());
+        assert!(first.cache_key() != replacement.cache_key());
+
+        drop(first_manager);
+        assert!(first.cache_key().0.upgrade().is_some());
+        assert!(!first.has_server("replacement-only").await);
+    }
 }

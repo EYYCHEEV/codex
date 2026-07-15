@@ -397,6 +397,7 @@ impl App {
             chat_widget.last_terminal_title = previous_terminal_title;
         }
         chat_widget.remote_connection = self.chat_widget.remote_connection.clone();
+        chat_widget.clear_managed_account_selection_scope();
         for (thread_id, entry) in self.agent_navigation.ordered_threads() {
             chat_widget.set_collab_agent_metadata(
                 thread_id,
@@ -507,6 +508,9 @@ impl App {
         }
         self.drain_active_thread_events(tui).await?;
         self.refresh_pending_thread_approvals().await;
+        if self.chat_widget.managed_accounts().is_some() {
+            self.refresh_managed_accounts_cache(app_server);
+        }
 
         Ok(())
     }
@@ -588,6 +592,9 @@ impl App {
                 self.enqueue_primary_thread_session(started.session, started.turns)
                     .await?;
                 self.chat_widget.maybe_send_next_queued_input();
+                if self.chat_widget.managed_accounts().is_some() {
+                    self.refresh_managed_accounts_cache(app_server);
+                }
             }
             Err(err) => {
                 return Err(color_eyre::eyre::eyre!(
@@ -656,6 +663,7 @@ impl App {
                 if let Err(err) = self
                     .replace_chat_widget_with_app_server_thread(
                         tui,
+                        app_server,
                         started,
                         ThreadAttachPresentation::SessionLineage,
                         initial_user_message,
@@ -696,6 +704,7 @@ impl App {
     pub(super) async fn replace_chat_widget_with_app_server_thread(
         &mut self,
         tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
         started: AppServerStartedThread,
         presentation: ThreadAttachPresentation,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
@@ -719,6 +728,10 @@ impl App {
             presentation,
         )
         .await?;
+        if self.chat_widget.managed_accounts().is_some() {
+            self.refresh_managed_accounts_cache(app_server);
+        }
+        self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
     }
 
@@ -984,6 +997,7 @@ impl App {
                 match self
                     .replace_chat_widget_with_app_server_thread(
                         tui,
+                        app_server,
                         resumed,
                         ThreadAttachPresentation::SessionLineage,
                         /*initial_user_message*/ None,

@@ -24,9 +24,9 @@ use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
-use crate::auth::AuthDotJson;
 use crate::auth::AuthKeyringBackendKind;
-use crate::auth::save_auth;
+use crate::auth::AuthManager;
+use crate::auth::ManagedChatgptOauthCredentials;
 use crate::default_client::create_raw_auth_client;
 use crate::default_client::originator;
 use crate::outbound_proxy::AuthRouteConfig;
@@ -41,7 +41,6 @@ use crate::token_data::parse_chatgpt_jwt_claims;
 use base64::Engine;
 use chrono::Utc;
 use codex_config::types::AuthCredentialsStoreMode;
-use codex_protocol::auth::AuthMode;
 use codex_utils_template::Template;
 use rand::RngCore;
 use serde_json::Value as JsonValue;
@@ -111,13 +110,13 @@ impl ServerOptions {
 pub struct LoginServer {
     pub auth_url: String,
     pub actual_port: u16,
-    server_handle: tokio::task::JoinHandle<io::Result<()>>,
+    server_handle: tokio::task::JoinHandle<io::Result<String>>,
     shutdown_handle: ShutdownHandle,
 }
 
 impl LoginServer {
     /// Waits for the login callback loop to finish.
-    pub async fn block_until_done(self) -> io::Result<()> {
+    pub async fn block_until_done(self) -> io::Result<String> {
         self.server_handle
             .await
             .map_err(|err| io::Error::other(format!("login server thread panicked: {err:?}")))?
@@ -201,6 +200,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
         let shutdown_notify = shutdown_notify.clone();
         let server = server;
         tokio::spawn(async move {
+            let mut managed_account_id = None;
             let result = loop {
                 tokio::select! {
                     _ = shutdown_notify.notified() => {
@@ -228,7 +228,11 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
                                 let _ = tokio::task::spawn_blocking(move || req.respond(response)).await;
                                 None
                             }
-                            HandledRequest::RedirectWithHeader(header) => {
+                            HandledRequest::RedirectWithHeader {
+                                header,
+                                managed_account_id: identity,
+                            } => {
+                                managed_account_id = Some(identity);
                                 let redirect = Response::empty(302).with_header(header);
                                 let _ = tokio::task::spawn_blocking(move || req.respond(redirect)).await;
                                 None
@@ -247,9 +251,18 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
                                     )
                                 })
                                 .await;
-                                Some(result)
+                                Some(result.and_then(|()| {
+                                    managed_account_id.clone().ok_or_else(|| {
+                                        io::Error::other(
+                                            "login completed without a managed account identity",
+                                        )
+                                    })
+                                }))
                             }
-                            HandledRequest::RedirectAndExit(header) => {
+                            HandledRequest::RedirectAndExit {
+                                header,
+                                managed_account_id,
+                            } => {
                                 match tokio::task::spawn_blocking(move || {
                                     send_response_with_disconnect(
                                         req,
@@ -268,7 +281,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
                                         warn!("hosted login redirect task failed: {err}");
                                     }
                                 }
-                                Some(Ok(()))
+                                Some(Ok(managed_account_id))
                             }
                         };
 
@@ -297,8 +310,14 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
 /// Internal callback handling outcome.
 enum HandledRequest {
     Response(Response<Cursor<Vec<u8>>>),
-    RedirectWithHeader(Header),
-    RedirectAndExit(Header),
+    RedirectWithHeader {
+        header: Header,
+        managed_account_id: String,
+    },
+    RedirectAndExit {
+        header: Header,
+        managed_account_id: String,
+    },
     ResponseAndExit {
         headers: Vec<Header>,
         body: Vec<u8>,
@@ -413,7 +432,7 @@ async fn process_request(
                     )
                     .await
                     .ok();
-                    if let Err(err) = persist_tokens_async(
+                    let managed_account_id = match persist_tokens_async(
                         &opts.codex_home,
                         api_key.clone(),
                         tokens.id_token.clone(),
@@ -421,17 +440,21 @@ async fn process_request(
                         tokens.refresh_token.clone(),
                         opts.cli_auth_credentials_store_mode,
                         opts.auth_keyring_backend_kind,
+                        &opts.auth_route_config,
                     )
                     .await
                     {
-                        eprintln!("Persist error: {err}");
-                        return login_error_response(
-                            "Sign-in completed but credentials could not be saved locally.",
-                            io::ErrorKind::Other,
-                            Some("persist_failed"),
-                            Some(&err.to_string()),
-                        );
-                    }
+                        Ok(identity) => identity,
+                        Err(err) => {
+                            eprintln!("Persist error: {err}");
+                            return login_error_response(
+                                "Sign-in completed but credentials could not be saved locally.",
+                                io::ErrorKind::Other,
+                                Some("persist_failed"),
+                                Some(&err.to_string()),
+                            );
+                        }
+                    };
 
                     let redirect = compose_success_url(
                         actual_port,
@@ -446,12 +469,14 @@ async fn process_request(
                     };
                     match tiny_http::Header::from_bytes(&b"Location"[..], url.as_bytes()) {
                         Ok(header) => match redirect {
-                            LoginSuccessRedirect::Local(_) => {
-                                HandledRequest::RedirectWithHeader(header)
-                            }
-                            LoginSuccessRedirect::Hosted(_) => {
-                                HandledRequest::RedirectAndExit(header)
-                            }
+                            LoginSuccessRedirect::Local(_) => HandledRequest::RedirectWithHeader {
+                                header,
+                                managed_account_id,
+                            },
+                            LoginSuccessRedirect::Hosted(_) => HandledRequest::RedirectAndExit {
+                                header,
+                                managed_account_id,
+                            },
                         },
                         Err(_) => login_error_response(
                             "Sign-in completed but redirecting back to Codex failed.",
@@ -881,40 +906,37 @@ pub(crate) async fn persist_tokens_async(
     refresh_token: String,
     auth_credentials_store_mode: AuthCredentialsStoreMode,
     keyring_backend_kind: AuthKeyringBackendKind,
-) -> io::Result<()> {
-    // Reuse existing synchronous logic but run it off the async runtime.
-    let codex_home = codex_home.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut tokens = TokenData {
-            id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
-            access_token,
-            refresh_token,
-            account_id: None,
-        };
-        if let Some(acc) = jwt_auth_claims(&id_token)
-            .get("chatgpt_account_id")
-            .and_then(|v| v.as_str())
-        {
-            tokens.account_id = Some(acc.to_string());
-        }
-        let auth = AuthDotJson {
-            auth_mode: Some(AuthMode::Chatgpt),
-            openai_api_key: api_key,
-            tokens: Some(tokens),
-            last_refresh: Some(Utc::now()),
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-        };
-        save_auth(
-            &codex_home,
-            &auth,
-            auth_credentials_store_mode,
-            keyring_backend_kind,
-        )
-    })
-    .await
-    .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
+    auth_route_config: &AuthRouteConfig,
+) -> io::Result<String> {
+    let mut tokens = TokenData {
+        id_token: parse_chatgpt_jwt_claims(&id_token).map_err(io::Error::other)?,
+        access_token,
+        refresh_token,
+        account_id: None,
+    };
+    if let Some(account_id) = jwt_auth_claims(&id_token)
+        .get("chatgpt_account_id")
+        .and_then(|value| value.as_str())
+    {
+        tokens.account_id = Some(account_id.to_string());
+    }
+    let manager = AuthManager::new(
+        codex_home.to_path_buf(),
+        false,
+        auth_credentials_store_mode,
+        None,
+        None,
+        keyring_backend_kind,
+        auth_route_config.clone(),
+    )
+    .await;
+    manager
+        .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+            tokens,
+            last_refresh: Utc::now(),
+            oauth_api_key: api_key,
+        })
+        .await
 }
 
 /// Validates the ID token against an optional workspace restriction.
@@ -1161,7 +1183,14 @@ pub(crate) async fn obtain_api_key(
 }
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use crate::auth::AuthKeyringBackendKind;
+    use crate::auth::load_auth_dot_json;
+    use codex_config::types::AuthCredentialsStoreMode;
 
     use super::TokenEndpointErrorDetail;
     use super::html_escape;
@@ -1171,6 +1200,94 @@ mod tests {
     use super::redact_sensitive_url_parts;
     use super::render_login_error_page;
     use super::sanitize_url_for_logging;
+
+    fn oauth_id_token(email: &str, account_id: &str) -> String {
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let header = encode(br#"{"alg":"none","typ":"JWT"}"#);
+        let payload = encode(
+            &serde_json::to_vec(&json!({
+                "email": email,
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                    "chatgpt_user_id": format!("user-{account_id}"),
+                    "chatgpt_plan_type": "pro",
+                }
+            }))
+            .expect("serialize OAuth claims"),
+        );
+        format!("{header}.{payload}.sig")
+    }
+
+    #[tokio::test]
+    async fn sequential_oauth_completions_preserve_siblings_and_replace_only_same_identity() {
+        let codex_home = tempdir().expect("tempdir");
+        let first_identity = super::persist_tokens_async(
+            codex_home.path(),
+            Some("api-a1".to_string()),
+            oauth_id_token("a@example.com", "workspace-a"),
+            "access-a1".to_string(),
+            "refresh-a1".to_string(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+            &crate::test_support::transport_default_auth_route_config(),
+        )
+        .await
+        .expect("persist first OAuth completion");
+        let second_identity = super::persist_tokens_async(
+            codex_home.path(),
+            Some("api-b1".to_string()),
+            oauth_id_token("b@example.com", "workspace-b"),
+            "access-b1".to_string(),
+            "refresh-b1".to_string(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+            &crate::test_support::transport_default_auth_route_config(),
+        )
+        .await
+        .expect("persist second OAuth completion");
+        let relogin_identity = super::persist_tokens_async(
+            codex_home.path(),
+            Some("api-a2".to_string()),
+            oauth_id_token(" A@Example.com ", "workspace-a"),
+            "access-a2".to_string(),
+            "refresh-a2".to_string(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+            &crate::test_support::transport_default_auth_route_config(),
+        )
+        .await
+        .expect("persist same-identity OAuth completion");
+
+        assert_eq!(relogin_identity, first_identity);
+        assert_ne!(second_identity, first_identity);
+        let stored = load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .expect("load managed OAuth pool")
+        .expect("stored auth");
+        let pool = stored.managed_chatgpt.expect("managed OAuth pool");
+        assert_eq!(pool.accounts.len(), 2);
+        assert_eq!(
+            pool.accounts
+                .iter()
+                .find(|account| account.identity_key == first_identity)
+                .expect("first account")
+                .tokens
+                .refresh_token,
+            "refresh-a2"
+        );
+        assert_eq!(
+            pool.accounts
+                .iter()
+                .find(|account| account.identity_key == second_identity)
+                .expect("second account")
+                .tokens
+                .refresh_token,
+            "refresh-b1"
+        );
+    }
 
     #[test]
     fn parse_token_endpoint_error_prefers_error_description() {

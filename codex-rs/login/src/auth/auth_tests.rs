@@ -1,6 +1,8 @@
 use super::*;
 use crate::auth::storage::FileAuthStorage;
+use crate::auth::storage::ManagedChatgptTombstone;
 use crate::auth::storage::get_auth_file;
+use crate::login_with_bedrock_api_key;
 use crate::token_data::IdTokenInfo;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::AuthMode;
@@ -54,6 +56,7 @@ async fn refresh_without_id_token() {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         codex_home.path(),
@@ -116,6 +119,7 @@ async fn refresh_with_new_id_token_updates_account_id() {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         codex_home.path(),
@@ -172,6 +176,7 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         codex_home.path(),
@@ -203,7 +208,10 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
     )
     .expect("load_auth_dot_json should succeed")
     .expect("auth.json should exist");
-    let tokens = repaired.tokens.expect("tokens should exist");
+    assert!(repaired.tokens.is_none());
+    let pool = repaired.managed_chatgpt.expect("managed pool should exist");
+    assert_eq!(pool.accounts.len(), 1);
+    let tokens = &pool.accounts[0].tokens;
     assert_eq!(
         tokens.id_token.chatgpt_account_id.as_deref(),
         Some("workspace-a")
@@ -218,7 +226,7 @@ fn login_with_api_key_overwrites_existing_auth_json() {
     let stale_auth = json!({
         "OPENAI_API_KEY": "sk-old",
         "tokens": {
-            "id_token": "stale.header.payload",
+            "id_token": managed_id_token("stale@example.com", "stale-account"),
             "access_token": "stale-access",
             "refresh_token": "stale-refresh",
             "account_id": "stale-acc"
@@ -290,6 +298,190 @@ async fn login_with_access_token_writes_agent_identity_jwt() {
 }
 
 #[tokio::test]
+async fn login_with_agent_identity_jwt_enforces_workspace_before_write() {
+    let dir = tempdir().expect("tempdir");
+    super::login_with_api_key(
+        dir.path(),
+        "sk-existing",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("seed existing auth");
+    let auth_path = get_auth_file(dir.path());
+    let before = std::fs::read(&auth_path).expect("read seeded auth");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/agent-identities/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let chatgpt_base_url = format!("{}/backend-api", server.uri());
+    let allowed = vec![WORKSPACE_ID_ALLOWED.to_string()];
+
+    for account_id in [WORKSPACE_ID_DISALLOWED, ""] {
+        let record = agent_identity_record(account_id);
+        let jwt = signed_agent_identity_jwt(&record, json!(record.plan_type))
+            .expect("signed agent identity");
+        let err = super::login_with_access_token(
+            dir.path(),
+            &jwt,
+            AuthCredentialsStoreMode::File,
+            Some(&allowed),
+            Some(&chatgpt_base_url),
+            AuthKeyringBackendKind::Direct,
+            None,
+        )
+        .await
+        .expect_err("disallowed workspace must be rejected");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            std::fs::read(&auth_path).expect("read preserved auth"),
+            before
+        );
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn login_with_agent_identity_jwt_allows_same_workspace_when_fedramp() {
+    let dir = tempdir().expect("tempdir");
+    let mut record = agent_identity_record(WORKSPACE_ID_ALLOWED);
+    record.chatgpt_account_is_fedramp = true;
+    let jwt =
+        signed_agent_identity_jwt(&record, json!(record.plan_type)).expect("signed agent identity");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/agent-identities/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let allowed = vec![WORKSPACE_ID_ALLOWED.to_string()];
+
+    super::login_with_access_token(
+        dir.path(),
+        &jwt,
+        AuthCredentialsStoreMode::File,
+        Some(&allowed),
+        Some(&format!("{}/backend-api", server.uri())),
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await
+    .expect("same workspace FedRAMP JWT should be allowed");
+
+    let stored = load_auth_dot_json(
+        dir.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load auth")
+    .expect("stored auth");
+    assert_eq!(stored.agent_identity, Some(AgentIdentityStorage::Jwt(jwt)));
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn env_agent_identity_jwt_rejects_workspace_before_task_registration() {
+    let codex_home = tempdir().expect("tempdir");
+    let record = agent_identity_record(WORKSPACE_ID_DISALLOWED);
+    let jwt =
+        signed_agent_identity_jwt(&record, json!(record.plan_type)).expect("signed agent identity");
+    let _access_token_guard = EnvVarGuard::set(CODEX_ACCESS_TOKEN_ENV_VAR, &jwt);
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/agent-identities/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let allowed = vec![WORKSPACE_ID_ALLOWED.to_string()];
+    let authapi_base_url = server.uri();
+    let err = super::load_auth(
+        codex_home.path(),
+        false,
+        AuthCredentialsStoreMode::File,
+        Some(&allowed),
+        Some(&format!("{authapi_base_url}/backend-api")),
+        AuthKeyringBackendKind::Direct,
+        Some(&authapi_base_url),
+        None,
+    )
+    .await
+    .expect_err("disallowed env JWT must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(!get_auth_file(codex_home.path()).exists());
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn persisted_agent_identity_jwt_rejects_workspace_without_mutation_or_registration() {
+    let _access_token_guard = remove_access_token_env_var();
+    let codex_home = tempdir().expect("tempdir");
+    let record = agent_identity_record(WORKSPACE_ID_DISALLOWED);
+    let jwt =
+        signed_agent_identity_jwt(&record, json!(record.plan_type)).expect("signed agent identity");
+    let document = AuthDotJson {
+        auth_mode: Some(AuthMode::AgentIdentity),
+        openai_api_key: None,
+        tokens: None,
+        last_refresh: None,
+        agent_identity: Some(AgentIdentityStorage::Jwt(jwt)),
+        managed_chatgpt: None,
+        personal_access_token: None,
+        bedrock_api_key: None,
+    };
+    save_auth(
+        codex_home.path(),
+        &document,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("seed persisted JWT");
+    let before = std::fs::read(get_auth_file(codex_home.path())).expect("read seeded JWT");
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/agent-identities/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let allowed = vec![WORKSPACE_ID_ALLOWED.to_string()];
+    let authapi_base_url = server.uri();
+    let err = super::load_auth(
+        codex_home.path(),
+        false,
+        AuthCredentialsStoreMode::File,
+        Some(&allowed),
+        Some(&format!("{authapi_base_url}/backend-api")),
+        AuthKeyringBackendKind::Direct,
+        Some(&authapi_base_url),
+        None,
+    )
+    .await
+    .expect_err("disallowed persisted JWT must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(
+        std::fs::read(get_auth_file(codex_home.path())).expect("read preserved JWT"),
+        before
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
 #[serial(codex_auth_env)]
 async fn stored_agent_identity_jwt_keeps_auth_json_unchanged() -> anyhow::Result<()> {
     let _access_token_guard = remove_access_token_env_var();
@@ -317,6 +509,7 @@ async fn stored_agent_identity_jwt_keeps_auth_json_unchanged() -> anyhow::Result
             agent_identity: Some(AgentIdentityStorage::Jwt(agent_identity.clone())),
             personal_access_token: None,
             bedrock_api_key: None,
+            managed_chatgpt: None,
         },
         AuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::Direct,
@@ -393,6 +586,7 @@ async fn login_with_access_token_writes_only_personal_access_token() {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: Some("at-login-test".to_string()),
             bedrock_api_key: None,
         }
@@ -986,7 +1180,7 @@ async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
 
     assert_eq!(
         AuthDotJson {
-            auth_mode: None,
+            auth_mode: Some(AuthMode::Chatgpt),
             openai_api_key: None,
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
@@ -1003,6 +1197,7 @@ async fn pro_account_with_no_api_key_uses_chatgpt_auth() {
             }),
             last_refresh: Some(last_refresh),
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: None,
         },
@@ -1052,6 +1247,7 @@ fn logout_removes_auth_file() -> Result<(), std::io::Error> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     super::save_auth(
         dir.path(),
@@ -1089,6 +1285,8 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
         step: UnauthorizedRecoveryStep::Reload,
         expected_account_id: None,
         mode: UnauthorizedRecoveryMode::Managed,
+        managed_identity_key: None,
+        managed_account_revision: None,
     };
     assert_eq!(managed.mode_name(), "managed");
     assert_eq!(managed.step_name(), "reload");
@@ -1098,6 +1296,8 @@ async fn unauthorized_recovery_reports_mode_and_step_names() {
         step: UnauthorizedRecoveryStep::ExternalRefresh,
         expected_account_id: None,
         mode: UnauthorizedRecoveryMode::External,
+        managed_identity_key: None,
+        managed_account_revision: None,
     };
     assert_eq!(external.mode_name(), "external");
     assert_eq!(external.step_name(), "external_refresh");
@@ -1144,6 +1344,7 @@ async fn refresh_failure_is_scoped_to_the_matching_auth_snapshot() {
         codex_home.path(),
         updated_auth_dot_json,
         AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
         /*agent_identity_authapi_base_url*/ None,
@@ -1655,6 +1856,16 @@ async fn load_auth_reads_personal_access_token_from_env() {
 #[serial(codex_auth_env)]
 async fn auth_manager_rejects_env_personal_access_token_workspace_mismatch() {
     let codex_home = tempdir().unwrap();
+    let _clean_access_token = remove_access_token_env_var();
+    let stored_manager = file_pool_manager(codex_home.path()).await;
+    stored_manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "stored@example.com",
+            WORKSPACE_ID_ALLOWED,
+            "stored-refresh",
+        ))
+        .await
+        .expect("stored managed pool");
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/v1/user-auth-credential/whoami"))
@@ -1682,6 +1893,10 @@ async fn auth_manager_rejects_env_personal_access_token_workspace_mismatch() {
     .await;
 
     assert_eq!(manager.auth().await, None);
+    let error = manager
+        .auth_cached_result()
+        .expect_err("higher-precedence env policy failure must remain observable");
+    assert!(!error.is_empty());
     server.verify().await;
 }
 
@@ -1832,6 +2047,148 @@ async fn enforce_login_restrictions_logs_out_for_method_mismatch() {
     assert!(
         !codex_home.path().join("auth.json").exists(),
         "auth.json should be removed on mismatch"
+    );
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn forced_login_restriction_clears_external_overlay_and_multi_account_file_store() {
+    let codex_home = tempdir().expect("tempdir");
+    let _access_token_guard = remove_access_token_env_var();
+    let manager = file_pool_manager(codex_home.path()).await;
+    for (email, workspace, refresh) in [
+        ("a@example.com", "workspace-a", "refresh-a"),
+        ("b@example.com", "workspace-b", "refresh-b"),
+    ] {
+        manager
+            .upsert_managed_chatgpt_oauth(managed_oauth_credentials(email, workspace, refresh))
+            .await
+            .expect("managed login");
+    }
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external@example.com", "external-workspace"),
+        "external-workspace",
+        Some("pro"),
+    )
+    .expect("external overlay");
+    let config = build_config(
+        codex_home.path(),
+        Some(ForcedLoginMethod::Api),
+        /*forced_chatgpt_workspace_id*/ None,
+    )
+    .await;
+
+    super::enforce_login_restrictions(&config)
+        .await
+        .expect_err("forced API login should reject ChatGPT auth");
+
+    assert!(
+        load_external_chatgpt_auth(codex_home.path())
+            .expect("load external auth")
+            .is_none()
+    );
+    assert!(
+        load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .expect("load file auth")
+        .is_none()
+    );
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn forced_login_restriction_removes_malformed_configured_store() {
+    let codex_home = tempdir().expect("tempdir");
+    let _access_token_guard = remove_access_token_env_var();
+    std::fs::write(codex_home.path().join("auth.json"), b"{not-json")
+        .expect("write malformed configured auth");
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external@example.com", "external-workspace"),
+        "external-workspace",
+        Some("pro"),
+    )
+    .expect("external overlay");
+    let config = build_config(
+        codex_home.path(),
+        Some(ForcedLoginMethod::Api),
+        /*forced_chatgpt_workspace_id*/ None,
+    )
+    .await;
+
+    super::enforce_login_restrictions(&config)
+        .await
+        .expect_err("forced API login should reject ChatGPT auth");
+
+    assert!(!codex_home.path().join("auth.json").exists());
+    assert!(
+        load_external_chatgpt_auth(codex_home.path())
+            .expect("load external auth")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn forced_login_restriction_clears_external_overlay_and_ephemeral_pool() {
+    let codex_home = tempdir().expect("tempdir");
+    let _access_token_guard = remove_access_token_env_var();
+    let manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::Ephemeral,
+        None,
+        None,
+        AuthKeyringBackendKind::default(),
+        None,
+    )
+    .await;
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("managed login");
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external@example.com", "external-workspace"),
+        "external-workspace",
+        Some("pro"),
+    )
+    .expect("external overlay");
+    let config = AuthConfig {
+        codex_home: codex_home.path().to_path_buf(),
+        auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
+        keyring_backend_kind: AuthKeyringBackendKind::default(),
+        forced_login_method: Some(ForcedLoginMethod::Api),
+        forced_chatgpt_workspace_id: None,
+        chatgpt_base_url: None,
+        auth_route_config: None,
+    };
+
+    super::enforce_login_restrictions(&config)
+        .await
+        .expect_err("forced API login should reject ChatGPT auth");
+
+    assert!(
+        load_external_chatgpt_auth(codex_home.path())
+            .expect("load external auth")
+            .is_none()
+    );
+    assert!(
+        load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::Ephemeral,
+            AuthKeyringBackendKind::default(),
+        )
+        .expect("load ephemeral auth")
+        .is_none()
     );
 }
 
@@ -2016,6 +2373,7 @@ async fn enforce_login_restrictions_logs_out_for_agent_identity_workspace_mismat
             agent_identity: Some(AgentIdentityStorage::Jwt(agent_identity)),
             personal_access_token: None,
             bedrock_api_key: None,
+            managed_chatgpt: None,
         },
         AuthCredentialsStoreMode::File,
         AuthKeyringBackendKind::default(),
@@ -2455,4 +2813,1794 @@ async fn missing_plan_type_maps_to_unknown() {
     .expect("auth available");
 
     pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Unknown));
+}
+
+fn managed_id_token(email: &str, account_id: &str) -> String {
+    managed_id_token_for_user(email, account_id, "user-12345")
+}
+
+fn managed_id_token_for_user(email: &str, account_id: &str, user_id: &str) -> String {
+    let header = serde_json::json!({"alg": "none", "typ": "JWT"});
+    let payload = serde_json::json!({
+        "email": email,
+        "email_verified": true,
+        "https://api.openai.com/auth": {
+            "chatgpt_user_id": user_id,
+            "user_id": user_id,
+            "chatgpt_account_id": account_id,
+        },
+    });
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    format!(
+        "{}.{}.{}",
+        b64(&serde_json::to_vec(&header).expect("serialize JWT header")),
+        b64(&serde_json::to_vec(&payload).expect("serialize JWT payload")),
+        b64(b"sig"),
+    )
+}
+
+fn managed_oauth_credentials(
+    email: &str,
+    account_id: &str,
+    refresh_token: &str,
+) -> ManagedChatgptOauthCredentials {
+    ManagedChatgptOauthCredentials {
+        tokens: TokenData {
+            id_token: IdTokenInfo {
+                email: Some(email.to_string()),
+                chatgpt_account_id: Some(account_id.to_string()),
+                raw_jwt: managed_id_token(email, account_id),
+                ..Default::default()
+            },
+            access_token: format!("access-{account_id}"),
+            refresh_token: refresh_token.to_string(),
+            account_id: Some(account_id.to_string()),
+        },
+        last_refresh: Utc::now(),
+        oauth_api_key: None,
+    }
+}
+
+async fn file_pool_manager(codex_home: &std::path::Path) -> Arc<AuthManager> {
+    AuthManager::shared(
+        codex_home.to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn agent_identity_bootstrap_cooldown_is_scoped_to_managed_identity_and_user() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/agent/register"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(6)
+        .mount(&server)
+        .await;
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let identity_a = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("login A");
+    let mut credentials_b = managed_oauth_credentials("b@example.com", "workspace-b", "refresh-b");
+    credentials_b.tokens.id_token = parse_chatgpt_jwt_claims(&managed_id_token_for_user(
+        "b@example.com",
+        "workspace-b",
+        "user-b",
+    ))
+    .expect("parse user B token");
+    let identity_b = manager
+        .upsert_managed_chatgpt_oauth(credentials_b)
+        .await
+        .expect("login B");
+    let mut stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load auth")
+    .expect("stored auth");
+    for identity in [&identity_a, &identity_b] {
+        let account = row_mut(&mut stored, identity).expect("managed account");
+        account.chatgpt_account_id = Some("shared-workspace".to_string());
+        account.tokens.account_id = Some("shared-workspace".to_string());
+        account.tokens.id_token.chatgpt_account_id = Some("shared-workspace".to_string());
+    }
+    save_auth(
+        codex_home.path(),
+        &stored,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("persist shared raw workspace");
+    let snapshot_a = manager
+        .managed_chatgpt_auth_snapshot_for_identity(&identity_a)
+        .await
+        .expect("snapshot A")
+        .expect("account A");
+    let snapshot_b = manager
+        .managed_chatgpt_auth_snapshot_for_identity(&identity_b)
+        .await
+        .expect("snapshot B")
+        .expect("account B");
+    let manager = AuthManager::from_auth_for_testing_with_home_and_agent_identity_authapi_base_url(
+        snapshot_a.auth.clone(),
+        codex_home.path().to_path_buf(),
+        server.uri(),
+    );
+
+    manager
+        .agent_identity_auth_for_snapshot(
+            &snapshot_a,
+            AgentIdentityAuthPolicy::ChatGptAuth,
+            SessionSource::Cli,
+        )
+        .await
+        .expect_err("bootstrap A fails after retries");
+    manager
+        .agent_identity_auth_for_snapshot(
+            &snapshot_b,
+            AgentIdentityAuthPolicy::ChatGptAuth,
+            SessionSource::Cli,
+        )
+        .await
+        .expect_err("bootstrap B independently retries");
+    manager
+        .agent_identity_auth_for_snapshot(
+            &snapshot_a,
+            AgentIdentityAuthPolicy::ChatGptAuth,
+            SessionSource::Cli,
+        )
+        .await
+        .expect_err("bootstrap A remains cooled down");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn uncommitted_auth_failure_rotates_but_committed_failure_does_not() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("first login");
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "b@example.com",
+            "workspace-b",
+            "refresh-b",
+        ))
+        .await
+        .expect("second login");
+    let scope = ManagedChatgptSelectionScope {
+        thread_id: Some("thread-a".to_string()),
+        session_id: Some("session-a".to_string()),
+        model: Some("gpt-test".to_string()),
+    };
+    let selected = manager
+        .managed_chatgpt_auth_snapshot(&scope)
+        .await
+        .expect("select account")
+        .expect("managed account");
+
+    let committed = manager
+        .recover_failed_attempt(
+            &selected,
+            ManagedChatgptFailure::AuthInvalid,
+            /*committed*/ true,
+            &scope,
+        )
+        .await
+        .expect("committed recovery");
+    let ManagedChatgptRecoveryDecision::Keep(committed) = committed else {
+        panic!("committed attempt must keep its account");
+    };
+    assert_eq!(committed.identity_key, selected.identity_key);
+    assert!(
+        manager
+            .managed_chatgpt_accounts()
+            .expect("list after committed failure")
+            .iter()
+            .all(|account| account.block_kind.is_none())
+    );
+
+    let recovered = manager
+        .recover_failed_attempt(
+            &selected,
+            ManagedChatgptFailure::AuthInvalid,
+            /*committed*/ false,
+            &scope,
+        )
+        .await
+        .expect("uncommitted recovery");
+    let ManagedChatgptRecoveryDecision::Rotate(rotated) = recovered else {
+        panic!("uncommitted auth failure must rotate to a sibling");
+    };
+    assert_ne!(rotated.identity_key, selected.identity_key);
+    let accounts = manager
+        .managed_chatgpt_accounts()
+        .expect("list after rotation");
+    let failed = accounts
+        .iter()
+        .find(|account| account.identity_key == selected.identity_key)
+        .expect("failed account");
+    assert_eq!(
+        failed.block_kind,
+        Some(ManagedChatgptBlockKindView::AuthInvalid)
+    );
+}
+
+#[tokio::test]
+async fn status_observation_state_advance_still_recovers_and_rotates() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    for (email, workspace, refresh) in [
+        ("a@example.com", "workspace-a", "refresh-a"),
+        ("b@example.com", "workspace-b", "refresh-b"),
+    ] {
+        manager
+            .upsert_managed_chatgpt_oauth(managed_oauth_credentials(email, workspace, refresh))
+            .await
+            .expect("managed login");
+    }
+    let scope = ManagedChatgptSelectionScope {
+        thread_id: Some("status-before-failure".to_string()),
+        session_id: Some("session-a".to_string()),
+        model: Some("gpt-test".to_string()),
+    };
+    let selected = manager
+        .managed_chatgpt_auth_snapshot(&scope)
+        .await
+        .expect("select account")
+        .expect("managed account");
+    let observed = manager
+        .record_managed_chatgpt_status_observation(
+            &selected.identity_key,
+            selected.account_revision,
+            selected.account_state_revision,
+            ManagedChatgptStatusObservation {
+                observed_at: Utc::now(),
+                rate: ManagedChatgptRateObservation::Unavailable {
+                    reason: "response status recorder".to_string(),
+                },
+                token: ManagedChatgptTokenObservation::NotObserved,
+            },
+        )
+        .expect("record response status")
+        .expect("matching status snapshot");
+    assert_eq!(
+        observed.revision,
+        selected.account_state_revision.saturating_add(1)
+    );
+    assert_eq!(observed.credential_revision, selected.account_revision);
+
+    let recovered = manager
+        .recover_failed_attempt(
+            &selected,
+            ManagedChatgptFailure::Quota { reset_at: None },
+            /*committed*/ false,
+            &scope,
+        )
+        .await
+        .expect("recover usage-limit failure");
+    let ManagedChatgptRecoveryDecision::Rotate(rotated) = recovered else {
+        panic!("usage-limit failure after a status write must rotate");
+    };
+    assert_ne!(rotated.identity_key, selected.identity_key);
+    let failed = manager
+        .managed_chatgpt_accounts()
+        .expect("list after recovery")
+        .into_iter()
+        .find(|account| account.identity_key == selected.identity_key)
+        .expect("failed account retained");
+    assert_eq!(failed.block_kind, Some(ManagedChatgptBlockKindView::Quota));
+}
+
+#[tokio::test]
+async fn recovery_from_before_relogin_stops_without_blocking_new_credentials() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a1",
+        ))
+        .await
+        .expect("first login");
+    let scope = ManagedChatgptSelectionScope::default();
+    let stale = manager
+        .managed_chatgpt_auth_snapshot_for_identity(&identity)
+        .await
+        .expect("load first credentials")
+        .expect("first snapshot");
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a2",
+        ))
+        .await
+        .expect("relogin");
+
+    assert!(matches!(
+        manager
+            .recover_failed_attempt(
+                &stale,
+                ManagedChatgptFailure::AuthInvalid,
+                /*committed*/ false,
+                &scope,
+            )
+            .await
+            .expect("stale recovery"),
+        ManagedChatgptRecoveryDecision::Stop
+    ));
+    let current = manager
+        .managed_chatgpt_accounts()
+        .expect("current account")
+        .into_iter()
+        .find(|account| account.identity_key == identity)
+        .expect("relogged account");
+    assert!(current.credential_revision > stale.account_revision);
+    assert!(current.block_kind.is_none());
+}
+
+#[tokio::test]
+async fn managed_agent_identity_persistence_accepts_state_only_advancement_at_actual_key() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("managed login");
+    let snapshot = manager
+        .managed_chatgpt_auth_snapshot_for_identity(&identity)
+        .await
+        .expect("load snapshot")
+        .expect("managed snapshot");
+    manager
+        .record_managed_chatgpt_status_observation(
+            &identity,
+            snapshot.account_revision,
+            snapshot.account_state_revision,
+            ManagedChatgptStatusObservation {
+                observed_at: Utc::now(),
+                rate: ManagedChatgptRateObservation::Unavailable {
+                    reason: "state-only update".to_string(),
+                },
+                token: ManagedChatgptTokenObservation::NotObserved,
+            },
+        )
+        .expect("status CAS")
+        .expect("status persisted");
+    let binding = ManagedIdentityPersistenceBinding {
+        identity_key: identity.clone(),
+        credential_revision: snapshot.account_revision,
+        raw_account_id: snapshot.transport.raw_account_id,
+    };
+    let state = Arc::new(Mutex::new(None));
+    let storage = manager.managed_chatgpt_storage();
+    let record = agent_identity_record("workspace-a");
+    persist_agent_identity_record(&state, &storage, Some(&binding), record.clone())
+        .expect("state-only advancement must not invalidate bootstrap");
+
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load persisted identity")
+    .expect("stored pool");
+    let account = stored
+        .managed_chatgpt
+        .expect("managed pool")
+        .accounts
+        .into_iter()
+        .find(|account| account.identity_key == identity)
+        .expect("actual identity-key row");
+    assert_eq!(
+        account
+            .agent_identity
+            .as_ref()
+            .and_then(AgentIdentityStorage::as_record),
+        Some(&record)
+    );
+}
+
+#[tokio::test]
+async fn delayed_managed_agent_identity_persistence_rejects_relogin() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a1",
+        ))
+        .await
+        .expect("initial login");
+    let snapshot = manager
+        .managed_chatgpt_auth_snapshot_for_identity(&identity)
+        .await
+        .expect("load snapshot")
+        .expect("managed snapshot");
+    let binding = ManagedIdentityPersistenceBinding {
+        identity_key: identity.clone(),
+        credential_revision: snapshot.account_revision,
+        raw_account_id: snapshot.transport.raw_account_id.clone(),
+    };
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a2",
+        ))
+        .await
+        .expect("relogin");
+    let state = Arc::new(Mutex::new(None));
+    let storage = manager.managed_chatgpt_storage();
+    let error = persist_agent_identity_record(
+        &state,
+        &storage,
+        Some(&binding),
+        agent_identity_record("workspace-a"),
+    )
+    .expect_err("old bootstrap must not write into relogged credentials");
+    assert!(
+        error
+            .to_string()
+            .contains("changed during Agent Identity bootstrap")
+    );
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load after rejected persistence")
+    .expect("stored pool");
+    assert!(
+        stored
+            .managed_chatgpt
+            .expect("managed pool")
+            .accounts
+            .into_iter()
+            .find(|account| account.identity_key == identity)
+            .expect("relogged row")
+            .agent_identity
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn stale_observation_from_before_relogin_is_rejected() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a1",
+        ))
+        .await
+        .expect("first login");
+    let old = manager.managed_chatgpt_accounts().expect("list pool")[0].clone();
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a2",
+        ))
+        .await
+        .expect("relogin");
+
+    let result = manager
+        .record_managed_chatgpt_status_observation(
+            &identity,
+            old.credential_revision,
+            old.revision,
+            ManagedChatgptStatusObservation {
+                observed_at: Utc::now(),
+                rate: ManagedChatgptRateObservation::Unavailable {
+                    reason: "stale response".to_string(),
+                },
+                token: ManagedChatgptTokenObservation::NotObserved,
+            },
+        )
+        .expect("observation CAS");
+    assert!(result.is_none());
+    assert!(
+        manager.managed_chatgpt_accounts().expect("list pool")[0]
+            .usage
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_distinct_oauth_upserts_preserve_both_rows() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let (a, b) = tokio::join!(
+        manager.upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        )),
+        manager.upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "b@example.com",
+            "workspace-b",
+            "refresh-b",
+        )),
+    );
+    assert_ne!(a.expect("first upsert"), b.expect("second upsert"));
+    assert_eq!(
+        manager.managed_chatgpt_accounts().expect("list pool").len(),
+        2
+    );
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn targeted_logout_persists_tombstone_until_revocation_finishes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(250)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _revoke_guard = EnvVarGuard::set(
+        REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/revoke", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("login");
+    let scope = ManagedChatgptSelectionScope {
+        thread_id: Some("thread-a".to_string()),
+        session_id: Some("session-a".to_string()),
+        model: Some("gpt-test".to_string()),
+    };
+    let selected_before = manager
+        .list_managed_chatgpt_accounts(&scope)
+        .await
+        .expect("select account before removal");
+    assert_eq!(
+        selected_before.selected_account_id.as_deref(),
+        Some(identity.as_str())
+    );
+    let selection_revision_before = selected_before.selection_revision;
+    let removing = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let identity = identity.clone();
+        async move { manager.remove_managed_chatgpt_account(&identity).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load tombstone")
+    .expect("stored auth");
+    let tombstoned_pool = stored.managed_chatgpt.expect("pool");
+    assert!(tombstoned_pool.accounts[0].tombstone.is_some());
+    let tombstoned_revision = tombstoned_pool.revision;
+    assert!(
+        removing
+            .await
+            .expect("logout task")
+            .expect("targeted logout")
+    );
+    let stored_after = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load after logout")
+    .expect("empty pool must preserve its revision");
+    let pool_after = stored_after.managed_chatgpt.expect("pool after logout");
+    assert!(pool_after.accounts.is_empty());
+    assert!(pool_after.revision > tombstoned_revision);
+    let selected_after = manager
+        .list_managed_chatgpt_accounts(&scope)
+        .await
+        .expect("list after removal");
+    assert!(selected_after.selected_account_id.is_none());
+    assert!(selected_after.selection_revision > selection_revision_before);
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn recover_and_restarted_list_resume_persisted_tombstones() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let _revoke_guard = EnvVarGuard::set(
+        REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/revoke", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    for (email, workspace, refresh) in [
+        ("a@example.com", "workspace-a", "refresh-a"),
+        ("b@example.com", "workspace-b", "refresh-b"),
+    ] {
+        manager
+            .upsert_managed_chatgpt_oauth(managed_oauth_credentials(email, workspace, refresh))
+            .await
+            .expect("managed login");
+    }
+    let stale = manager
+        .managed_chatgpt_auth_snapshot(&ManagedChatgptSelectionScope::default())
+        .await
+        .expect("select before tombstone")
+        .expect("selected snapshot");
+    let mut stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load pool")
+    .expect("stored pool");
+    let stale_row = stored
+        .managed_chatgpt
+        .as_mut()
+        .expect("managed pool")
+        .accounts
+        .iter_mut()
+        .find(|account| account.identity_key == stale.identity_key)
+        .expect("selected row");
+    stale_row.tombstone = Some(ManagedChatgptTombstone {
+        operation_id: "persisted-recover-tombstone".to_string(),
+        revision: stale.account_revision,
+        refresh_token: stale_row.tokens.refresh_token.clone(),
+    });
+    stale_row.revision = stale_row.revision.saturating_add(1);
+    save_auth(
+        codex_home.path(),
+        &stored,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("persist first tombstone");
+
+    assert!(matches!(
+        manager
+            .recover_failed_attempt(
+                &stale,
+                ManagedChatgptFailure::Transport,
+                /*committed*/ true,
+                &ManagedChatgptSelectionScope::default(),
+            )
+            .await
+            .expect("recover after tombstone"),
+        ManagedChatgptRecoveryDecision::Stop
+    ));
+    let remaining = manager
+        .managed_chatgpt_accounts()
+        .expect("remaining account")
+        .into_iter()
+        .next()
+        .expect("sibling remains");
+    let mut stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("reload pool")
+    .expect("stored sibling");
+    let remaining_row = stored
+        .managed_chatgpt
+        .as_mut()
+        .expect("managed pool")
+        .accounts
+        .iter_mut()
+        .find(|account| account.identity_key == remaining.identity_key)
+        .expect("remaining row");
+    remaining_row.tombstone = Some(ManagedChatgptTombstone {
+        operation_id: "persisted-list-tombstone".to_string(),
+        revision: remaining.credential_revision,
+        refresh_token: remaining_row.tokens.refresh_token.clone(),
+    });
+    remaining_row.revision = remaining_row.revision.saturating_add(1);
+    save_auth(
+        codex_home.path(),
+        &stored,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("persist second tombstone");
+    drop(manager);
+
+    let restarted = file_pool_manager(codex_home.path()).await;
+    let listed = restarted
+        .list_managed_chatgpt_accounts(&ManagedChatgptSelectionScope::default())
+        .await
+        .expect("restart list resumes tombstone");
+    assert!(listed.accounts.is_empty());
+    assert!(listed.selected_account_id.is_none());
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn refresh_remove_and_relogin_never_reuses_credential_revision() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "refreshed-access",
+            "refresh_token": "refreshed-token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _refresh_guard = EnvVarGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/token", server.uri()),
+    );
+    let _revoke_guard = EnvVarGuard::set(
+        REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/revoke", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let mut initial = managed_oauth_credentials("a@example.com", "workspace-a", "refresh-a");
+    initial.last_refresh = Utc::now() - chrono::Duration::days(10);
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(initial)
+        .await
+        .expect("initial login");
+    let pre_refresh = manager
+        .managed_chatgpt_auth_snapshot_for_identity(&identity)
+        .await
+        .expect("load pre-refresh account")
+        .expect("pre-refresh snapshot");
+    assert!(matches!(
+        manager
+            .recover_failed_attempt(
+                &pre_refresh,
+                ManagedChatgptFailure::Quota { reset_at: None },
+                /*committed*/ false,
+                &ManagedChatgptSelectionScope::default(),
+            )
+            .await
+            .expect("apply quota block"),
+        ManagedChatgptRecoveryDecision::Stop
+    ));
+    let refreshed_revision = manager
+        .refresh_managed_chatgpt_account(&identity)
+        .await
+        .expect("successful refresh")
+        .account_revision;
+    let stored_after_refresh = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load after refresh")
+    .expect("stored refreshed pool");
+    let retained_block = stored_after_refresh
+        .managed_chatgpt
+        .expect("managed pool")
+        .accounts
+        .into_iter()
+        .find(|account| account.identity_key == identity)
+        .and_then(|account| account.block)
+        .expect("same-workspace quota block retained");
+    assert_eq!(retained_block.kind, ManagedChatgptBlockKind::Quota);
+    assert_eq!(retained_block.credential_revision, refreshed_revision);
+    assert!(
+        manager
+            .remove_managed_chatgpt_account(&identity)
+            .await
+            .expect("remove refreshed account")
+    );
+    let relogged_identity = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-after-remove",
+        ))
+        .await
+        .expect("relogin");
+    let relogged = manager
+        .managed_chatgpt_auth_snapshot_for_identity(&relogged_identity)
+        .await
+        .expect("load relogged account")
+        .expect("relogged snapshot");
+    assert!(relogged.account_revision > refreshed_revision);
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn blank_managed_refresh_token_response_preserves_existing_credentials() {
+    for (access_token, refresh_token, blank_field, returned_token) in [
+        (
+            "",
+            "replacement-refresh",
+            "access_token",
+            "replacement-refresh",
+        ),
+        (
+            "replacement-access",
+            "",
+            "refresh_token",
+            "replacement-access",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": access_token,
+                "refresh_token": refresh_token
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _refresh_guard = EnvVarGuard::set(
+            REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+            &format!("{}/oauth/token", server.uri()),
+        );
+        let codex_home = tempdir().expect("tempdir");
+        let manager = file_pool_manager(codex_home.path()).await;
+        let mut credentials =
+            managed_oauth_credentials("a@example.com", "workspace-a", "original-refresh");
+        credentials.last_refresh = Utc::now() - chrono::Duration::days(10);
+        let identity = manager
+            .upsert_managed_chatgpt_oauth(credentials)
+            .await
+            .expect("login");
+        let expected_tokens = load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .expect("load before rejected refresh")
+        .expect("stored auth")
+        .managed_chatgpt
+        .expect("pool")
+        .accounts
+        .into_iter()
+        .find(|account| account.identity_key == identity)
+        .expect("managed account")
+        .tokens;
+
+        let error = manager
+            .refresh_managed_chatgpt_account(&identity)
+            .await
+            .expect_err("blank token must reject the entire refresh response");
+        let error_message = error.to_string();
+        assert!(error_message.contains(blank_field));
+        assert!(
+            !error_message.contains(returned_token),
+            "refresh error must not disclose a returned token"
+        );
+
+        let stored = load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .expect("load after rejected refresh")
+        .expect("stored auth");
+        let account = stored
+            .managed_chatgpt
+            .expect("pool")
+            .accounts
+            .into_iter()
+            .find(|account| account.identity_key == identity)
+            .expect("managed account");
+        assert_eq!(account.tokens, expected_tokens);
+        assert!(account.mutation_lease.is_none());
+        let failure = account
+            .refresh_failure
+            .expect("refresh failure should persist");
+        assert_eq!(
+            failure.reason_code.as_deref(),
+            Some(REFRESH_FAILURE_TRANSIENT_REASON)
+        );
+        server.verify().await;
+    }
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn failed_managed_refresh_clears_persisted_lease() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _refresh_guard = EnvVarGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/token", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let mut credentials = managed_oauth_credentials("a@example.com", "workspace-a", "refresh-a");
+    credentials.last_refresh = Utc::now() - chrono::Duration::days(10);
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(credentials)
+        .await
+        .expect("login");
+    let initial_revision = manager.managed_chatgpt_accounts().expect("list pool")[0].revision;
+
+    manager
+        .refresh_managed_chatgpt_account(&identity)
+        .await
+        .expect_err("authority failure must fail refresh");
+
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load after failed refresh")
+    .expect("stored auth");
+    let account = &stored.managed_chatgpt.expect("pool").accounts[0];
+    assert!(account.mutation_lease.is_none());
+    assert!(
+        account
+            .refresh_failure
+            .as_ref()
+            .is_some_and(|failure| !failure.permanent)
+    );
+    assert!(account.revision > initial_revision);
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn disallowed_managed_refresh_does_not_lease_mutate_or_call_authority() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let _refresh_guard = EnvVarGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/token", server.uri()),
+    );
+    let _revoke_guard = EnvVarGuard::set(
+        REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/revoke", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let mut disallowed =
+        managed_oauth_credentials("a@example.com", "workspace-disallowed", "refresh-a");
+    disallowed.last_refresh = Utc::now() - chrono::Duration::days(10);
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(disallowed)
+        .await
+        .expect("disallowed row login before policy");
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "b@example.com",
+            "workspace-allowed",
+            "refresh-b",
+        ))
+        .await
+        .expect("healthy sibling login");
+    manager.set_forced_chatgpt_workspace_id(Some(vec!["workspace-allowed".to_string()]));
+    let before = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load before refresh")
+    .expect("stored pool");
+
+    let err = manager
+        .refresh_managed_chatgpt_account(&identity)
+        .await
+        .expect_err("forced workspace policy must reject refresh");
+    assert!(
+        err.to_string().contains("forced workspace policy")
+            || err.to_string().contains("no eligible")
+    );
+    let after = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load after refresh")
+    .expect("stored pool");
+    assert_eq!(after, before);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn long_lived_managers_observe_external_chatgpt_overlay_replacement() {
+    let codex_home = tempdir().expect("tempdir");
+    let file_manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    let ephemeral_manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::Ephemeral,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external-a@example.com", "external-workspace-a"),
+        "external-workspace-a",
+        Some("pro"),
+    )
+    .expect("install external overlay A");
+    for manager in [&file_manager, &ephemeral_manager] {
+        assert_eq!(
+            manager
+                .auth()
+                .await
+                .and_then(|auth| auth.get_account_id())
+                .as_deref(),
+            Some("external-workspace-a")
+        );
+    }
+
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external-b@example.com", "external-workspace-b"),
+        "external-workspace-b",
+        Some("team"),
+    )
+    .expect("atomically replace external overlay A with B");
+    for manager in [&file_manager, &ephemeral_manager] {
+        assert!(
+            manager.auth_cached().is_none(),
+            "a stale overlay snapshot must not be served after replacement"
+        );
+        assert_eq!(
+            manager
+                .auth()
+                .await
+                .and_then(|auth| auth.get_account_id())
+                .as_deref(),
+            Some("external-workspace-b")
+        );
+    }
+
+    assert!(
+        logout(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .expect("remove external overlay B")
+    );
+    for manager in [&file_manager, &ephemeral_manager] {
+        assert!(manager.auth_cached().is_none());
+        assert!(manager.auth().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn direct_refresh_accepts_reloaded_external_overlay_replacement() {
+    let codex_home = tempdir().expect("tempdir");
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external-a@example.com", "external-workspace-a"),
+        "external-workspace-a",
+        Some("pro"),
+    )
+    .expect("install external overlay A");
+    let manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    assert_eq!(
+        manager
+            .auth_cached()
+            .and_then(|auth| auth.get_account_id())
+            .as_deref(),
+        Some("external-workspace-a")
+    );
+
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external-b@example.com", "external-workspace-b"),
+        "external-workspace-b",
+        Some("team"),
+    )
+    .expect("replace external overlay A with B");
+    assert!(
+        manager.auth_cached().is_none(),
+        "overlay replacement must invalidate the stale cached snapshot"
+    );
+
+    manager
+        .refresh_token()
+        .await
+        .expect("guarded reload should accept replacement overlay B");
+    assert_eq!(
+        manager
+            .auth_cached()
+            .and_then(|auth| auth.get_account_id())
+            .as_deref(),
+        Some("external-workspace-b")
+    );
+}
+
+#[tokio::test]
+async fn external_chatgpt_overlay_logout_preserves_persistent_pool() {
+    let codex_home = tempdir().expect("tempdir");
+    let file_manager = file_pool_manager(codex_home.path()).await;
+    file_manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("persistent login");
+    let ephemeral_manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::Ephemeral,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    let ephemeral_identity = ephemeral_manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "ephemeral@example.com",
+            "ephemeral-workspace",
+            "ephemeral-refresh",
+        ))
+        .await
+        .expect("ephemeral managed login");
+    let external_access_token = managed_id_token("external@example.com", "external-workspace");
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &external_access_token,
+        "external-workspace",
+        Some("pro"),
+    )
+    .expect("install external overlay");
+    let overlay_manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::Ephemeral,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
+    assert!(overlay_manager.is_external_chatgpt_auth_active());
+    assert!(
+        file_manager
+            .auth()
+            .await
+            .is_some_and(|auth| auth.is_external_chatgpt_tokens()),
+        "a manager constructed before the overlay must observe it before serving auth"
+    );
+    assert!(file_manager.managed_chatgpt_accounts().unwrap().is_empty());
+    let stored_inventory = file_manager
+        .stored_managed_chatgpt_account_list()
+        .expect("stored owner inventory");
+    assert_eq!(stored_inventory.accounts.len(), 1);
+    assert!(stored_inventory.pool_revision > 0);
+    assert!(stored_inventory.selected_account_id.is_none());
+    assert!(
+        overlay_manager
+            .managed_chatgpt_auth_snapshot_for_identity(&ephemeral_identity)
+            .await
+            .expect("targeted managed lookup")
+            .is_none(),
+        "external overlay must hide every managed identity"
+    );
+    assert!(
+        logout(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .expect("free logout clears overlay")
+    );
+    assert!(
+        load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .unwrap()
+        .and_then(|auth| auth.managed_chatgpt)
+        .is_some(),
+        "free logout must preserve the hidden persistent pool"
+    );
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &external_access_token,
+        "external-workspace",
+        Some("pro"),
+    )
+    .expect("reinstall external overlay");
+    assert!(overlay_manager.logout().await.expect("external logout"));
+    assert_eq!(
+        overlay_manager
+            .auth_cached()
+            .and_then(|auth| auth.get_account_id())
+            .as_deref(),
+        Some("ephemeral-workspace"),
+        "clearing the overlay must reveal the underlying ephemeral pool"
+    );
+    let persistent = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load persistent pool")
+    .expect("persistent auth");
+    assert_eq!(
+        persistent
+            .managed_chatgpt
+            .expect("persistent pool")
+            .accounts
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn free_logout_with_revoke_revokes_canonical_pool_credentials() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .and(body_partial_json(json!({ "token": "refresh-a" })))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _revoke_guard = EnvVarGuard::set(
+        REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/revoke", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("managed login");
+
+    assert!(
+        logout_with_revoke(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+            None,
+        )
+        .await
+        .expect("free logout with revoke")
+    );
+    assert!(
+        load_auth_dot_json(
+            codex_home.path(),
+            AuthCredentialsStoreMode::File,
+            AuthKeyringBackendKind::Direct,
+        )
+        .unwrap()
+        .is_none()
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn logout_all_clears_external_overlay_and_hidden_managed_pool() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let _revoke_guard = EnvVarGuard::set(
+        REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/revoke", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    for (email, workspace, refresh) in [
+        ("a@example.com", "workspace-a", "refresh-a"),
+        ("b@example.com", "workspace-b", "refresh-b"),
+    ] {
+        manager
+            .upsert_managed_chatgpt_oauth(managed_oauth_credentials(email, workspace, refresh))
+            .await
+            .expect("managed login");
+    }
+    login_with_chatgpt_auth_tokens(
+        codex_home.path(),
+        &managed_id_token("external@example.com", "external-workspace"),
+        "external-workspace",
+        Some("pro"),
+    )
+    .expect("external overlay");
+    assert!(manager.managed_chatgpt_accounts().unwrap().is_empty());
+
+    let mut removed = manager
+        .logout_all_managed_chatgpt()
+        .await
+        .expect("logout all");
+    removed.sort();
+    assert_eq!(removed.len(), 2);
+    assert!(!manager.is_external_chatgpt_auth_active());
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .unwrap()
+    .expect("empty pool generation remains");
+    assert!(
+        stored
+            .managed_chatgpt
+            .expect("pool generation")
+            .accounts
+            .is_empty()
+    );
+    server.verify().await;
+}
+#[tokio::test]
+#[serial(codex_auth_env)]
+async fn bounded_refresh_timeout_revises_row_pool_and_watch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_secs(60)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _refresh_guard = EnvVarGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/token", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let observer = file_pool_manager(codex_home.path()).await;
+    let mut credentials = managed_oauth_credentials("a@example.com", "workspace-a", "refresh-a");
+    credentials.last_refresh = Utc::now() - chrono::Duration::days(10);
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(credentials)
+        .await
+        .expect("login");
+    let before = manager
+        .stored_managed_chatgpt_account_list()
+        .expect("initial list");
+    let mut changes = manager.auth_change_receiver();
+    let initial_change_revision = *changes.borrow();
+
+    let error = manager
+        .refresh_managed_chatgpt_account_bounded(&identity, std::time::Duration::from_millis(100))
+        .await
+        .expect_err("refresh must time out");
+    assert!(matches!(
+        &error,
+        RefreshTokenError::Transient(error)
+            if error.kind() == std::io::ErrorKind::TimedOut
+    ));
+
+    let after = manager
+        .stored_managed_chatgpt_account_list()
+        .expect("updated list");
+    assert_eq!(after.accounts[0].revision, before.accounts[0].revision + 2);
+    assert_eq!(after.pool_revision, before.pool_revision + 2);
+    assert!(matches!(
+        &after.accounts[0].refresh_status,
+        ManagedChatgptRefreshStatus::TransientUnavailable {
+            reason_code: Some(reason),
+            ..
+        } if reason == "token_refresh_timeout"
+    ));
+    changes.changed().await.expect("timeout notification");
+    assert_eq!(*changes.borrow(), initial_change_revision + 2);
+    let observed = observer
+        .stored_managed_chatgpt_account_list()
+        .expect("observer list");
+    assert_eq!(observed.pool_revision, after.pool_revision);
+    assert_eq!(observed.accounts[0].revision, after.accounts[0].revision);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn delayed_timeout_for_operation_a_cannot_relabel_cancellation_b() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("login");
+    let mut stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load auth")
+    .expect("stored auth");
+    let account = row_mut(&mut stored, &identity).expect("managed account");
+    account.refresh_failure = Some(ManagedChatgptRefreshFailure {
+        observed_at: Utc::now(),
+        permanent: false,
+        reason_code: Some("token_refresh_cancelled".to_string()),
+        operation_id: Some("refresh-b".to_string()),
+    });
+    save_auth(
+        codex_home.path(),
+        &stored,
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("persist cancellation B");
+    let before = manager
+        .stored_managed_chatgpt_account_list()
+        .expect("list before delayed A timeout");
+    let storage = create_auth_storage(
+        codex_home.path().to_path_buf(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    );
+
+    assert_eq!(
+        persist_managed_refresh_failure(
+            &storage,
+            &identity,
+            Some("refresh-a"),
+            "token_refresh_timeout",
+            false,
+        )
+        .expect("record delayed A timeout"),
+        (false, false)
+    );
+    let after = manager
+        .stored_managed_chatgpt_account_list()
+        .expect("list after delayed A timeout");
+    assert_eq!(after.pool_revision, before.pool_revision);
+    assert_eq!(after.accounts[0].revision, before.accounts[0].revision);
+    assert!(matches!(
+        &after.accounts[0].refresh_status,
+        ManagedChatgptRefreshStatus::TransientUnavailable {
+            reason_code: Some(reason),
+            ..
+        } if reason == "token_refresh_cancelled"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(codex_auth_env)]
+async fn concurrent_permanent_refresh_failure_posts_once_and_shares_owner_outcome() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .set_delay(std::time::Duration::from_millis(150))
+                .set_body_json(json!({"error": {"code": "refresh_token_reused"}})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _refresh_guard = EnvVarGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/token", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let mut credentials = managed_oauth_credentials("a@example.com", "workspace-a", "refresh-a");
+    credentials.last_refresh = Utc::now() - chrono::Duration::days(10);
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(credentials)
+        .await
+        .expect("login");
+
+    let (owner, waiter) = tokio::join!(
+        manager.refresh_managed_chatgpt_account(&identity),
+        manager.refresh_managed_chatgpt_account(&identity),
+    );
+    for outcome in [owner, waiter] {
+        assert!(matches!(
+            outcome,
+            Err(RefreshTokenError::Permanent(error))
+                if error.reason == RefreshTokenFailedReason::Exhausted
+        ));
+    }
+    server.verify().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(codex_auth_env)]
+async fn concurrent_post_authority_commit_error_posts_once_and_shares_owner_outcome() {
+    let server = MockServer::start().await;
+    let disallowed_id_token = managed_id_token("a@example.com", "workspace-disallowed");
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(150))
+                .set_body_json(json!({
+                    "access_token": "refreshed-access",
+                    "refresh_token": "refreshed-token",
+                    "id_token": disallowed_id_token,
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let _refresh_guard = EnvVarGuard::set(
+        REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+        &format!("{}/oauth/token", server.uri()),
+    );
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    let mut credentials =
+        managed_oauth_credentials("a@example.com", "workspace-allowed", "refresh");
+    credentials.last_refresh = Utc::now() - chrono::Duration::days(10);
+    let identity = manager
+        .upsert_managed_chatgpt_oauth(credentials)
+        .await
+        .expect("login");
+    manager.set_forced_chatgpt_workspace_id(Some(vec!["workspace-allowed".to_string()]));
+
+    let (owner, waiter) = tokio::join!(
+        manager.refresh_managed_chatgpt_account(&identity),
+        manager.refresh_managed_chatgpt_account(&identity),
+    );
+    assert!(matches!(owner, Err(RefreshTokenError::Transient(_))));
+    assert!(matches!(waiter, Err(RefreshTokenError::Transient(_))));
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load auth")
+    .expect("stored auth");
+    let account = row(&stored, &identity).expect("managed account");
+    assert!(account.mutation_lease.is_none());
+    assert!(matches!(
+        account.refresh_failure.as_ref(),
+        Some(ManagedChatgptRefreshFailure {
+            permanent: false,
+            reason_code: Some(reason),
+            ..
+        }) if reason == "token_refresh_commit_failed"
+    ));
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn global_logout_rejects_ambiguous_managed_pool_without_deleting_siblings() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    for (email, workspace, refresh) in [
+        ("a@example.com", "workspace-a", "refresh-a"),
+        ("b@example.com", "workspace-b", "refresh-b"),
+    ] {
+        manager
+            .upsert_managed_chatgpt_oauth(managed_oauth_credentials(email, workspace, refresh))
+            .await
+            .expect("managed login");
+    }
+
+    let error = manager
+        .logout()
+        .await
+        .expect_err("global logout must reject an ambiguous pool");
+    assert!(error.to_string().contains("ambiguous"));
+    assert_eq!(
+        manager
+            .managed_chatgpt_accounts()
+            .expect("pool remains")
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn managed_to_api_key_preserves_monotonic_empty_pool_revision() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("managed login");
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "b@example.com",
+            "workspace-b",
+            "refresh-b",
+        ))
+        .await
+        .expect("second managed login");
+    let scope = ManagedChatgptSelectionScope {
+        session_id: Some("cutover-session".to_string()),
+        ..Default::default()
+    };
+    let before = manager
+        .list_managed_chatgpt_accounts(&scope)
+        .await
+        .expect("list managed pool");
+    let selection_revision_before = before.selection_revision;
+    let mut changes = manager.auth_change_receiver();
+    let watch_revision_before = *changes.borrow();
+    let next_account_revision = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .unwrap()
+    .unwrap()
+    .managed_chatgpt
+    .unwrap()
+    .next_account_revision;
+
+    login_with_api_key(
+        codex_home.path(),
+        "sk-test",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("api key login");
+    assert!(manager.reload().await);
+    let after = manager
+        .list_managed_chatgpt_accounts(&scope)
+        .await
+        .expect("list cleared pool");
+    assert!(after.accounts.is_empty());
+    assert!(after.pool_revision > before.pool_revision);
+    assert_ne!(after.pool_revision, 0);
+    assert!(after.selected_account_id.is_none());
+    assert!(after.selection_revision > selection_revision_before);
+    changes.changed().await.expect("cutover notification");
+    assert!(*changes.borrow() > watch_revision_before);
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(stored.auth_mode, Some(AuthMode::ApiKey));
+    let ledger = stored.managed_chatgpt.expect("empty generation ledger");
+    assert!(ledger.accounts.is_empty());
+    assert_eq!(ledger.next_account_revision, next_account_revision);
+    let reloaded = file_pool_manager(codex_home.path()).await;
+    assert_eq!(reloaded.auth_mode(), Some(AuthMode::ApiKey));
+    assert!(
+        reloaded
+            .auth_cached()
+            .is_some_and(|auth| auth.api_key() == Some("sk-test"))
+    );
+}
+
+#[tokio::test]
+async fn managed_to_bedrock_reload_uses_declared_nonpooled_mode() {
+    let codex_home = tempdir().expect("tempdir");
+    let manager = file_pool_manager(codex_home.path()).await;
+    manager
+        .upsert_managed_chatgpt_oauth(managed_oauth_credentials(
+            "a@example.com",
+            "workspace-a",
+            "refresh-a",
+        ))
+        .await
+        .expect("managed login");
+
+    login_with_bedrock_api_key(
+        codex_home.path(),
+        "bedrock-test-key",
+        "us-east-1",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("Bedrock login");
+
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load Bedrock cutover")
+    .expect("stored auth");
+    assert_eq!(stored.auth_mode, Some(AuthMode::BedrockApiKey));
+    assert!(
+        stored
+            .managed_chatgpt
+            .as_ref()
+            .is_some_and(|pool| pool.accounts.is_empty())
+    );
+
+    let reloaded = file_pool_manager(codex_home.path()).await;
+    assert_eq!(reloaded.auth_mode(), Some(AuthMode::BedrockApiKey));
+    assert!(matches!(
+        reloaded.auth_cached(),
+        Some(CodexAuth::BedrockApiKey(BedrockApiKeyAuth {
+            api_key,
+            region,
+        })) if api_key == "bedrock-test-key" && region == "us-east-1"
+    ));
 }

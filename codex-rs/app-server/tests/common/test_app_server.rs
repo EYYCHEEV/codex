@@ -59,6 +59,7 @@ use codex_app_server_protocol::MarketplaceAddParams;
 use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::McpResourceReadParams;
+use codex_app_server_protocol::McpServerOauthLoginParams;
 use codex_app_server_protocol::McpServerToolCallParams;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::ModelListParams;
@@ -816,6 +817,15 @@ impl TestAppServer {
         self.send_request("mcpServer/tool/call", params).await
     }
 
+    /// Send an `mcpServer/oauth/login` JSON-RPC request.
+    pub async fn send_mcp_server_oauth_login_request(
+        &mut self,
+        params: McpServerOauthLoginParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("mcpServer/oauth/login", params).await
+    }
+
     /// Send a `skills/list` JSON-RPC request.
     pub async fn send_skills_list_request(
         &mut self,
@@ -1315,6 +1325,22 @@ impl TestAppServer {
         self.send_request("fs/unwatch", params).await
     }
 
+    /// Send an `account/list` JSON-RPC request.
+    pub async fn send_list_accounts_request(
+        &mut self,
+        params: serde_json::Value,
+    ) -> anyhow::Result<i64> {
+        self.send_request("account/list", Some(params)).await
+    }
+
+    /// Send a parameterized `account/logout` JSON-RPC request.
+    pub async fn send_logout_account_request_with_params(
+        &mut self,
+        params: serde_json::Value,
+    ) -> anyhow::Result<i64> {
+        self.send_request("account/logout", Some(params)).await
+    }
+
     /// Send an `account/logout` JSON-RPC request.
     pub async fn send_logout_account_request(&mut self) -> anyhow::Result<i64> {
         self.send_request("account/logout", /*params*/ None).await
@@ -1557,6 +1583,9 @@ impl TestAppServer {
         let message = serde_json::from_str::<JSONRPCMessage>(&line)?;
         eprintln!("read message from stdout: {message:?}");
         Ok(message)
+    }
+    pub async fn read_stream_message(&mut self) -> anyhow::Result<JSONRPCMessage> {
+        self.read_jsonrpc_message().await
     }
 
     pub async fn read_stream_until_request_message(&mut self) -> anyhow::Result<ServerRequest> {

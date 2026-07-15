@@ -9,10 +9,21 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
+use app_test_support::to_response;
+use app_test_support::write_mock_responses_config_toml;
+use axum::Json;
 use axum::Router;
+use axum::extract::Request;
+use axum::http::StatusCode;
+use axum::middleware;
+use axum::middleware::Next;
+use axum::response::Response;
+use axum::routing::get;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
+use codex_app_server_protocol::McpServerOauthLoginParams;
+use codex_app_server_protocol::McpServerOauthLoginResponse;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
@@ -219,18 +230,6 @@ async fn mcp_server_status_list_uses_thread_project_local_config() -> Result<()>
     mock_responses_config(&server.uri()).write(codex_home.path())?;
     std::fs::create_dir_all(workspace.path().join(".git"))?;
     set_project_trust_level(codex_home.path(), workspace.path(), TrustLevel::Trusted)?;
-
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build_initialized()
-        .await?;
-    let ThreadStartResponse { thread, .. } = mcp
-        .start_thread(ThreadStartParams {
-            cwd: Some(workspace.path().to_string_lossy().into_owned()),
-            ..Default::default()
-        })
-        .await?;
-
     let project_config_dir = workspace.path().join(".codex");
     std::fs::create_dir_all(&project_config_dir)?;
     std::fs::write(
@@ -242,6 +241,17 @@ url = "{mcp_server_url}/mcp"
 "#
         ),
     )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let ThreadStartResponse { thread, .. } = mcp
+        .start_thread(ThreadStartParams {
+            cwd: Some(workspace.path().to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+        .await?;
 
     let threadless_response: ListMcpServerStatusResponse = mcp
         .request(|request_id| ClientRequest::McpServerStatusList {
@@ -280,6 +290,147 @@ url = "{mcp_server_url}/mcp"
     mcp_server_handle.abort();
     let _ = mcp_server_handle.await;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_status_and_oauth_use_thread_runtime_after_global_config_changes() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let (mcp_server_url, mcp_server_handle) =
+        start_header_bound_oauth_mcp_server("snapshot_lookup").await?;
+    let codex_home = TempDir::new()?;
+    write_mock_responses_config_toml(
+        codex_home.path(),
+        &server.uri(),
+        &BTreeMap::new(),
+        /*auto_compact_limit*/ 1024,
+        /*requires_openai_auth*/ None,
+        "mock_provider",
+        "compact",
+    )?;
+    let config_path = codex_home.path().join("config.toml");
+    let mut config_toml = std::fs::read_to_string(&config_path)?;
+    config_toml.push_str(&format!(
+        r#"
+[mcp_servers.snapshot-server]
+url = "{mcp_server_url}/mcp"
+http_headers = {{ "x-test-account" = "A" }}
+
+[mcp_servers.snapshot-server.oauth]
+client_id = "thread-runtime-test-client"
+"#
+    ));
+    std::fs::write(&config_path, &config_toml)?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let start_id = mcp
+        .send_thread_start_request(ThreadStartParams::default())
+        .await?;
+    let start_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response(start_response)?;
+
+    std::fs::write(
+        &config_path,
+        config_toml.replace(
+            r#"http_headers = { "x-test-account" = "A" }"#,
+            r#"http_headers = { "x-test-account" = "B" }"#,
+        ),
+    )?;
+
+    let thread_status_id = mcp
+        .send_list_mcp_server_status_request(ListMcpServerStatusParams {
+            cursor: None,
+            limit: None,
+            detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+            thread_id: Some(thread.id.clone()),
+        })
+        .await?;
+    let thread_status = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_status_id)),
+    )
+    .await??;
+    let thread_status: ListMcpServerStatusResponse = to_response(thread_status)?;
+    let snapshot_server = thread_status
+        .data
+        .iter()
+        .find(|status| status.name == "snapshot-server")
+        .expect("thread snapshot server status");
+    assert!(
+        snapshot_server.tools.contains_key("snapshot_lookup"),
+        "thread status must use the already-bound A runtime"
+    );
+
+    let global_status_id = mcp
+        .send_list_mcp_server_status_request(ListMcpServerStatusParams {
+            cursor: None,
+            limit: None,
+            detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
+            thread_id: None,
+        })
+        .await?;
+    let global_status = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(global_status_id)),
+    )
+    .await??;
+    let global_status: ListMcpServerStatusResponse = to_response(global_status)?;
+    assert!(
+        global_status
+            .data
+            .iter()
+            .all(|status| !status.tools.contains_key("snapshot_lookup")),
+        "the B-bound global status request must not reuse the thread's A manager"
+    );
+
+    let thread_oauth_id = mcp
+        .send_mcp_server_oauth_login_request(McpServerOauthLoginParams {
+            name: "snapshot-server".to_string(),
+            thread_id: Some(thread.id),
+            scopes: None,
+            timeout_secs: Some(5),
+        })
+        .await?;
+    let thread_oauth = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_oauth_id)),
+    )
+    .await??;
+    let thread_oauth: McpServerOauthLoginResponse = to_response(thread_oauth)?;
+    assert!(
+        thread_oauth.authorization_url.contains("/authorize"),
+        "thread OAuth must discover metadata through the A-bound HTTP client"
+    );
+
+    let global_oauth_id = mcp
+        .send_mcp_server_oauth_login_request(McpServerOauthLoginParams {
+            name: "snapshot-server".to_string(),
+            thread_id: None,
+            scopes: None,
+            timeout_secs: Some(5),
+        })
+        .await?;
+    let global_error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(global_oauth_id)),
+    )
+    .await??;
+    assert!(
+        global_error.error.message.contains("failed to login"),
+        "the B-bound global request must not reuse the thread's A runtime"
+    );
+
+    mcp_server_handle.abort();
+    let _ = mcp_server_handle.await;
     Ok(())
 }
 
@@ -497,6 +648,57 @@ url = "{underscore_server_url}/mcp"
     let _ = underscore_server_handle.await;
 
     Ok(())
+}
+
+async fn require_snapshot_account(request: Request, next: Next) -> Result<Response, StatusCode> {
+    let account = request
+        .headers()
+        .get("x-test-account")
+        .and_then(|value| value.to_str().ok());
+    if account != Some("A") {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
+async fn start_header_bound_oauth_mcp_server(tool_name: &str) -> Result<(String, JoinHandle<()>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let tool_name = Arc::new(tool_name.to_string());
+    let mcp_service = StreamableHttpService::new(
+        move || {
+            Ok(McpStatusServer {
+                tool_name: Arc::clone(&tool_name),
+            })
+        },
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+    let authorization_url = format!("http://{addr}/authorize");
+    let token_url = format!("http://{addr}/token");
+    let router = Router::new()
+        .route(
+            "/.well-known/oauth-authorization-server/mcp",
+            get(move || {
+                let authorization_url = authorization_url.clone();
+                let token_url = token_url.clone();
+                async move {
+                    Json(json!({
+                        "authorization_endpoint": authorization_url,
+                        "token_endpoint": token_url,
+                        "scopes_supported": ["read"],
+                        "response_types_supported": ["code"],
+                        "code_challenge_methods_supported": ["S256"],
+                    }))
+                }
+            }),
+        )
+        .nest_service("/mcp", mcp_service)
+        .layer(middleware::from_fn(require_snapshot_account));
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok((format!("http://{addr}"), handle))
 }
 
 async fn start_mcp_server(tool_name: &str) -> Result<(String, JoinHandle<()>)> {

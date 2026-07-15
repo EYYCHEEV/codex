@@ -54,7 +54,6 @@ use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::TurnCodexErrorFact;
 use codex_async_utils::OrCancelExt;
-use codex_connectors::connector_runtime_context_key;
 use codex_core_skills::injection::HostSkillsCatalogInWorldState;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
@@ -71,6 +70,7 @@ use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_mcp::McpResourceClient;
 use codex_mcp::McpRuntime;
@@ -179,6 +179,7 @@ use tracing::instrument;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::client::CurrentClientSetup;
 use crate::client::ModelClient;
 use crate::codex_thread::ThreadConfigSnapshot;
 #[cfg(test)]
@@ -191,6 +192,7 @@ use crate::config::PermissionProfileState;
 use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
+use crate::state::ManagedRateLimitBinding;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
@@ -368,6 +370,7 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::ManagedTransportAuthBinding;
 use codex_protocol::protocol::McpStartupSnapshot;
 use codex_protocol::protocol::ModelRerouteEvent;
 use codex_protocol::protocol::ModelRerouteReason;
@@ -1393,11 +1396,8 @@ impl Session {
                     .await;
                 }
 
-                // Seed usage info from the recorded rollout so UIs can show token counts
-                // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
+                if let Some(event) = Self::last_token_count_from_rollout(&rollout_items) {
+                    self.restore_token_count_from_rollout(event).await;
                 }
 
                 // Defer seeding the session's initial context until the first turn starts so
@@ -1412,11 +1412,8 @@ impl Session {
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
 
-                // Seed usage info from the recorded rollout so UIs can show token counts
-                // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
+                if let Some(event) = Self::last_token_count_from_rollout(&rollout_items) {
+                    self.restore_token_count_from_rollout(event).await;
                 }
 
                 let thread_settings_applied =
@@ -1538,11 +1535,56 @@ impl Session {
         state.set_auto_compact_window_estimated_prefill(tokens);
     }
 
-    fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
-        rollout_items.iter().rev().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
-            _ => None,
-        })
+    fn last_token_count_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenCountEvent> {
+        let token_events = || {
+            rollout_items.iter().rev().filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TokenCount(event)) => Some(event),
+                _ => None,
+            })
+        };
+        let info = token_events().find_map(|event| event.info.clone());
+        let mut restored = token_events()
+            .find(|event| event.rate_limits.is_some())
+            .cloned()
+            .unwrap_or(TokenCountEvent {
+                info: None,
+                rate_limits: None,
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
+            });
+        restored.info = info;
+        (restored.info.is_some() || restored.rate_limits.is_some()).then_some(restored)
+    }
+
+    async fn restore_token_count_from_rollout(&self, event: TokenCountEvent) {
+        let mut state = self.state.lock().await;
+        state.set_token_info(event.info);
+        let Some(snapshot) = event.rate_limits else {
+            return;
+        };
+        let transport_binding =
+            event
+                .managed_transport_binding
+                .map(|binding| TransportAuthBinding {
+                    identity_key: binding.identity_key,
+                    raw_account_id: binding.raw_account_id,
+                    fedramp: binding.fedramp,
+                    auth_mode: binding.auth_mode,
+                    route_generation: binding.route_generation,
+                });
+        match (event.managed_account_id, event.account_state_revision) {
+            (Some(managed_account_id), Some(account_state_revision)) => {
+                state.restore_pending_managed_rate_limits(
+                    snapshot,
+                    managed_account_id,
+                    account_state_revision,
+                    transport_binding,
+                );
+            }
+            (None, None) => state.restore_rate_limits(snapshot, None),
+            _ => {}
+        }
     }
 
     async fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -3117,6 +3159,33 @@ impl Session {
         turn_context: Arc<TurnContext>,
         cancellation_token: &CancellationToken,
     ) -> CodexResult<Arc<StepContext>> {
+        let setup = self
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info.slug),
+                Some(&self.session_id().to_string()),
+            )
+            .await?;
+        self.capture_step_context_inner(turn_context, &setup, cancellation_token)
+            .await
+    }
+
+    pub(crate) async fn capture_step_context_for_setup(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        setup: &CurrentClientSetup,
+    ) -> CodexResult<Arc<StepContext>> {
+        self.capture_step_context_inner(turn_context, setup, &CancellationToken::new())
+            .await
+    }
+
+    async fn capture_step_context_inner(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        setup: &CurrentClientSetup,
+        cancellation_token: &CancellationToken,
+    ) -> CodexResult<Arc<StepContext>> {
         // Keep selections fixed for the turn while allowing their startup work to finish.
         let environments = turn_context.environments.refresh_readiness();
         self.services
@@ -3137,8 +3206,18 @@ impl Session {
             .await;
         let extension_data = codex_extension_api::ExtensionData::new(turn_context.sub_id.clone());
         extension_data.insert(selected_capability_roots.clone());
+        let connector_directory_cache_key =
+            mcp::connector_directory_cache_key_for_setup(&turn_context, setup);
+        let codex_apps_tools_cache_key =
+            mcp::codex_apps_tools_cache_key_for_setup(&turn_context, setup);
         let mcp = self
-            .mcp_runtime_for_step(turn_context.as_ref(), &selected_capability_roots)
+            .mcp_runtime_for_step(
+                turn_context.as_ref(),
+                &environments,
+                &selected_capability_roots,
+                executor_capability_discovery.as_deref(),
+                Some(setup),
+            )
             .or_cancel(cancellation_token)
             .await?;
         let (mcp_tools, tool_router) = turn::built_tools(
@@ -3146,6 +3225,8 @@ impl Session {
             turn_context.as_ref(),
             &environments,
             mcp.as_ref(),
+            setup.effective_auth.as_ref(),
+            connector_directory_cache_key.as_ref(),
             &extension_data,
         )
         .or_cancel(cancellation_token)
@@ -3156,6 +3237,9 @@ impl Session {
             selected_capability_roots,
             executor_capability_discovery,
             mcp,
+            effective_auth: setup.effective_auth.clone(),
+            connector_directory_cache_key,
+            codex_apps_tools_cache_key,
             mcp_tools,
             tool_router,
             loaded_agents_md,
@@ -3465,6 +3549,21 @@ impl Session {
         turn_context: &TurnContext,
         world_state: &WorldState,
     ) -> Vec<ResponseItem> {
+        let mcp = self.services.mcp_runtime.current_binding().await;
+        self.build_initial_context_with_world_state_and_mcp(
+            turn_context,
+            world_state,
+            mcp.as_deref(),
+        )
+        .await
+    }
+
+    async fn build_initial_context_with_world_state_and_mcp(
+        &self,
+        turn_context: &TurnContext,
+        world_state: &WorldState,
+        mcp: Option<&codex_mcp::McpBinding>,
+    ) -> Vec<ResponseItem> {
         let mut developer_sections = Vec::<String>::with_capacity(8);
         let mut contextual_user_sections = Vec::<String>::with_capacity(2);
         let mut separate_developer_sections = Vec::<String>::new();
@@ -3586,31 +3685,30 @@ impl Session {
         if turn_context.config.features.enabled(Feature::TokenBudget)
             && turn_context.model_context_window().is_some()
         {
-            let mcp_result = self
-                .services
-                .mcp_runtime
-                .latest_call_tool(
-                    "notes",
-                    "thread_hint",
-                    /*arguments*/ None,
-                    Some(serde_json::json!({
-                        "threadId": self.thread_id().to_string(),
-                    })),
-                )
-                .await
-                .ok()
-                .and_then(|result| {
-                    let text = result
-                        .content
-                        .iter()
-                        .filter_map(|content| {
-                            content.get("text").and_then(serde_json::Value::as_str)
-                        })
-                        .filter(|text| !text.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    (!text.is_empty()).then_some(text)
-                });
+            let mcp_result = match mcp.and_then(|mcp| mcp.prepare_call("notes", "thread_hint")) {
+                Some(call) => call
+                    .call(
+                        /*arguments*/ None,
+                        Some(serde_json::json!({
+                            "threadId": self.thread_id().to_string(),
+                        })),
+                    )
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        let text = result
+                            .content
+                            .iter()
+                            .filter_map(|content| {
+                                content.get("text").and_then(serde_json::Value::as_str)
+                            })
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        (!text.is_empty()).then_some(text)
+                    }),
+                None => None,
+            };
             developer_sections.push(
                 crate::context::TokenBudgetContext::new(
                     self.thread_id(),
@@ -3750,7 +3848,11 @@ impl Session {
         };
         let (window_number, window_ids) = window;
         let context_items = self
-            .build_initial_context_with_world_state(turn_context, world_state.as_ref())
+            .build_initial_context_with_world_state_and_mcp(
+                turn_context,
+                world_state.as_ref(),
+                Some(step_context.mcp.as_ref()),
+            )
             .await;
         let turn_context_item = turn_context.to_turn_context_item();
         self.replace_compacted_history(
@@ -3803,7 +3905,11 @@ impl Session {
         // Full initial context resets the baseline; later turns persist only its changes.
         let (mut context_items, world_state_item) = if should_inject_full_context {
             let context_items = self
-                .build_initial_context_with_world_state(turn_context, world_state.as_ref())
+                .build_initial_context_with_world_state_and_mcp(
+                    turn_context,
+                    world_state.as_ref(),
+                    Some(step_context.mcp.as_ref()),
+                )
                 .await;
             let snapshot = world_state.snapshot();
             self.state
@@ -3949,21 +4055,32 @@ impl Session {
         .await;
         self.send_token_count_event(turn_context).await;
     }
+    pub(crate) async fn observe_managed_rate_limit_binding(
+        &self,
+        binding: Option<ManagedRateLimitBinding>,
+    ) {
+        let mut state = self.state.lock().await;
+        state.observe_managed_rate_limit_binding(binding.as_ref());
+    }
 
     pub(crate) async fn update_rate_limits(
         &self,
         turn_context: &TurnContext,
         new_rate_limits: RateLimitSnapshot,
+        managed_binding: Option<ManagedRateLimitBinding>,
     ) {
-        self.record_rate_limits_info(new_rate_limits).await;
+        self.record_rate_limits_info(new_rate_limits, managed_binding)
+            .await;
         self.send_token_count_event(turn_context).await;
     }
 
-    pub(crate) async fn record_rate_limits_info(&self, new_rate_limits: RateLimitSnapshot) {
-        {
-            let mut state = self.state.lock().await;
-            state.set_rate_limits(new_rate_limits);
-        }
+    pub(crate) async fn record_rate_limits_info(
+        &self,
+        new_rate_limits: RateLimitSnapshot,
+        managed_binding: Option<ManagedRateLimitBinding>,
+    ) {
+        let mut state = self.state.lock().await;
+        state.set_rate_limits(new_rate_limits, managed_binding);
     }
 
     pub(crate) async fn mcp_dependency_prompted(&self) -> HashSet<String> {
@@ -3985,11 +4102,27 @@ impl Session {
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let (info, rate_limits, managed_binding) = {
             let state = self.state.lock().await;
             state.token_info_and_rate_limits()
         };
-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info,
+            rate_limits,
+            managed_account_id: managed_binding
+                .as_ref()
+                .map(|binding| binding.managed_account_id.clone()),
+            account_state_revision: managed_binding
+                .as_ref()
+                .map(|binding| binding.account_state_revision),
+            managed_transport_binding: managed_binding.map(|binding| ManagedTransportAuthBinding {
+                identity_key: binding.transport_binding.identity_key,
+                raw_account_id: binding.transport_binding.raw_account_id,
+                fedramp: binding.transport_binding.fedramp,
+                auth_mode: binding.transport_binding.auth_mode,
+                route_generation: binding.transport_binding.route_generation,
+            }),
+        });
         self.send_event(turn_context, event).await;
     }
 

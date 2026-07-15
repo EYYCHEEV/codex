@@ -1068,7 +1068,9 @@ impl Session {
             ));
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
-            let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
+            let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::new(
+                codex_mcp::McpBinding::empty(Arc::new(mcp_projection.config.clone())),
+            )));
             for contributor in extensions.thread_lifecycle_contributors() {
                 contributor.on_thread_start(codex_extension_api::ThreadStartInput {
                     config: config.as_ref(),
