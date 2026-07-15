@@ -43,8 +43,8 @@ use crate::mcp_tool_call::MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC;
 use crate::mcp_tool_call::McpToolApprovalMetadata;
 use crate::mcp_tool_call::build_guardian_mcp_tool_review_request;
 use crate::mcp_tool_call::is_mcp_tool_approval_question_id;
-use crate::mcp_tool_call::lookup_mcp_tool_metadata;
 use crate::mcp_tool_call::mcp_approvals_reviewer;
+use crate::mcp_tool_call::take_emitted_mcp_tool_metadata;
 use crate::session::Codex;
 use crate::session::CodexSpawnArgs;
 use crate::session::CodexSpawnOk;
@@ -366,24 +366,11 @@ async fn forward_events(
                         id,
                         msg: EventMsg::McpToolCallBegin(event),
                     } => {
-                        // Runtime refreshes are published before a request step is captured, so
-                        // the child runtime at call begin is the one executing this invocation.
-                        // Cache its metadata now; the later approval event has only a call ID.
-                        let metadata = if let Some(turn_context) =
-                            codex.session.turn_context_for_sub_id(&id).await
-                        {
-                            let mcp = codex.session.services.latest_mcp_runtime();
-                            lookup_mcp_tool_metadata(
-                                codex.session.as_ref(),
-                                turn_context.as_ref(),
-                                mcp.manager(),
-                                &event.invocation.server,
-                                &event.invocation.tool,
-                            )
-                            .await
-                        } else {
-                            None
-                        };
+                        // Metadata is captured by the emitting request's StepContext before the
+                        // event crosses this asynchronous boundary. Never re-resolve from the
+                        // latest session runtime: a delayed account-A event may arrive after B.
+                        let metadata =
+                            take_emitted_mcp_tool_metadata(codex.session.as_ref(), &event.call_id);
                         pending_mcp_invocations
                             .lock()
                             .await

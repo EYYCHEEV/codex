@@ -152,7 +152,7 @@ async fn apps_guidance_appears_after_background_recovery_within_a_turn() -> Resu
                 .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
-    let mcp_runtime = test.codex.current_mcp_runtime().await;
+    let mcp_runtime = test.codex.current_mcp_runtime().await?;
 
     test.codex
         .submit(Op::UserInput {

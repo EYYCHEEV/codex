@@ -201,6 +201,7 @@ impl From<&CodexErr> for CodexErrKind {
             CodexErr::TurnAborted => CodexErrKind::TurnAborted,
             CodexErr::SessionBudgetExceeded => CodexErrKind::SessionBudgetExceeded,
             CodexErr::Stream(..) => CodexErrKind::Stream,
+            CodexErr::WebsocketClosed(_) => CodexErrKind::Stream,
             CodexErr::ContextWindowExceeded => CodexErrKind::ContextWindowExceeded,
             CodexErr::ThreadNotFound(_) => CodexErrKind::ThreadNotFound,
             CodexErr::AgentLimitReached { .. } => CodexErrKind::AgentLimitReached,

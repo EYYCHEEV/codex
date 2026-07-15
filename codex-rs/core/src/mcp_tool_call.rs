@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -34,6 +36,7 @@ use codex_connectors::AppToolPolicyEvaluator;
 use codex_connectors::AppToolPolicyInput;
 use codex_features::Feature;
 use codex_hooks::PermissionRequestDecision;
+use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::MCP_TOOL_CODEX_APPS_META_KEY;
 use codex_mcp::McpConnectionManager;
@@ -108,6 +111,20 @@ const MCP_RESULT_TELEMETRY_SERVER_USER_FLOW_SPAN_ATTR: &str =
     "codex.mcp.server_user_flow.triggered";
 const MCP_RESULT_TELEMETRY_TARGET_ID_MAX_CHARS: usize = 256;
 const MCP_TOOL_CALL_EVENT_RESULT_MAX_BYTES: usize = DEFAULT_OUTPUT_BYTES_CAP;
+static EMITTED_MCP_TOOL_METADATA: LazyLock<
+    StdMutex<HashMap<(String, String), Option<McpToolApprovalMetadata>>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+pub(crate) fn take_emitted_mcp_tool_metadata(
+    sess: &Session,
+    call_id: &str,
+) -> Option<McpToolApprovalMetadata> {
+    EMITTED_MCP_TOOL_METADATA
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&(sess.session_id().to_string(), call_id.to_string()))
+        .flatten()
+}
 
 /// Handles the specified tool call and dispatches the appropriate MCP tool-call
 /// item lifecycle events to the `Session`.
@@ -146,13 +163,24 @@ pub(crate) async fn handle_mcp_tool_call(
     };
 
     let metadata = lookup_mcp_tool_metadata(
-        sess.as_ref(),
-        turn_context.as_ref(),
-        manager,
+        step_context.mcp.as_ref(),
+        step_context.effective_auth.as_ref(),
         &server,
         &tool_name,
     )
     .await;
+    {
+        let mut emitted = EMITTED_MCP_TOOL_METADATA
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if emitted.len() >= 1024 {
+            emitted.clear();
+        }
+        emitted.insert(
+            (sess.session_id().to_string(), call_id.clone()),
+            metadata.clone(),
+        );
+    }
     let item_metadata = McpToolCallItemMetadata::from_tool_metadata(&server, metadata.as_ref());
     let app_tool_policy = if server == CODEX_APPS_MCP_SERVER_NAME {
         let annotations = metadata
@@ -379,8 +407,8 @@ async fn handle_approved_mcp_tool_call(
 
     let start = Instant::now();
     let rewrite = rewrite_mcp_tool_arguments_for_openai_files(
-        sess,
         turn_context,
+        step_context.effective_auth.as_ref(),
         arguments_value.clone(),
         metadata.and_then(|metadata| metadata.openai_file_input_params.as_deref()),
     )
@@ -606,8 +634,7 @@ async fn execute_mcp_tool_call(
     )?;
     Ok(maybe_request_codex_apps_auth_elicitation(
         sess,
-        turn_context,
-        manager,
+        step_context,
         call_id,
         &invocation.server,
         metadata,
@@ -618,13 +645,15 @@ async fn execute_mcp_tool_call(
 
 async fn maybe_request_codex_apps_auth_elicitation(
     sess: &Session,
-    turn_context: &TurnContext,
-    manager: &McpConnectionManager,
+    step_context: &StepContext,
     call_id: &str,
     server: &str,
     metadata: Option<&McpToolApprovalMetadata>,
     result: CallToolResult,
 ) -> CallToolResult {
+    let turn_context = step_context.turn.as_ref();
+    let runtime = step_context.mcp.as_ref();
+    let manager = runtime.manager();
     if !manager.is_host_owned_codex_apps_server(server) {
         return result;
     }
@@ -683,29 +712,20 @@ async fn maybe_request_codex_apps_auth_elicitation(
         return result;
     }
 
-    refresh_codex_apps_after_connector_auth(sess, turn_context, manager).await;
+    refresh_codex_apps_after_connector_auth(runtime, step_context.effective_auth.as_ref()).await;
     auth_elicitation_completed_result(&plan.auth_failure, result.meta)
 }
 
 async fn refresh_codex_apps_after_connector_auth(
-    sess: &Session,
-    turn_context: &TurnContext,
-    manager: &McpConnectionManager,
+    runtime: &crate::session::McpRuntimeSnapshot,
+    auth: Option<&CodexAuth>,
 ) {
-    let mcp_tools_result = manager.hard_refresh_codex_apps_tools_cache().await;
-
-    match mcp_tools_result {
-        Ok(mcp_tools) => {
-            let auth = sess.services.auth_manager.auth().await;
-            connectors::refresh_accessible_connectors_cache_from_mcp_tools(
-                &turn_context.config,
-                auth.as_ref(),
-                &mcp_tools,
-            );
-        }
-        Err(err) => {
-            tracing::warn!("failed to refresh Codex Apps tools after connector auth: {err:#}");
-        }
+    if let Err(err) = connectors::list_accessible_connectors_from_mcp_runtime(
+        runtime, auth, /*force_refetch*/ true,
+    )
+    .await
+    {
+        tracing::warn!("failed to refresh Codex Apps tools after connector auth: {err:#}");
     }
 }
 
@@ -1472,12 +1492,12 @@ async fn mcp_tool_approval_decision_from_guardian(
 }
 
 pub(crate) async fn lookup_mcp_tool_metadata(
-    sess: &Session,
-    turn_context: &TurnContext,
-    manager: &McpConnectionManager,
+    runtime: &crate::session::McpRuntimeSnapshot,
+    auth: Option<&CodexAuth>,
     server: &str,
     tool_name: &str,
 ) -> Option<McpToolApprovalMetadata> {
+    let manager = runtime.manager();
     let plugin_id = manager
         .plugin_id_for_mcp_server_name(server)
         .map(str::to_string);
@@ -1486,24 +1506,12 @@ pub(crate) async fn lookup_mcp_tool_metadata(
         .into_iter()
         .find(|tool_info| tool_info.server_name == server && tool_info.tool.name == tool_name)?;
     let connector_description = if server == CODEX_APPS_MCP_SERVER_NAME {
-        let connectors = match connectors::list_cached_accessible_connectors_from_mcp_tools(
-            turn_context.config.as_ref(),
+        let connectors = connectors::list_accessible_connectors_from_mcp_runtime(
+            runtime, auth, /*force_refetch*/ false,
         )
         .await
-        {
-            Some(connectors) => Some(connectors),
-            None => {
-                connectors::list_accessible_connectors_from_mcp_tools_with_mcp_manager(
-                    turn_context.config.as_ref(),
-                    /*force_refetch*/ false,
-                    sess.services.turn_environments.environment_manager(),
-                    Arc::clone(&sess.services.mcp_manager),
-                )
-                .await
-                .ok()
-                .map(|status| status.connectors)
-            }
-        };
+        .ok()
+        .map(|status| status.connectors);
         connectors.and_then(|connectors| {
             let connector_id = tool_info.connector_id.as_deref()?;
             connectors

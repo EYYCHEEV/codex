@@ -16,11 +16,15 @@ use std::time::Instant;
 use anyhow::Context;
 use arc_swap::ArcSwapOption;
 use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::mcp::McpServerInfo;
 use serde::Deserialize;
 use serde::Serialize;
 use sha1::Digest;
 use sha1::Sha1;
+use std::hash::Hash;
+use std::hash::Hasher;
 use tracing::instrument;
 
 use crate::runtime::emit_duration;
@@ -29,23 +33,108 @@ use crate::tools::ToolInfo;
 
 const MCP_TOOLS_CACHE_PUBLISH_DURATION_METRIC: &str = "codex.mcp.tools.cache_publish.duration_ms";
 
-/// The CodexAuth bits that identify a Codex Apps catalog.
+/// The complete account and route identity for one Codex Apps catalog.
 ///
-/// Debug bearer-token overrides bypass the shared cache, so shared entries only
-/// need the CodexAuth-backed identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// This deliberately contains no bearer or refresh token material. Managed
+/// callers should use [`CodexAppsToolsCacheKey::from_transport_binding`] so
+/// catalog reuse follows the exact transport selected for the manager.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodexAppsToolsCacheKey {
-    pub(crate) account_id: Option<String>,
-    pub(crate) chatgpt_user_id: Option<String>,
-    pub(crate) is_workspace_account: bool,
+    transport: TransportAuthBinding,
+    credential_revision: u64,
+    base_url: String,
+    managed: bool,
 }
 
-/// Builds the CodexAuth-backed Codex Apps cache key.
+impl CodexAppsToolsCacheKey {
+    /// Builds the exact identity for a managed account snapshot.
+    ///
+    /// A managed key must never be synthesized from compatibility auth: the
+    /// credential revision and base URL are both required to bind the key to
+    /// the selected account row and route.
+    pub fn from_transport_binding(
+        transport: TransportAuthBinding,
+        credential_revision: u64,
+        base_url: impl Into<String>,
+    ) -> Self {
+        assert!(
+            credential_revision > 0,
+            "managed Codex Apps keys require a credential revision"
+        );
+        let base_url = normalize_base_url(base_url.into());
+        assert!(
+            !base_url.is_empty(),
+            "managed Codex Apps keys require a base URL"
+        );
+        Self {
+            transport,
+            credential_revision,
+            base_url,
+            managed: true,
+        }
+    }
+
+    pub(crate) fn is_managed(&self) -> bool {
+        self.managed
+    }
+
+    pub(crate) fn transport_binding(&self) -> TransportAuthBinding {
+        self.transport.clone()
+    }
+}
+
+impl Hash for CodexAppsToolsCacheKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.transport.identity_key.hash(state);
+        self.transport.raw_account_id.hash(state);
+        self.transport.fedramp.hash(state);
+        auth_mode_tag(self.transport.auth_mode).hash(state);
+        self.transport.route_generation.hash(state);
+        self.credential_revision.hash(state);
+        self.base_url.hash(state);
+        self.managed.hash(state);
+    }
+}
+
+/// Builds a compatibility key for non-snapshot callers.
+///
+/// Managed account-pool callers must instead pass their captured
+/// [`TransportAuthBinding`] and credential revision to
+/// [`CodexAppsToolsCacheKey::from_transport_binding`].
 pub fn codex_apps_tools_cache_key(auth: Option<&CodexAuth>) -> CodexAppsToolsCacheKey {
+    let auth_mode = auth.map_or(AuthMode::Chatgpt, CodexAuth::api_auth_mode);
+    let raw_account_id = auth.and_then(CodexAuth::get_account_id);
+    let identity_key = auth
+        .and_then(CodexAuth::get_chatgpt_user_id)
+        .or_else(|| raw_account_id.clone())
+        .unwrap_or_else(|| format!("nonpooled:{auth_mode}"));
     CodexAppsToolsCacheKey {
-        account_id: auth.and_then(CodexAuth::get_account_id),
-        chatgpt_user_id: auth.and_then(CodexAuth::get_chatgpt_user_id),
-        is_workspace_account: auth.is_some_and(CodexAuth::is_workspace_account),
+        transport: TransportAuthBinding {
+            identity_key,
+            raw_account_id,
+            fedramp: auth.is_some_and(CodexAuth::is_fedramp_account),
+            auth_mode,
+            route_generation: 0,
+        },
+        credential_revision: 0,
+        base_url: String::new(),
+        managed: false,
+    }
+}
+
+fn normalize_base_url(base_url: String) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn auth_mode_tag(auth_mode: AuthMode) -> u8 {
+    match auth_mode {
+        AuthMode::ApiKey => 0,
+        AuthMode::Chatgpt => 1,
+        AuthMode::ChatgptAuthTokens => 2,
+        AuthMode::Headers => 3,
+        AuthMode::AgentIdentity => 4,
+        AuthMode::PersonalAccessToken => 5,
+        AuthMode::BedrockApiKey => 6,
     }
 }
 

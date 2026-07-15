@@ -1,4 +1,5 @@
 use super::*;
+use crate::McpRuntimeSnapshot;
 use crate::config::ConfigBuilder;
 use crate::config::ManagedFeatures;
 use crate::session::step_context::StepContext;
@@ -1471,6 +1472,32 @@ async fn host_owned_codex_apps_manager(
     .await;
     Arc::new(manager)
 }
+fn step_context_with_mcp_manager(
+    session: &Session,
+    turn_context: Arc<TurnContext>,
+    manager: Arc<codex_mcp::McpConnectionManager>,
+) -> StepContext {
+    let current = session.services.latest_mcp_runtime();
+    let effective_auth = current.effective_auth().cloned();
+    let mcp = Arc::new(McpRuntimeSnapshot::new(
+        Arc::new(current.config().clone()),
+        current.plugins_available(),
+        manager,
+        current.runtime_context().clone(),
+        current.available_environment_ids().to_vec(),
+        current.transport_auth_binding().cloned(),
+        current.credential_revision(),
+        effective_auth.clone(),
+    ));
+    StepContext::new(
+        Arc::clone(&turn_context),
+        turn_context.environments.clone(),
+        Vec::new(),
+        mcp,
+        effective_auth,
+        /*loaded_agents_md*/ None,
+    )
+}
 
 #[tokio::test]
 async fn codex_apps_auth_elicitation_feature_disabled_returns_original_result() {
@@ -1482,11 +1509,11 @@ async fn codex_apps_auth_elicitation_feature_disabled_returns_original_result() 
     let manager = host_owned_codex_apps_manager(&session, &turn_context).await;
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
+    let step_context = step_context_with_mcp_manager(&session, Arc::clone(&turn_context), manager);
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        &turn_context,
-        manager.as_ref(),
+        &step_context,
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&metadata),
@@ -1503,16 +1530,16 @@ async fn codex_apps_auth_elicitation_non_host_owned_server_returns_original_resu
     let (session, mut turn_context, rx_event) = make_session_and_context_with_rx().await;
     let mut features = Features::with_defaults();
     features.enable(Feature::AuthElicitation);
-    let turn_context = Arc::get_mut(&mut turn_context).expect("single turn context ref");
-    Arc::make_mut(&mut turn_context.config).features = ManagedFeatures::from(features);
+    let mutable_turn_context = Arc::get_mut(&mut turn_context).expect("single turn context ref");
+    Arc::make_mut(&mut mutable_turn_context.config).features = ManagedFeatures::from(features);
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
     let manager = session.services.latest_mcp_runtime().manager_arc();
+    let step_context = step_context_with_mcp_manager(&session, Arc::clone(&turn_context), manager);
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        turn_context,
-        manager.as_ref(),
+        &step_context,
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&metadata),
@@ -1530,19 +1557,19 @@ async fn codex_apps_auth_elicitation_disallowed_by_policy_returns_original_resul
     let manager = host_owned_codex_apps_manager(&session, &turn_context).await;
     let mut features = Features::with_defaults();
     features.enable(Feature::AuthElicitation);
-    let turn_context = Arc::get_mut(&mut turn_context).expect("single turn context ref");
-    Arc::make_mut(&mut turn_context.config).features = ManagedFeatures::from(features);
-    turn_context
+    let mutable_turn_context = Arc::get_mut(&mut turn_context).expect("single turn context ref");
+    Arc::make_mut(&mut mutable_turn_context.config).features = ManagedFeatures::from(features);
+    mutable_turn_context
         .approval_policy
         .set(AskForApproval::Never)
         .expect("test setup should allow updating approval policy");
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
+    let step_context = step_context_with_mcp_manager(&session, Arc::clone(&turn_context), manager);
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        turn_context,
-        manager.as_ref(),
+        &step_context,
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&metadata),
@@ -1560,9 +1587,9 @@ async fn codex_apps_auth_elicitation_granular_mcp_disabled_returns_original_resu
     let manager = host_owned_codex_apps_manager(&session, &turn_context).await;
     let mut features = Features::with_defaults();
     features.enable(Feature::AuthElicitation);
-    let turn_context = Arc::get_mut(&mut turn_context).expect("single turn context ref");
-    Arc::make_mut(&mut turn_context.config).features = ManagedFeatures::from(features);
-    turn_context
+    let mutable_turn_context = Arc::get_mut(&mut turn_context).expect("single turn context ref");
+    Arc::make_mut(&mut mutable_turn_context.config).features = ManagedFeatures::from(features);
+    mutable_turn_context
         .approval_policy
         .set(AskForApproval::Granular(GranularApprovalConfig {
             sandbox_approval: true,
@@ -1574,11 +1601,11 @@ async fn codex_apps_auth_elicitation_granular_mcp_disabled_returns_original_resu
         .expect("test setup should allow updating approval policy");
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
+    let step_context = step_context_with_mcp_manager(&session, Arc::clone(&turn_context), manager);
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        turn_context,
-        manager.as_ref(),
+        &step_context,
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
         Some(&metadata),
@@ -1597,16 +1624,15 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation() {
     *session.active_turn.lock().await = Some(ActiveTurn::default());
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
+    let step_context = step_context_with_mcp_manager(&session, Arc::clone(&turn_context), manager);
 
     let request_task = tokio::spawn({
         let session = Arc::clone(&session);
-        let turn_context = Arc::clone(&turn_context);
-        let manager = Arc::clone(&manager);
+        let step_context = step_context;
         async move {
             maybe_request_codex_apps_auth_elicitation(
                 &session,
-                &turn_context,
-                manager.as_ref(),
+                &step_context,
                 "call_123",
                 CODEX_APPS_MCP_SERVER_NAME,
                 Some(&metadata),

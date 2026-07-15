@@ -13,6 +13,45 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+fn test_cache_key(
+    account_id: Option<String>,
+    chatgpt_user_id: Option<String>,
+) -> CodexAppsToolsCacheKey {
+    test_cache_key_with_route(
+        account_id,
+        chatgpt_user_id,
+        false,
+        1,
+        1,
+        "https://chatgpt.com",
+    )
+}
+
+fn test_cache_key_with_route(
+    account_id: Option<String>,
+    chatgpt_user_id: Option<String>,
+    fedramp: bool,
+    route_generation: u64,
+    account_revision: u64,
+    base_url: &str,
+) -> CodexAppsToolsCacheKey {
+    let identity_key = chatgpt_user_id
+        .clone()
+        .or_else(|| account_id.clone())
+        .unwrap_or_else(|| "test-account".to_string());
+    CodexAppsToolsCacheKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key,
+            raw_account_id: account_id,
+            fedramp,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation,
+        },
+        account_revision,
+        base_url,
+    )
+}
+
 fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
     ToolInfo {
         server_name: server_name.to_string(),
@@ -51,11 +90,10 @@ fn create_codex_apps_tools_cache_context(
 ) -> CodexAppsToolsCacheContext {
     CodexAppsToolsCache::default().context(
         codex_home,
-        CodexAppsToolsCacheKey {
-            account_id: account_id.map(ToOwned::to_owned),
-            chatgpt_user_id: chatgpt_user_id.map(ToOwned::to_owned),
-            is_workspace_account: false,
-        },
+        test_cache_key(
+            account_id.map(ToOwned::to_owned),
+            chatgpt_user_id.map(ToOwned::to_owned),
+        ),
     )
 }
 
@@ -352,24 +390,195 @@ fn codex_apps_tools_cache_context_does_not_reread_disk_after_creation() {
 }
 
 #[test]
+fn codex_apps_tools_cache_reuses_only_the_exact_full_binding() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = CodexAppsToolsCache::default();
+    let production_key = test_cache_key_with_route(
+        Some("workspace-one".to_string()),
+        Some("stable-user".to_string()),
+        false,
+        7,
+        11,
+        "https://chatgpt.com",
+    );
+    let production = cache.context(codex_home.path().to_path_buf(), production_key.clone());
+    production.store_current_tools_for_test(vec![create_test_tool(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "production",
+    )]);
+
+    let exact = cache.context(codex_home.path().to_path_buf(), production_key.clone());
+    assert_eq!(
+        exact.current_tools().expect("exact binding cache hit")[0].callable_name,
+        "production"
+    );
+
+    let variants = [
+        CodexAppsToolsCacheKey::from_transport_binding(
+            TransportAuthBinding {
+                fedramp: true,
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        CodexAppsToolsCacheKey::from_transport_binding(
+            TransportAuthBinding {
+                route_generation: production_key.transport.route_generation + 1,
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        CodexAppsToolsCacheKey::from_transport_binding(
+            TransportAuthBinding {
+                identity_key: "different-stable-user".to_string(),
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        CodexAppsToolsCacheKey::from_transport_binding(
+            TransportAuthBinding {
+                raw_account_id: Some("workspace-two".to_string()),
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        CodexAppsToolsCacheKey::from_transport_binding(
+            TransportAuthBinding {
+                auth_mode: AuthMode::ChatgptAuthTokens,
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        CodexAppsToolsCacheKey::from_transport_binding(
+            production_key.transport.clone(),
+            production_key.credential_revision + 1,
+            production_key.base_url.clone(),
+        ),
+        CodexAppsToolsCacheKey::from_transport_binding(
+            production_key.transport.clone(),
+            production_key.credential_revision,
+            "https://chatgpt.example.test",
+        ),
+    ];
+
+    for variant in variants {
+        let context = cache.context(codex_home.path().to_path_buf(), variant);
+        assert!(
+            context.current_tools().is_none(),
+            "route-sensitive binding change must miss the catalog cache"
+        );
+    }
+}
+
+#[test]
+fn managed_codex_apps_cache_separates_email_identities_with_shared_raw_ids() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = CodexAppsToolsCache::default();
+    let shared_raw_account_id = Some("shared-workspace".to_string());
+    let first_key = CodexAppsToolsCacheKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key: "first@example.com".to_string(),
+            raw_account_id: shared_raw_account_id.clone(),
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 7,
+        },
+        7,
+        "https://chatgpt.com",
+    );
+    let second_key = CodexAppsToolsCacheKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key: "second@example.com".to_string(),
+            raw_account_id: shared_raw_account_id,
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 7,
+        },
+        7,
+        "https://chatgpt.com",
+    );
+
+    let first = cache.context(codex_home.path().to_path_buf(), first_key.clone());
+    first.store_current_tools_for_test(vec![create_test_tool(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "first-account-tool",
+    )]);
+
+    let same_snapshot = cache.context(codex_home.path().to_path_buf(), first_key);
+    assert_eq!(
+        same_snapshot
+            .current_tools()
+            .expect("same managed snapshot should hit")[0]
+            .callable_name,
+        "first-account-tool"
+    );
+
+    let distinct_identity = cache.context(codex_home.path().to_path_buf(), second_key);
+    assert!(
+        distinct_identity.current_tools().is_none(),
+        "managed rows with shared raw account/user IDs must not share catalog entries"
+    );
+    assert_ne!(
+        first.tools_cache_path(),
+        distinct_identity.tools_cache_path(),
+        "managed rows with shared raw account/user IDs need distinct disk entries"
+    );
+}
+
+#[test]
+#[should_panic(expected = "managed Codex Apps keys require a credential revision")]
+fn managed_codex_apps_key_rejects_zero_revision() {
+    let _ = CodexAppsToolsCacheKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key: "stable-user".to_string(),
+            raw_account_id: Some("workspace".to_string()),
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 1,
+        },
+        0,
+        "https://chatgpt.com",
+    );
+}
+
+#[test]
+#[should_panic(expected = "managed Codex Apps keys require a base URL")]
+fn managed_codex_apps_key_rejects_empty_base_url() {
+    let _ = CodexAppsToolsCacheKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key: "stable-user".to_string(),
+            raw_account_id: Some("workspace".to_string()),
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 1,
+        },
+        1,
+        " / ",
+    );
+}
+
+#[test]
 fn codex_apps_tools_cache_publishes_newest_shared_snapshot() {
     let codex_home = tempdir().expect("tempdir");
     let cache = CodexAppsToolsCache::default();
     let cache_context_1 = cache.context(
         codex_home.path().to_path_buf(),
-        CodexAppsToolsCacheKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        test_cache_key(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let cache_context_2 = cache.context(
         codex_home.path().to_path_buf(),
-        CodexAppsToolsCacheKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        test_cache_key(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let older_ticket = cache_context_1.begin_fetch(CodexAppsToolsFetchSource::Startup);
     let newer_ticket = cache_context_2.begin_fetch(CodexAppsToolsFetchSource::HardRefresh);
@@ -409,11 +618,10 @@ fn codex_apps_tools_cache_keeps_live_publish_when_disk_persistence_fails() {
     std::fs::write(&codex_home_file, b"occupied").expect("create codex home file");
     let cache_context = CodexAppsToolsCache::default().context(
         codex_home_file,
-        CodexAppsToolsCacheKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        test_cache_key(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "live")];
     let published_tools = cache_context.publish_if_newest_accepted(
@@ -438,19 +646,17 @@ fn codex_apps_tools_cache_scopes_non_utf8_home_disk_paths() {
     let cache = CodexAppsToolsCache::default();
     let user_one_context = cache.context(
         codex_home.clone(),
-        CodexAppsToolsCacheKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        test_cache_key(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let user_two_context = cache.context(
         codex_home,
-        CodexAppsToolsCacheKey {
-            account_id: Some("account-two".to_string()),
-            chatgpt_user_id: Some("user-two".to_string()),
-            is_workspace_account: false,
-        },
+        test_cache_key(
+            Some("account-two".to_string()),
+            Some("user-two".to_string()),
+        ),
     );
     let cache_paths = [
         user_one_context.tools_cache_path(),

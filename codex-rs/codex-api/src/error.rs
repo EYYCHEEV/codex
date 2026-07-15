@@ -1,5 +1,6 @@
 use crate::rate_limits::RateLimitError;
 use codex_client::TransportError;
+use codex_protocol::error::WebsocketCloseDetails;
 use http::StatusCode;
 use std::time::Duration;
 use thiserror::Error;
@@ -12,6 +13,8 @@ pub enum ApiError {
     Api { status: StatusCode, message: String },
     #[error("stream error: {0}")]
     Stream(String),
+    #[error("stream error: websocket closed by server before response.completed")]
+    WebsocketClosed(Box<WebsocketCloseDetails>),
     #[error("context window exceeded")]
     ContextWindowExceeded,
     #[error("quota exceeded")]

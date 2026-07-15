@@ -1,0 +1,37 @@
+---
+source: tui/src/status/tests.rs
+expression: sanitized
+---
+/status
+
+╭───────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  >_ OpenAI Codex (v0.0.0)                                                                                 │
+│                                                                                                           │
+│ Visit https://chatgpt.com/codex/settings/usage for up-to-date                                             │
+│ information on rate limits and credits                                                                    │
+│                                                                                                           │
+│  Model:         gpt-5.1-codex-max (reasoning none, summaries auto)                                        │
+│  Directory: [[workspace]]                                                                                 │
+│  Permissions:   Custom (workspace with network access, Ask for approval)                                  │
+│  Agents.md:     <none>                                                                                    │
+│  Account:       2 managed ChatGPT accounts                                                                │
+│                                                                                                           │
+│                                                                                                           │
+│ › alice@example.com · Plus · selected                                                                     │
+│     Credential: healthy                                                                                   │
+│     Eligibility: eligible                                                                                 │
+│     Cooldown: none                                                                                        │
+│     Quota: Codex (fresh) — primary 5h: 75% left, resets 2024-01-02 04:04 UTC; secondary weekly: 40% left, │
+│       resets 2024-01-03 03:04 UTC                                                                         │
+│     Quota: Other limit (fresh) — primary 1h: 50% left, resets 2024-01-02 03:34 UTC; secondary unavailable │
+│     Usage: fresh · 1.25M lifetime tokens · 84K peak daily · 7-day current streak · 91s longest turn       │
+│     Observed: 2024-01-02 03:04 UTC                                                                        │
+│                                                                                                           │
+│   Managed account legacy:stable-bob · Free                                                                │
+│     Credential: sign-in required (refreshTokenRejected; observed 2024-01-02 03:04 UTC)                    │
+│     Eligibility: ineligible (sign-in required)                                                            │
+│     Cooldown: quota cooldown (until 2024-01-02 03:14 UTC)                                                 │
+│     Quota: unavailable; no retained quota windows                                                         │
+│     Usage: unavailable · initial usage fetch failed · summary not reported                                │
+│     Observed: unknown                                                                                     │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────╯

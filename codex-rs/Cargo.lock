@@ -2327,6 +2327,7 @@ dependencies = [
  "app_test_support",
  "assert_cmd",
  "assert_matches",
+ "chrono",
  "clap",
  "clap_complete",
  "codex-api",
@@ -2335,6 +2336,7 @@ dependencies = [
  "codex-app-server-protocol",
  "codex-app-server-test-client",
  "codex-arg0",
+ "codex-backend-client",
  "codex-chatgpt",
  "codex-cloud-tasks",
  "codex-config",
@@ -2588,7 +2590,9 @@ version = "0.144.0"
 dependencies = [
  "anyhow",
  "codex-config",
+ "codex-login",
  "codex-plugin",
+ "codex-protocol",
  "indexmap 2.14.0",
  "pretty_assertions",
  "serde",
@@ -3553,6 +3557,8 @@ dependencies = [
 name = "codex-model-provider"
 version = "0.144.0"
 dependencies = [
+ "base64 0.22.1",
+ "chrono",
  "codex-agent-identity",
  "codex-api",
  "codex-aws-auth",
@@ -3567,6 +3573,7 @@ dependencies = [
  "http 1.4.0",
  "pretty_assertions",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "wiremock",

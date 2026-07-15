@@ -120,14 +120,20 @@ impl McpRequestProcessor {
             timeout_secs,
         } = params;
 
-        let auth = self.auth_manager.auth().await;
-        let (mcp_config, runtime_context) = match thread_id.as_deref() {
+        let (auth, mcp_config, runtime_context) = match thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
-                let runtime = thread.current_mcp_runtime().await;
-                (runtime.config().clone(), runtime.runtime_context().clone())
+                let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
+                    internal_error(format!("failed to capture thread runtime: {err}"))
+                })?;
+                (
+                    snapshot.effective_auth,
+                    snapshot.mcp.config().clone(),
+                    snapshot.mcp.runtime_context().clone(),
+                )
             }
             None => {
+                let auth = self.auth_manager.auth().await;
                 let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
                 let mcp_config = self
                     .thread_manager
@@ -138,7 +144,7 @@ impl McpRequestProcessor {
                     self.thread_manager.environment_manager(),
                     config.cwd.to_path_buf(),
                 );
-                (mcp_config, runtime_context)
+                (auth, mcp_config, runtime_context)
             }
         };
         let effective_servers = codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
@@ -222,6 +228,34 @@ impl McpRequestProcessor {
         Ok(McpServerOauthLoginResponse { authorization_url })
     }
 
+    async fn threadless_auth_and_codex_apps_cache_key(
+        &self,
+        chatgpt_base_url: &str,
+    ) -> Result<(Option<CodexAuth>, codex_mcp::CodexAppsToolsCacheKey), JSONRPCErrorError> {
+        let managed_snapshot = self
+            .auth_manager
+            .managed_chatgpt_auth_snapshot(&codex_login::ManagedChatgptSelectionScope::default())
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "failed to resolve threadless managed account snapshot: {err}"
+                ))
+            })?;
+
+        if let Some(snapshot) = managed_snapshot {
+            let cache_key = codex_mcp::CodexAppsToolsCacheKey::from_transport_binding(
+                snapshot.transport,
+                snapshot.account_revision,
+                chatgpt_base_url,
+            );
+            return Ok((Some(snapshot.auth), cache_key));
+        }
+
+        let auth = self.auth_manager.auth().await;
+        let cache_key = codex_mcp::codex_apps_tools_cache_key(auth.as_ref());
+        Ok((auth, cache_key))
+    }
+
     async fn list_mcp_server_status(
         &self,
         request_id: &ConnectionRequestId,
@@ -230,35 +264,47 @@ impl McpRequestProcessor {
         let request = request_id.clone();
 
         let outgoing = Arc::clone(&self.outgoing);
-        let (config, thread) = match params.thread_id.as_deref() {
+        let (
+            mcp_config,
+            auth,
+            runtime_context,
+            codex_apps_tools_cache,
+            codex_apps_tools_cache_key,
+            existing_manager,
+        ) = match params.thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
-                let thread_config = thread.config().await;
-                let config = self
-                    .config_manager
-                    .load_latest_config_for_thread(thread_config.as_ref())
-                    .await
-                    .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
-                (config, Some(thread))
-            }
-            None => (self.load_latest_config(/*fallback_cwd*/ None).await?, None),
-        };
-        let mcp_manager = self.thread_manager.mcp_manager();
-        let codex_apps_tools_cache = mcp_manager.codex_apps_tools_cache();
-        let auth = self.auth_manager.auth().await;
-        let (mcp_config, runtime_context) = match thread {
-            Some(thread) => {
-                let mcp_config = thread.runtime_mcp_config(&config).await;
-                let runtime = thread.current_mcp_runtime().await;
-                (mcp_config, runtime.runtime_context().clone())
+                let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
+                    internal_error(format!("failed to capture thread runtime: {err}"))
+                })?;
+                (
+                    snapshot.mcp.config().clone(),
+                    snapshot.effective_auth,
+                    snapshot.mcp.runtime_context().clone(),
+                    None,
+                    None,
+                    Some(snapshot.mcp.manager_arc()),
+                )
             }
             None => {
+                let mcp_manager = self.thread_manager.mcp_manager();
+                let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
                 let mcp_config = mcp_manager.runtime_config(&config).await;
+                let (auth, cache_key) = self
+                    .threadless_auth_and_codex_apps_cache_key(&mcp_config.chatgpt_base_url)
+                    .await?;
                 let runtime_context = McpRuntimeContext::new(
                     self.thread_manager.environment_manager(),
                     config.cwd.to_path_buf(),
                 );
-                (mcp_config, runtime_context)
+                (
+                    mcp_config,
+                    auth,
+                    runtime_context,
+                    Some(mcp_manager.codex_apps_tools_cache()),
+                    Some(cache_key),
+                    None,
+                )
             }
         };
 
@@ -271,6 +317,8 @@ impl McpRequestProcessor {
                 auth,
                 runtime_context,
                 codex_apps_tools_cache,
+                codex_apps_tools_cache_key,
+                existing_manager,
             )
             .await;
         });
@@ -284,7 +332,9 @@ impl McpRequestProcessor {
         mcp_config: codex_mcp::McpConfig,
         auth: Option<CodexAuth>,
         runtime_context: McpRuntimeContext,
-        codex_apps_tools_cache: codex_mcp::CodexAppsToolsCache,
+        codex_apps_tools_cache: Option<codex_mcp::CodexAppsToolsCache>,
+        codex_apps_tools_cache_key: Option<codex_mcp::CodexAppsToolsCacheKey>,
+        existing_manager: Option<Arc<codex_mcp::McpConnectionManager>>,
     ) {
         let result = Self::list_mcp_server_status_response(
             request_id.request_id.to_string(),
@@ -293,6 +343,8 @@ impl McpRequestProcessor {
             auth,
             runtime_context,
             codex_apps_tools_cache,
+            codex_apps_tools_cache_key,
+            existing_manager,
         )
         .await;
         outgoing.send_result(request_id, result).await;
@@ -304,22 +356,45 @@ impl McpRequestProcessor {
         mcp_config: codex_mcp::McpConfig,
         auth: Option<CodexAuth>,
         runtime_context: McpRuntimeContext,
-        codex_apps_tools_cache: codex_mcp::CodexAppsToolsCache,
+        codex_apps_tools_cache: Option<codex_mcp::CodexAppsToolsCache>,
+        codex_apps_tools_cache_key: Option<codex_mcp::CodexAppsToolsCacheKey>,
+        existing_manager: Option<Arc<codex_mcp::McpConnectionManager>>,
     ) -> Result<ListMcpServerStatusResponse, JSONRPCErrorError> {
         let detail = match params.detail.unwrap_or(McpServerStatusDetail::Full) {
             McpServerStatusDetail::Full => McpSnapshotDetail::Full,
             McpServerStatusDetail::ToolsAndAuthOnly => McpSnapshotDetail::ToolsAndAuthOnly,
         };
 
-        let snapshot = collect_mcp_server_status_snapshot_with_detail(
-            &mcp_config,
-            auth.as_ref(),
-            request_id,
-            runtime_context,
-            codex_apps_tools_cache,
-            detail,
-        )
-        .await;
+        let snapshot = match existing_manager {
+            Some(manager) => {
+                codex_mcp::collect_mcp_server_status_snapshot_from_existing_manager(
+                    manager.as_ref(),
+                    &mcp_config,
+                    auth.as_ref(),
+                    &runtime_context,
+                    detail,
+                )
+                .await
+            }
+            None => {
+                let codex_apps_tools_cache = codex_apps_tools_cache.ok_or_else(|| {
+                    internal_error("threadless MCP status requires the shared tools cache")
+                })?;
+                let codex_apps_tools_cache_key = codex_apps_tools_cache_key.ok_or_else(|| {
+                    internal_error("threadless MCP status requires a tools cache key")
+                })?;
+                collect_mcp_server_status_snapshot_with_detail(
+                    &mcp_config,
+                    auth.as_ref(),
+                    request_id,
+                    runtime_context,
+                    codex_apps_tools_cache,
+                    codex_apps_tools_cache_key,
+                    detail,
+                )
+                .await
+            }
+        };
 
         let McpServerStatusSnapshot {
             server_infos,
@@ -410,7 +485,9 @@ impl McpRequestProcessor {
         let mcp_manager = self.thread_manager.mcp_manager();
         let mcp_config = mcp_manager.runtime_config(&config).await;
         let codex_apps_tools_cache = mcp_manager.codex_apps_tools_cache();
-        let auth = self.auth_manager.auth().await;
+        let (auth, codex_apps_tools_cache_key) = self
+            .threadless_auth_and_codex_apps_cache_key(&mcp_config.chatgpt_base_url)
+            .await?;
         let environment_manager = self.thread_manager.environment_manager();
         // This threadless resource-read path has no turn cwd or turn-selected
         // environment. Use config cwd only as the local stdio fallback; named
@@ -425,6 +502,7 @@ impl McpRequestProcessor {
                 auth.as_ref(),
                 runtime_context,
                 codex_apps_tools_cache,
+                codex_apps_tools_cache_key,
                 &server,
                 &uri,
             )

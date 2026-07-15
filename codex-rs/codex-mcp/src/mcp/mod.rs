@@ -45,7 +45,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ResolvedMcpCatalog;
 use crate::codex_apps_cache::CodexAppsToolsCache;
-use crate::codex_apps_cache::codex_apps_tools_cache_key;
+use crate::codex_apps_cache::CodexAppsToolsCacheKey;
 use crate::connection_manager::McpConnectionManager;
 use crate::runtime::McpRuntimeContext;
 use crate::server::EffectiveMcpServer;
@@ -304,6 +304,7 @@ pub async fn read_mcp_resource(
     auth: Option<&CodexAuth>,
     runtime_context: McpRuntimeContext,
     codex_apps_tools_cache: CodexAppsToolsCache,
+    codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
     server: &str,
     uri: &str,
 ) -> anyhow::Result<ReadResourceResult> {
@@ -333,7 +334,7 @@ pub async fn read_mcp_resource(
         runtime_context,
         config.codex_home.clone(),
         codex_apps_tools_cache,
-        codex_apps_tools_cache_key(auth),
+        codex_apps_tools_cache_key,
         host_owned_codex_apps_enabled(config, auth),
         config.prefix_mcp_tool_names,
         config.client_elicitation_capability.clone(),
@@ -370,6 +371,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     submit_id: String,
     runtime_context: McpRuntimeContext,
     codex_apps_tools_cache: CodexAppsToolsCache,
+    codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
     detail: McpSnapshotDetail,
 ) -> McpServerStatusSnapshot {
     let mcp_servers = effective_mcp_servers(config, auth);
@@ -413,7 +415,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         runtime_context,
         config.codex_home.clone(),
         codex_apps_tools_cache,
-        codex_apps_tools_cache_key(auth),
+        codex_apps_tools_cache_key,
         host_owned_codex_apps_enabled(config, auth),
         config.prefix_mcp_tool_names,
         config.client_elicitation_capability.clone(),
@@ -659,9 +661,39 @@ fn convert_mcp_resource_templates(
         .collect::<HashMap<_, _>>()
 }
 
+/// Collects status from an already-selected MCP manager snapshot.
+///
+/// Server selection and auth status projection are derived from the supplied
+/// config and auth, while all live MCP data is read from `mcp_connection_manager`.
+pub async fn collect_mcp_server_status_snapshot_from_existing_manager(
+    mcp_connection_manager: &McpConnectionManager,
+    config: &McpConfig,
+    auth: Option<&CodexAuth>,
+    runtime_context: &McpRuntimeContext,
+    detail: McpSnapshotDetail,
+) -> McpServerStatusSnapshot {
+    let mcp_servers = effective_mcp_servers(config, auth);
+    let auth_status_entries = compute_auth_statuses(
+        mcp_servers.iter(),
+        config.mcp_oauth_credentials_store_mode,
+        config.auth_keyring_backend_kind,
+        auth,
+        runtime_context,
+    )
+    .await;
+    let server_names = mcp_servers.keys().cloned().collect();
+    collect_mcp_server_status_snapshot_from_manager(
+        mcp_connection_manager,
+        auth_status_entries,
+        server_names,
+        detail,
+    )
+    .await
+}
+
 async fn collect_mcp_server_status_snapshot_from_manager(
     mcp_connection_manager: &McpConnectionManager,
-    auth_status_entries: HashMap<String, crate::mcp::auth::McpAuthStatusEntry>,
+    auth_status_entries: HashMap<String, McpAuthStatusEntry>,
     server_names: Vec<String>,
     detail: McpSnapshotDetail,
 ) -> McpServerStatusSnapshot {

@@ -64,6 +64,13 @@ pub enum SandboxErr {
     LandlockRestrict,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebsocketCloseDetails {
+    pub code: Option<u16>,
+    pub reason: Option<String>,
+    pub reason_redacted: bool,
+}
+
 #[derive(Error, Debug)]
 pub enum CodexErr {
     #[error("turn aborted. Something went wrong? Hit `/feedback` to report the issue.")]
@@ -72,7 +79,16 @@ pub enum CodexErr {
     #[error("shared rollout token budget exhausted")]
     SessionBudgetExceeded,
 
-    /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
+    /// Returned when the Responses WebSocket closes after the handshake but before
+    /// `response.completed`.
+    ///
+    /// The close frame is kept as bounded, sanitized diagnostic data so the core retry owner can
+    /// persist a failure-only rollout record without enabling per-frame telemetry.
+    #[error(
+        "stream disconnected before completion: websocket closed by server before response.completed"
+    )]
+    WebsocketClosed(Box<WebsocketCloseDetails>),
+    /// Returned by ResponsesClient when a response stream disconnects or errors out **after** the
     /// handshake has succeeded but **before** it finished emitting `response.completed`.
     ///
     /// The Session loop treats this as a transient error and will automatically retry the turn.
@@ -197,7 +213,8 @@ impl CodexErr {
             | CodexErr::UsageLimitReached(_)
             | CodexErr::ServerOverloaded
             | CodexErr::CyberPolicy { .. } => false,
-            CodexErr::Stream(..)
+            CodexErr::WebsocketClosed(_)
+            | CodexErr::Stream(..)
             | CodexErr::Timeout
             | CodexErr::RequestTimeout
             | CodexErr::UnexpectedStatus(_)
@@ -238,6 +255,9 @@ impl CodexErr {
             },
             CodexErr::ResponseStreamFailed(_) => CodexErrorInfo::ResponseStreamConnectionFailed {
                 http_status_code: self.http_status_code_value(),
+            },
+            CodexErr::WebsocketClosed(_) => CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
             },
             CodexErr::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
             CodexErr::SessionConfiguredNotFirstEvent

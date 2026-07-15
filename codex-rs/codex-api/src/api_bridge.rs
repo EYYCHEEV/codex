@@ -22,6 +22,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
         ApiError::Retryable { message, delay } => CodexErr::Stream(message, delay),
         ApiError::Stream(msg) => CodexErr::Stream(msg, None),
+        ApiError::WebsocketClosed(details) => CodexErr::WebsocketClosed(details),
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => {
             let user_message = api_error_user_message(status, &message);
@@ -85,10 +86,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
                 } else if status == http::StatusCode::TOO_MANY_REQUESTS {
                     if let Ok(err) = serde_json::from_str::<UsageErrorResponse>(&body_text) {
                         if err.error.error_type.as_deref() == Some("usage_limit_reached") {
-                            let limit_id = extract_header(headers.as_ref(), ACTIVE_LIMIT_HEADER);
-                            let rate_limits = headers.as_ref().and_then(|map| {
-                                parse_rate_limit_for_limit(map, limit_id.as_deref())
-                            });
+                            let rate_limits = headers.as_ref().and_then(parse_rate_limit_headers);
                             let promo_message = headers.as_ref().and_then(parse_promo_message);
                             let rate_limit_reached_type =
                                 headers.as_ref().and_then(parse_rate_limit_reached_type);
@@ -139,6 +137,13 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         },
         ApiError::RateLimit(msg) => CodexErr::Stream(msg, None),
     }
+}
+
+pub(crate) fn parse_rate_limit_headers(
+    headers: &HeaderMap,
+) -> Option<codex_protocol::protocol::RateLimitSnapshot> {
+    let limit_id = extract_header(Some(headers), ACTIVE_LIMIT_HEADER);
+    parse_rate_limit_for_limit(headers, limit_id.as_deref())
 }
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";

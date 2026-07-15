@@ -10,6 +10,8 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 codex-config = { workspace = true }
+codex-login = { workspace = true }
+codex-protocol = { workspace = true }
 codex-plugin = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }

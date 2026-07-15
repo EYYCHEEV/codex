@@ -64,6 +64,10 @@ pub(super) async fn make_test_app() -> App {
         pending_primary_events: VecDeque::new(),
         pending_app_server_requests: PendingAppServerRequests::default(),
         pending_startup_thread_start: false,
+        managed_account_request_scope: None,
+        managed_account_scope_generation: 0,
+        managed_account_request_sequence: 0,
+        pending_managed_account_logout_refresh: None,
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
     }

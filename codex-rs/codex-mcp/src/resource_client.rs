@@ -3,7 +3,6 @@ use std::sync::Weak;
 
 use anyhow::Context;
 use anyhow::Result;
-use arc_swap::ArcSwap;
 use codex_protocol::mcp::Resource;
 use codex_protocol::mcp::ResourceContent;
 use rmcp::model::PaginatedRequestParams;
@@ -27,13 +26,14 @@ pub struct McpResourceReadResult {
     pub contents: Vec<ResourceContent>,
 }
 
-/// Session-scoped access to MCP resources through the currently installed manager.
+/// Session-scoped access to MCP resources through one captured manager.
 ///
-/// The client retains the manager's shared publication handle rather than a manager
-/// snapshot, so calls automatically use replacements installed during startup and refresh.
+/// The manager snapshot is selected by the runtime owner. Resource calls and
+/// cache identity always use that same manager, even if a newer runtime is
+/// published concurrently.
 #[derive(Clone)]
 pub struct McpResourceClient {
-    manager: Arc<ArcSwap<McpConnectionManager>>,
+    manager: Arc<McpConnectionManager>,
 }
 
 /// Opaque identity for the manager currently used by an MCP resource client.
@@ -57,21 +57,21 @@ impl std::fmt::Debug for McpResourceClient {
 }
 
 impl McpResourceClient {
-    /// Creates a resource client backed by the session's replaceable MCP manager.
-    pub fn new(manager: Arc<ArcSwap<McpConnectionManager>>) -> Self {
+    /// Creates a resource client backed by one exact MCP manager snapshot.
+    pub fn new(manager: Arc<McpConnectionManager>) -> Self {
         Self { manager }
     }
 
-    /// Returns an identity that changes whenever the published manager changes.
+    /// Returns the identity of the captured manager.
     pub fn cache_key(&self) -> McpResourceClientCacheKey {
-        McpResourceClientCacheKey(Arc::downgrade(&self.manager.load_full()))
+        McpResourceClientCacheKey(Arc::downgrade(&self.manager))
     }
 
-    /// Returns whether the current manager contains the named server.
+    /// Returns whether the captured manager contains the named server.
     ///
     /// This does not wait for server startup or imply that startup succeeded.
     pub async fn has_server(&self, server: &str) -> bool {
-        self.manager.load_full().contains_server(server)
+        self.manager.contains_server(server)
     }
 
     /// Lists one resource page from the named server.
@@ -82,11 +82,7 @@ impl McpResourceClient {
     ) -> Result<McpResourcePage> {
         let params =
             cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
-        let result = self
-            .manager
-            .load_full()
-            .list_resources(server, params)
-            .await?;
+        let result = self.manager.list_resources(server, params).await?;
         let resources = result
             .resources
             .into_iter()
@@ -102,7 +98,6 @@ impl McpResourceClient {
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
         let result = self
             .manager
-            .load_full()
             .read_resource(server, ReadResourceRequestParams::new(uri.to_string()))
             .await?;
         let contents = result
@@ -123,4 +118,37 @@ fn resource_content_from_rmcp(content: rmcp::model::ResourceContents) -> Result<
     let value =
         serde_json::to_value(content).context("failed to serialize MCP resource content")?;
     serde_json::from_value(value).context("failed to convert MCP resource content")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_config::Constrained;
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::AskForApproval;
+
+    fn test_manager() -> Arc<McpConnectionManager> {
+        Arc::new(
+            McpConnectionManager::new_uninitialized_with_permission_profile(
+                &Constrained::allow_any(AskForApproval::OnRequest),
+                &PermissionProfile::default(),
+                /*prefix_mcp_tool_names*/ true,
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn resource_client_retains_exact_manager_snapshot_and_cache_identity() {
+        let first_manager = test_manager();
+        let first = McpResourceClient::new(Arc::clone(&first_manager));
+        let first_clone = first.clone();
+        let replacement = McpResourceClient::new(test_manager());
+
+        assert!(first.cache_key() == first_clone.cache_key());
+        assert!(first.cache_key() != replacement.cache_key());
+
+        drop(first_manager);
+        assert!(first.cache_key().0.upgrade().is_some());
+        assert!(!first.has_server("replacement-only").await);
+    }
 }

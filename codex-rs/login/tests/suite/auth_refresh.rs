@@ -8,6 +8,7 @@ use codex_login::AuthDotJson;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::CLIENT_ID_OVERRIDE_ENV_VAR;
+use codex_login::ManagedChatgptOauthCredentials;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_login::RefreshTokenError;
 use codex_login::load_auth_dot_json;
@@ -34,7 +35,7 @@ const INITIAL_REFRESH_TOKEN: &str = "initial-refresh-token";
 
 #[serial_test::serial(auth_env)]
 #[tokio::test]
-async fn refresh_token_succeeds_updates_storage() -> Result<()> {
+async fn managed_refresh_succeeds_updates_storage_and_revision() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let _client_id_guard = EnvGuard::set(CLIENT_ID_OVERRIDE_ENV_VAR, "staging-client".to_string());
@@ -50,7 +51,7 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
         .await;
 
     let ctx = RefreshTokenTestContext::new(&server).await?;
-    let initial_last_refresh = Utc::now() - Duration::days(1);
+    let initial_last_refresh = Utc::now() - Duration::days(10);
     let mut initial_tokens =
         build_tokens_for_account("workspace-a", INITIAL_ACCESS_TOKEN, INITIAL_REFRESH_TOKEN);
     initial_tokens.account_id = Some("stale-workspace".to_string());
@@ -62,13 +63,20 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
+    ctx.auth_manager.managed_chatgpt_accounts()?;
+    let initial_pool_revision = ctx
+        .load_auth()?
+        .managed_chatgpt
+        .context("managed pool should exist after migration")?
+        .revision;
 
     ctx.auth_manager
-        .refresh_token_from_authority()
+        .refresh_managed_chatgpt_account("email:user@example.com")
         .await
-        .context("refresh should succeed")?;
+        .context("managed refresh should succeed")?;
 
     let requests = server.received_requests().await.unwrap_or_default();
     assert_eq!(
@@ -87,12 +95,20 @@ async fn refresh_token_succeeds_updates_storage() -> Result<()> {
         ..initial_tokens.clone()
     };
     let stored = ctx.load_auth()?;
-    let tokens = stored.tokens.as_ref().context("tokens should exist")?;
-    assert_eq!(tokens, &refreshed_tokens);
-    let refreshed_at = stored
-        .last_refresh
+    let pool = stored
+        .managed_chatgpt
         .as_ref()
-        .context("last_refresh should be recorded")?;
+        .context("managed pool should exist")?;
+    assert!(
+        pool.revision > initial_pool_revision,
+        "refresh mutations must advance the pool revision"
+    );
+    let account = pool
+        .accounts
+        .first()
+        .context("managed account should exist")?;
+    assert_eq!(&account.tokens, &refreshed_tokens);
+    let refreshed_at = &account.last_refresh;
     assert!(
         *refreshed_at >= initial_last_refresh,
         "last_refresh should advance"
@@ -141,6 +157,7 @@ async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Re
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -151,7 +168,7 @@ async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Re
 
     let refreshed_tokens =
         build_tokens_for_account("workspace-b", "new-access-token", "new-refresh-token");
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     let tokens = stored.tokens.as_ref().context("tokens should exist")?;
     assert_eq!(tokens, &refreshed_tokens);
     let refreshed_at = stored
@@ -204,6 +221,7 @@ async fn refresh_token_refreshes_when_auth_is_unchanged() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -217,7 +235,7 @@ async fn refresh_token_refreshes_when_auth_is_unchanged() -> Result<()> {
         refresh_token: "new-refresh-token".to_string(),
         ..initial_tokens.clone()
     };
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     let tokens = stored.tokens.as_ref().context("tokens should exist")?;
     assert_eq!(tokens, &refreshed_tokens);
     let refreshed_at = stored
@@ -271,6 +289,7 @@ async fn auth_refreshes_when_access_token_is_near_expiry() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -289,7 +308,7 @@ async fn auth_refreshes_when_access_token_is_near_expiry() -> Result<()> {
         .get_token_data()
         .context("token data should refresh")?;
     assert_eq!(cached, refreshed_tokens);
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     let tokens = stored.tokens.as_ref().context("tokens should exist")?;
     assert_eq!(tokens, &refreshed_tokens);
     let refreshed_at = stored
@@ -323,6 +342,7 @@ async fn auth_skips_access_token_outside_refresh_window() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -336,7 +356,7 @@ async fn auth_skips_access_token_outside_refresh_window() -> Result<()> {
         .get_token_data()
         .context("token data should remain cached")?;
     assert_eq!(cached, initial_tokens);
-    assert_eq!(ctx.load_auth()?, initial_auth);
+    assert_eq!(ctx.load_legacy_auth()?, initial_auth);
     let requests = server.received_requests().await.unwrap_or_default();
     assert!(requests.is_empty(), "expected no refresh token requests");
 
@@ -361,6 +381,7 @@ async fn refresh_token_skips_refresh_when_auth_changed() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -373,6 +394,7 @@ async fn refresh_token_skips_refresh_when_auth_changed() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -386,7 +408,7 @@ async fn refresh_token_skips_refresh_when_auth_changed() -> Result<()> {
         .await
         .context("refresh should be skipped")?;
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, disk_auth);
 
     let cached_auth = ctx
@@ -431,6 +453,7 @@ async fn refresh_token_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -444,6 +467,7 @@ async fn refresh_token_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -461,7 +485,17 @@ async fn refresh_token_errors_on_account_mismatch() -> Result<()> {
     assert_eq!(err.failed_reason(), Some(RefreshTokenFailedReason::Other));
 
     let stored = ctx.load_auth()?;
-    assert_eq!(stored, disk_auth);
+    assert!(stored.tokens.is_none());
+    assert!(stored.last_refresh.is_none());
+    let pool = stored
+        .managed_chatgpt
+        .as_ref()
+        .context("legacy disk auth should migrate to the managed pool")?;
+    assert_eq!(pool.accounts.len(), 1);
+    let stored_account = &pool.accounts[0];
+    assert_eq!(stored_account.identity_key, "email:user@example.com");
+    assert_eq!(stored_account.tokens, *disk_auth.tokens.as_ref().unwrap());
+    assert_eq!(stored_account.last_refresh, initial_last_refresh);
 
     let requests = server.received_requests().await.unwrap_or_default();
     assert!(requests.is_empty(), "expected no refresh token requests");
@@ -506,6 +540,7 @@ async fn returns_fresh_tokens_as_is() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -519,7 +554,7 @@ async fn returns_fresh_tokens_as_is() -> Result<()> {
         .context("token data should remain cached")?;
     assert_eq!(cached, initial_tokens);
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, initial_auth);
 
     let requests = server.received_requests().await.unwrap_or_default();
@@ -556,6 +591,7 @@ async fn refreshes_token_when_access_token_is_expired() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -574,7 +610,7 @@ async fn refreshes_token_when_access_token_is_expired() -> Result<()> {
         .context("token data should refresh")?;
     assert_eq!(cached, refreshed_tokens);
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     let tokens = stored.tokens.as_ref().context("tokens should exist")?;
     assert_eq!(tokens, &refreshed_tokens);
     let refreshed_at = stored
@@ -608,6 +644,7 @@ async fn auth_reloads_disk_auth_when_cached_auth_is_stale() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -621,6 +658,7 @@ async fn auth_reloads_disk_auth_when_cached_auth_is_stale() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -639,7 +677,7 @@ async fn auth_reloads_disk_auth_when_cached_auth_is_stale() -> Result<()> {
         .context("token data should reload from disk")?;
     assert_eq!(cached, disk_tokens);
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, disk_auth);
 
     let requests = server.received_requests().await.unwrap_or_default();
@@ -676,6 +714,7 @@ async fn auth_reloads_disk_auth_without_calling_expired_refresh_token() -> Resul
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -689,6 +728,7 @@ async fn auth_reloads_disk_auth_without_calling_expired_refresh_token() -> Resul
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -707,7 +747,7 @@ async fn auth_reloads_disk_auth_without_calling_expired_refresh_token() -> Resul
         .context("token data should reload from disk")?;
     assert_eq!(cached, disk_tokens);
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, disk_auth);
 
     server.verify().await;
@@ -742,6 +782,7 @@ async fn refresh_token_returns_permanent_error_for_expired_refresh_token() -> Re
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -753,17 +794,12 @@ async fn refresh_token_returns_permanent_error_for_expired_refresh_token() -> Re
         .context("refresh should fail")?;
     assert_eq!(err.failed_reason(), Some(RefreshTokenFailedReason::Expired));
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, initial_auth);
-    let cached_auth = ctx
-        .auth_manager
-        .auth()
-        .await
-        .context("auth should remain cached")?;
-    let cached = cached_auth
-        .get_token_data()
-        .context("token data should remain cached")?;
-    assert_eq!(cached, initial_tokens);
+    assert!(
+        ctx.auth_manager.auth().await.is_none(),
+        "an account with permanently invalid credentials must become ineligible"
+    );
 
     server.verify().await;
     Ok(())
@@ -797,6 +833,7 @@ async fn refresh_token_does_not_retry_after_permanent_failure() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -819,20 +856,15 @@ async fn refresh_token_does_not_retry_after_permanent_failure() -> Result<()> {
         .context("second refresh should fail without retrying")?;
     assert_eq!(
         second_err.failed_reason(),
-        Some(RefreshTokenFailedReason::Exhausted)
+        Some(RefreshTokenFailedReason::Other)
     );
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, initial_auth);
-    let cached_auth = ctx
-        .auth_manager
-        .auth()
-        .await
-        .context("auth should remain cached")?;
-    let cached = cached_auth
-        .get_token_data()
-        .context("token data should remain cached")?;
-    assert_eq!(cached, initial_tokens);
+    assert!(
+        ctx.auth_manager.auth().await.is_none(),
+        "an account with permanently invalid credentials must remain ineligible"
+    );
 
     server.verify().await;
     Ok(())
@@ -866,6 +898,7 @@ async fn refresh_token_does_not_retry_after_bad_request_reused_failure() -> Resu
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -888,20 +921,15 @@ async fn refresh_token_does_not_retry_after_bad_request_reused_failure() -> Resu
         .context("second refresh should fail without retrying")?;
     assert_eq!(
         second_err.failed_reason(),
-        Some(RefreshTokenFailedReason::Exhausted)
+        Some(RefreshTokenFailedReason::Other)
     );
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, initial_auth);
-    let cached_auth = ctx
-        .auth_manager
-        .auth()
-        .await
-        .context("auth should remain cached")?;
-    let cached = cached_auth
-        .get_token_data()
-        .context("token data should remain cached")?;
-    assert_eq!(cached, initial_tokens);
+    assert!(
+        ctx.auth_manager.auth().await.is_none(),
+        "an account with permanently invalid credentials must remain ineligible"
+    );
 
     server.verify().await;
     Ok(())
@@ -935,6 +963,7 @@ async fn refresh_token_reloads_changed_auth_after_permanent_failure() -> Result<
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -951,29 +980,24 @@ async fn refresh_token_reloads_changed_auth_after_permanent_failure() -> Result<
 
     let fresh_refresh = Utc::now() - Duration::hours(1);
     let disk_tokens = build_tokens("disk-access-token", "disk-refresh-token");
-    let disk_auth = AuthDotJson {
-        auth_mode: Some(AuthMode::Chatgpt),
-        openai_api_key: None,
-        tokens: Some(disk_tokens.clone()),
-        last_refresh: Some(fresh_refresh),
-        agent_identity: None,
-        personal_access_token: None,
-        bedrock_api_key: None,
-    };
-    save_auth(
-        ctx.codex_home.path(),
-        &disk_auth,
-        AuthCredentialsStoreMode::File,
-        AuthKeyringBackendKind::default(),
-    )?;
+    let external_manager = ctx.peer_auth_manager().await;
+    external_manager
+        .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+            tokens: disk_tokens.clone(),
+            last_refresh: fresh_refresh,
+            oauth_api_key: None,
+        })
+        .await
+        .context("external login should replace the blocked credentials")?;
 
     ctx.auth_manager
         .refresh_token()
         .await
         .context("refresh should reload changed auth without retrying")?;
 
-    let stored = ctx.load_auth()?;
-    assert_eq!(stored, disk_auth);
+    let stored = ctx.load_legacy_auth()?;
+    assert_eq!(stored.tokens.as_ref(), Some(&disk_tokens));
+    assert_eq!(stored.last_refresh, Some(fresh_refresh));
 
     let cached_auth = ctx
         .auth_manager
@@ -1021,6 +1045,7 @@ async fn refresh_token_returns_transient_error_on_server_failure() -> Result<()>
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1033,7 +1058,7 @@ async fn refresh_token_returns_transient_error_on_server_failure() -> Result<()>
     assert!(matches!(err, RefreshTokenError::Transient(_)));
     assert_eq!(err.failed_reason(), None);
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, initial_auth);
     let cached_auth = ctx
         .auth_manager
@@ -1076,6 +1101,7 @@ async fn unauthorized_recovery_reloads_then_refreshes_tokens() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1088,6 +1114,7 @@ async fn unauthorized_recovery_reloads_then_refreshes_tokens() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1129,7 +1156,7 @@ async fn unauthorized_recovery_reloads_then_refreshes_tokens() -> Result<()> {
         refresh_token: "recovered-refresh-token".to_string(),
         ..disk_tokens.clone()
     };
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     let tokens = stored.tokens.as_ref().context("tokens should exist")?;
     assert_eq!(tokens, &refreshed_tokens);
 
@@ -1175,6 +1202,7 @@ async fn unauthorized_recovery_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1188,6 +1216,7 @@ async fn unauthorized_recovery_errors_on_account_mismatch() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         ctx.codex_home.path(),
@@ -1215,7 +1244,7 @@ async fn unauthorized_recovery_errors_on_account_mismatch() -> Result<()> {
         .context("recovery should fail due to account mismatch")?;
     assert_eq!(err.failed_reason(), Some(RefreshTokenFailedReason::Other));
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, disk_auth);
 
     let requests = server.received_requests().await.unwrap_or_default();
@@ -1249,6 +1278,7 @@ async fn unauthorized_recovery_requires_chatgpt_auth() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     ctx.write_auth(&auth).await?;
 
@@ -1307,6 +1337,41 @@ impl RefreshTokenTestContext {
         )
         .context("load auth.json")?
         .context("auth.json should exist")
+    }
+
+    fn load_legacy_auth(&self) -> Result<AuthDotJson> {
+        let mut auth = self.load_auth()?;
+        let singleton = auth
+            .managed_chatgpt
+            .as_ref()
+            .and_then(|pool| (pool.accounts.len() == 1).then(|| &pool.accounts[0]))
+            .map(|account| {
+                (
+                    account.tokens.clone(),
+                    account.last_refresh,
+                    account.agent_identity.clone(),
+                )
+            });
+        if let Some((tokens, last_refresh, agent_identity)) = singleton {
+            auth.tokens = Some(tokens);
+            auth.last_refresh = Some(last_refresh);
+            auth.agent_identity = agent_identity;
+            auth.managed_chatgpt = None;
+        }
+        Ok(auth)
+    }
+
+    async fn peer_auth_manager(&self) -> Arc<AuthManager> {
+        AuthManager::shared(
+            self.codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await
     }
 
     async fn write_auth(&self, auth_dot_json: &AuthDotJson) -> Result<()> {

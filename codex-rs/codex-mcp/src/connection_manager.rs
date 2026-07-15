@@ -169,11 +169,11 @@ impl McpConnectionManager {
         let static_chatgpt_auth_provider = auth
             .filter(|auth| auth.uses_codex_backend())
             .map(codex_model_provider::auth_provider_from_auth);
-        let codex_apps_auth_provider = codex_apps_auth_manager.and_then(|auth_manager| {
-            auth.filter(|auth| auth.uses_codex_backend()).map(|auth| {
-                codex_model_provider::auth_provider_from_auth_manager(auth_manager, auth)
-            })
-        });
+        let codex_apps_auth_provider = codex_apps_auth_provider_for_snapshot(
+            auth,
+            codex_apps_auth_manager,
+            &codex_apps_tools_cache_key,
+        );
         let mcp_servers = mcp_servers.clone();
         for (server_name, server) in mcp_servers
             .into_iter()
@@ -217,9 +217,7 @@ impl McpConnectionManager {
             // is the ChatGPT /ps/mcp connection. User-configured MCP
             // registrations keep their existing configured auth path.
             let chatgpt_auth_provider = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                codex_apps_auth_provider
-                    .clone()
-                    .or_else(|| static_chatgpt_auth_provider.clone())
+                codex_apps_auth_provider.clone()
             } else {
                 static_chatgpt_auth_provider.clone()
             };
@@ -925,6 +923,33 @@ impl Drop for McpConnectionManager {
         self.startup_cancellation_token.cancel();
         self.clients.clear();
     }
+}
+
+fn codex_apps_auth_provider_for_snapshot(
+    auth: Option<&CodexAuth>,
+    auth_manager: Option<Arc<AuthManager>>,
+    cache_key: &CodexAppsToolsCacheKey,
+) -> Option<SharedAuthProvider> {
+    let auth = auth.filter(|auth| auth.uses_codex_backend())?;
+    if !cache_key.is_managed()
+        && auth.is_external_chatgpt_tokens()
+        && let Some(auth_manager) = auth_manager
+    {
+        let mut transport = cache_key.transport_binding();
+        // External token overlays use the singular ChatGPT transport route
+        // even though their credential kind remains ChatgptAuthTokens.
+        transport.auth_mode = auth.auth_mode();
+        return Some(codex_model_provider::auth_provider_from_auth_manager(
+            auth_manager,
+            auth,
+            transport,
+            None,
+        ));
+    }
+
+    // A managed manager owns one exact account snapshot. Keep its auth
+    // captured: AuthManager's ambient row may belong to a sibling account.
+    Some(codex_model_provider::auth_provider_from_auth(auth))
 }
 
 /// Makes ChatGPT authentication available to servers that explicitly opt in.
