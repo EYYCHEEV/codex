@@ -27,6 +27,7 @@ pub use provider::ProviderAccountResult;
 pub use provider::ProviderAccountState;
 pub use provider::ProviderAuthRecoveryMessages;
 pub use provider::ProviderCapabilities;
+pub use provider::ProviderRequestSetup;
 pub use provider::ProviderUnauthorizedRecovery;
 pub use provider::RemoteCompactionSupport;
 pub use provider::SharedModelProvider;

@@ -287,57 +287,75 @@ async fn schedule_startup_prewarm_inner(
             }
         }));
     }
-    let startup_cancellation_token = CancellationToken::new();
-    let built_tools_started_at = Instant::now();
-    // Startup prewarm runs before run_turn and needs its own tool-building snapshot.
-    let step_context = session
-        .capture_step_context(
-            Arc::clone(&startup_turn_context),
-            &startup_cancellation_token,
-        )
-        .await?;
-    startup_turn_context.session_telemetry.record_startup_phase(
-        "startup_prewarm_build_tools",
-        built_tools_started_at.elapsed(),
-        /*status*/ None,
-    );
-    let build_prompt_started_at = Instant::now();
-    let startup_prompt = build_prompt(
-        Vec::new(),
-        step_context.as_ref(),
-        BaseInstructions {
-            text: base_instructions,
-            provenance: None,
-        },
-    );
-    startup_turn_context.session_telemetry.record_startup_phase(
-        "startup_prewarm_build_prompt",
-        build_prompt_started_at.elapsed(),
-        /*status*/ None,
-    );
     let responses_metadata = session
         .responses_metadata(&startup_turn_context, CodexResponsesRequestKind::Prewarm)
         .await;
     let mut client_session = session.services.model_client.new_session();
-    let websocket_warmup_started_at = Instant::now();
-    // Prewarm establishes the request baseline before the first turn can change effort.
-    client_session
-        .prewarm_websocket(
-            &startup_prompt,
-            &step_context.settings.model_info,
-            &step_context.session_telemetry,
-            session
-                .reasoning_effort_for_request(&step_context.settings, RequestEffortUsage::Sampling)
-                .await,
-            step_context.settings.reasoning_summary,
-            step_context.settings.service_tier.clone(),
-            &responses_metadata,
-        )
-        .await?;
-    startup_turn_context.session_telemetry.record_startup_phase(
-        "startup_prewarm_websocket_warmup",
-        websocket_warmup_started_at.elapsed(),
-        /*status*/ None,
-    );
+    loop {
+        let request_setup = session
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&startup_turn_context.model_info().slug),
+                Some(responses_metadata.session_id.as_str()),
+            )
+            .await?;
+        let built_tools_started_at = Instant::now();
+        let step_context = session
+            .capture_step_context_for_setup(Arc::clone(&startup_turn_context), &request_setup)
+            .await?;
+        startup_turn_context.session_telemetry.record_startup_phase(
+            "startup_prewarm_build_tools",
+            built_tools_started_at.elapsed(),
+            /*status*/ None,
+        );
+        let build_prompt_started_at = Instant::now();
+        let startup_prompt = build_prompt(
+            Vec::new(),
+            step_context.as_ref(),
+            BaseInstructions {
+                text: base_instructions.clone(),
+                provenance: None,
+            },
+        );
+        startup_turn_context.session_telemetry.record_startup_phase(
+            "startup_prewarm_build_prompt",
+            build_prompt_started_at.elapsed(),
+            /*status*/ None,
+        );
+        let websocket_warmup_started_at = Instant::now();
+        match client_session
+            .prewarm_websocket(
+                &startup_prompt,
+                &step_context.settings.model_info,
+                &step_context.session_telemetry,
+                session
+                    .reasoning_effort_for_request(&step_context.settings, RequestEffortUsage::Sampling)
+                    .await,
+                step_context.settings.reasoning_summary,
+                step_context.settings.service_tier.clone(),
+                &responses_metadata,
+                request_setup,
+            )
+            .await
+        {
+            Ok(()) => {
+                startup_turn_context.session_telemetry.record_startup_phase(
+                    "startup_prewarm_websocket_warmup",
+                    websocket_warmup_started_at.elapsed(),
+                    /*status*/ None,
+                );
+                break;
+            }
+            Err(err)
+                if client_session
+                    .recover_last_managed_attempt(&err, /*committed*/ false)
+                    .await =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
     Ok(client_session)
 }

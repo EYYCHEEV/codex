@@ -9,8 +9,11 @@ use crate::compact_remote_history::estimate_model_visible_tool_tokens;
 use crate::compact_remote_history::trim_function_call_history_to_fit_context_window;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
+use crate::responses_retry::ResponsesStreamRequest;
+use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::session::turn::AttemptOutcome;
 use codex_history::CodexHarnessMetadata;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
@@ -38,98 +41,140 @@ pub(super) async fn run_remote_compact_v2_attempt(
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactV2Attempt> {
     let turn_context = &step_context.turn;
-    let mut history = sess.clone_history().await;
-    let base_instructions = sess.get_prompt_base_instructions().await;
-    let tools = step_context.tool_router.model_visible_specs();
-    let (rewritten_outputs, estimated_deleted_tokens) =
-        trim_function_call_history_to_fit_context_window(
-            &mut history,
-            turn_context.as_ref(),
-            &base_instructions,
-            estimate_model_visible_tool_tokens(&tools),
-        );
-    if rewritten_outputs > 0 {
-        info!(
-            turn_id = %turn_context.sub_id,
-            rewritten_outputs,
-            "rewrote history outputs before remote compaction v2"
-        );
-    }
-    if estimated_deleted_tokens > 0 {
-        let max_local_deleted_tokens = sess
-            .estimated_tokens_after_last_model_generated_item()
-            .await;
-        analytics_details.active_context_tokens_before = analytics_details
-            .active_context_tokens_before
-            .map(|active_context_tokens_before| {
-                active_context_tokens_before
-                    .saturating_sub(estimated_deleted_tokens.min(max_local_deleted_tokens))
-            });
-    }
-
-    let trace_input_history = compaction_trace
-        .is_enabled()
-        .then(|| history.raw_items().cloned().collect());
-    let (mut input, prompt_input_metadata): (Vec<_>, Vec<_>) = history
-        .for_prompt_annotated(&turn_context.model_info().input_modalities)
-        .into_iter()
-        .map(|envelope| (envelope.item, envelope.metadata))
-        .unzip();
-    input.push(ResponseItem::CompactionTrigger {});
-    let prompt = Prompt {
-        input,
-        tools,
-        parallel_tool_calls: true,
-        base_instructions,
-        output_schema: None,
-        output_schema_strict: true,
-        cyber_access_program: turn_context.cyber_access_program,
-    };
-
     let responses_metadata = sess
         .responses_metadata(
             turn_context.as_ref(),
             CodexResponsesRequestKind::Compaction(compaction_metadata),
         )
         .await;
-    let trace_attempt = compaction_trace.start_attempt(&serde_json::json!({
-        "model": turn_context.model_info().slug.as_str(),
-        "instructions": prompt.base_instructions.text.as_str(),
-        "input": &prompt.input,
-        "parallel_tool_calls": prompt.parallel_tool_calls,
-    }));
     let mut owned_client_session = None;
     let client_session = match client_session {
         Some(client_session) => client_session,
         None => owned_client_session.insert(sess.services.model_client.new_session()),
     };
-    let compaction_output_result = run_remote_compaction_request_v2(
-        sess,
-        step_context,
-        client_session,
-        &prompt,
-        &responses_metadata,
-    )
-    .await;
-    trace_attempt.record_result(
-        compaction_output_result
-            .as_ref()
-            .map(|output| std::slice::from_ref(&output.compaction_output)),
-    );
-    let RemoteCompactionV2Output {
-        compaction_output,
-        response_id,
-        token_usage,
-    } = compaction_output_result?;
-    let mut prompt_input = prompt.input;
-    prompt_input.pop();
-    Ok(RemoteCompactV2Attempt {
-        trace_input_history,
-        prompt_input,
-        prompt_input_metadata,
-        compaction_output,
-        compaction_response_id: response_id,
-        token_usage,
-        owned_client_session,
-    })
+    let max_retries = turn_context
+        .provider
+        .info()
+        .stream_max_retries()
+        .min(super::MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
+    let mut retry_state = crate::responses_retry::ResponsesStreamRetryState::default();
+    let active_context_tokens_before = analytics_details.active_context_tokens_before;
+    loop {
+        let request_setup = sess
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info().slug),
+                Some(responses_metadata.session_id.as_str()),
+            )
+            .await?;
+        let attempt_step_context = sess
+            .capture_step_context_for_setup(Arc::clone(turn_context), &request_setup)
+            .await?;
+        let mut history = sess.clone_history().await;
+        let base_instructions = sess.get_prompt_base_instructions().await;
+        let tools = attempt_step_context.tool_router.model_visible_specs();
+        let (rewritten_outputs, estimated_deleted_tokens) =
+            trim_function_call_history_to_fit_context_window(
+                &mut history,
+                turn_context.as_ref(),
+                &base_instructions,
+                estimate_model_visible_tool_tokens(&tools),
+            );
+        if rewritten_outputs > 0 {
+            info!(
+                turn_id = %turn_context.sub_id,
+                rewritten_outputs,
+                "rewrote history outputs before remote compaction v2"
+            );
+        }
+        if estimated_deleted_tokens > 0 {
+            let max_local_deleted_tokens = sess
+                .estimated_tokens_after_last_model_generated_item()
+                .await;
+            analytics_details.active_context_tokens_before =
+                active_context_tokens_before.map(|active_context_tokens_before| {
+                    active_context_tokens_before
+                        .saturating_sub(estimated_deleted_tokens.min(max_local_deleted_tokens))
+                });
+        }
+
+        let trace_input_history = compaction_trace
+            .is_enabled()
+            .then(|| history.raw_items().cloned().collect());
+        let (mut input, prompt_input_metadata): (Vec<_>, Vec<_>) = history
+            .for_prompt_annotated(&turn_context.model_info().input_modalities)
+            .into_iter()
+            .map(|envelope| (envelope.item, envelope.metadata))
+            .unzip();
+        input.push(ResponseItem::CompactionTrigger {});
+        let prompt = Prompt {
+            input,
+            tools,
+            parallel_tool_calls: true,
+            base_instructions,
+            output_schema: None,
+            output_schema_strict: true,
+            cyber_access_program: turn_context.cyber_access_program,
+        };
+        let trace_attempt = compaction_trace.start_attempt(&serde_json::json!({
+            "model": turn_context.model_info().slug.as_str(),
+            "instructions": prompt.base_instructions.text.as_str(),
+            "input": &prompt.input,
+            "parallel_tool_calls": prompt.parallel_tool_calls,
+        }));
+        let AttemptOutcome { result, committed } = run_remote_compaction_request_v2(
+            sess,
+            &attempt_step_context,
+            client_session,
+            &prompt,
+            &responses_metadata,
+            request_setup,
+        )
+        .await;
+        trace_attempt.record_result(
+            result
+                .as_ref()
+                .map(|output| std::slice::from_ref(&output.compaction_output)),
+        );
+        match result {
+            Ok(RemoteCompactionV2Output {
+                compaction_output,
+                response_id,
+                token_usage,
+            }) => {
+                let mut prompt_input = prompt.input;
+                prompt_input.pop();
+                return Ok(RemoteCompactV2Attempt {
+                    trace_input_history,
+                    prompt_input,
+                    prompt_input_metadata,
+                    compaction_output,
+                    compaction_response_id: response_id,
+                    token_usage,
+                    owned_client_session,
+                });
+            }
+            Err(error)
+                if client_session
+                    .recover_last_managed_attempt(&error, committed)
+                    .await =>
+            {
+                continue;
+            }
+            Err(error) if committed || !error.is_retryable() => return Err(error),
+            Err(error) => {
+                handle_retryable_response_stream_error(
+                    &mut retry_state,
+                    max_retries,
+                    error,
+                    client_session,
+                    sess,
+                    turn_context,
+                    ResponsesStreamRequest::RemoteCompactionV2,
+                )
+                .await?;
+            }
+        }
+    }
 }

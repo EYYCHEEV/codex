@@ -35,6 +35,7 @@ codex-arg0 = { workspace = true }
 codex-build-info = { workspace = true }
 codex-api = { workspace = true }
 codex-aws-auth = { workspace = true }
+codex-backend-client = { workspace = true }
 codex-chatgpt = { workspace = true }
 codex-cloud-config = { workspace = true }
 codex-cloud-tasks = { path = "../cloud-tasks" }

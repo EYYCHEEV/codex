@@ -502,6 +502,7 @@ impl App {
             AppServerTarget::LocalDaemon { .. }
         ));
         chat_widget.inherit_backend_banner_state(&mut self.chat_widget);
+        chat_widget.clear_managed_account_selection_scope();
         for (thread_id, entry) in self.agent_navigation.ordered_threads() {
             chat_widget.set_collab_agent_metadata(
                 thread_id,
@@ -689,6 +690,9 @@ impl App {
             self.chat_widget.add_info_message(message, /*hint*/ None);
         }
         self.refresh_pending_thread_approvals().await;
+        if self.chat_widget.managed_accounts().is_some() {
+            self.refresh_managed_accounts_cache(app_server);
+        }
 
         Ok(())
     }
@@ -874,6 +878,9 @@ impl App {
                     self.chat_widget.finish_rate_limit_recovery();
                 }
                 self.chat_widget.maybe_send_next_queued_input();
+                if self.chat_widget.managed_accounts().is_some() {
+                    self.refresh_managed_accounts_cache(app_server);
+                }
             }
             Err(err) if self.recover_transport_error(&err) => {}
             Err(err) => {

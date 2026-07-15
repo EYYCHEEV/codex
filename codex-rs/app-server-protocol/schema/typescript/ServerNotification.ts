@@ -4,8 +4,11 @@
 import type { FuzzyFileSearchSessionCompletedNotification } from "./FuzzyFileSearchSessionCompletedNotification";
 import type { FuzzyFileSearchSessionUpdatedNotification } from "./FuzzyFileSearchSessionUpdatedNotification";
 import type { AccountLoginCompletedNotification } from "./v2/AccountLoginCompletedNotification";
+import type { AccountPoolUpdatedNotification } from "./v2/AccountPoolUpdatedNotification";
 import type { AccountRateLimitsUpdatedNotification } from "./v2/AccountRateLimitsUpdatedNotification";
+import type { AccountSelectionUpdatedNotification } from "./v2/AccountSelectionUpdatedNotification";
 import type { AccountUpdatedNotification } from "./v2/AccountUpdatedNotification";
+import type { AccountUsageUpdatedNotification } from "./v2/AccountUsageUpdatedNotification";
 import type { AgentMessageDeltaNotification } from "./v2/AgentMessageDeltaNotification";
 import type { AppListUpdatedNotification } from "./v2/AppListUpdatedNotification";
 import type { AuthRecoveryNotification } from "./v2/AuthRecoveryNotification";

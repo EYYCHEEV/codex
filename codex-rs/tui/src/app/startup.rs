@@ -765,6 +765,10 @@ See the Codex keymap documentation for supported actions and examples."
             startup_pending_protected_request: false,
             rate_limit_hard_stop_generation: 0,
             rate_limit_refresh_state: Default::default(),
+            managed_account_request_scope: None,
+            managed_account_scope_generation: 0,
+            managed_account_request_sequence: 0,
+            pending_managed_account_logout_refresh: None,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
             recap: recap::RecapState::default(),
@@ -827,6 +831,9 @@ See the Codex keymap documentation for supported actions and examples."
                     .await
             {
                 return shutdown_on_startup_error(app_server, err).await;
+            }
+            if app.chat_widget.managed_accounts().is_some() {
+                app.refresh_managed_accounts_usage_cache(&app_server);
             }
         }
         if !start_in_agents_overview
@@ -930,13 +937,15 @@ See the Codex keymap documentation for supported actions and examples."
                 &app_server,
                 app.chat_widget.cyber_policy_notice.clone(),
             );
-            let reset_hint_request_id = app.chat_widget.start_rate_limit_reset_startup_check();
-            app.refresh_rate_limits(
-                &app_server,
-                RateLimitRefreshOrigin::StartupPrefetch {
-                    reset_hint_request_id,
-                },
-            );
+            if app.chat_widget.managed_accounts().is_none() {
+                let reset_hint_request_id = app.chat_widget.start_rate_limit_reset_startup_check();
+                app.refresh_rate_limits(
+                    &app_server,
+                    RateLimitRefreshOrigin::StartupPrefetch {
+                        reset_hint_request_id,
+                    },
+                );
+            }
         }
 
         let mut listen_for_app_server_events = true;

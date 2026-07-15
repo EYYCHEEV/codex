@@ -259,6 +259,15 @@ pub(crate) enum RecapTrigger {
     Manual,
 }
 
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManagedAccountRequestOrigin {
+    pub(crate) thread_id: Option<ThreadId>,
+    pub(crate) model: String,
+    pub(crate) scope_generation: u64,
+    pub(crate) request_id: u64,
+}
+
 #[derive(Debug)]
 pub(crate) struct AgentsOverviewThreadRefresh {
     pub(crate) threads: std::collections::HashMap<ThreadId, Option<Thread>>,
@@ -586,8 +595,16 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
     },
 
-    /// Request app-server account logout, then exit after it succeeds.
+    /// Request legacy/non-pooled app-server account logout, then exit after it succeeds.
     Logout,
+
+    /// Remove one managed account without exiting the running TUI.
+    LogoutManagedAccount {
+        managed_account_id: String,
+    },
+
+    /// Explicitly remove every managed account, then preserve the existing exit behavior.
+    LogoutAllAccounts,
 
     /// Request to exit the application due to a fatal error.
     #[allow(dead_code)]
@@ -631,6 +648,21 @@ pub(crate) enum AppEvent {
     /// Reconcile inherited account usage with an attached task before its queued input runs.
     ApplyBackendBannerFallback {
         thread_id: ThreadId,
+    },
+
+    /// Refresh managed account rows for `/status`, scoped to the visible thread and model.
+    RefreshManagedAccountsForStatus,
+
+    /// Result of the scoped managed account refresh used by `/status`.
+    ManagedAccountsLoadedForStatus {
+        origin: ManagedAccountRequestOrigin,
+        result: Result<codex_app_server_protocol::ListAccountsResponse, String>,
+    },
+
+    /// Result of a managed account refresh used only to keep the cache current.
+    ManagedAccountsLoadedForCache {
+        origin: ManagedAccountRequestOrigin,
+        result: Result<codex_app_server_protocol::ListAccountsResponse, String>,
     },
 
     /// Open the current thread goal summary/action menu.
@@ -702,6 +734,18 @@ pub(crate) enum AppEvent {
     /// Fetch account-wide token activity for a `/usage` history card.
     RefreshTokenActivity {
         request_id: u64,
+    },
+
+    /// Refresh selected managed-account token activity through scoped `account/list`.
+    RefreshManagedTokenActivity {
+        request_id: u64,
+    },
+
+    /// Result of a scoped managed-account token-activity refresh.
+    ManagedTokenActivityLoaded {
+        origin: ManagedAccountRequestOrigin,
+        request_id: u64,
+        result: Result<codex_app_server_protocol::ListAccountsResponse, String>,
     },
 
     /// Result of fetching account-wide token activity.

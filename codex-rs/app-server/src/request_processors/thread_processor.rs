@@ -443,6 +443,7 @@ pub(crate) struct ThreadRequestProcessor {
     pub(super) auth_manager: Arc<AuthManager>,
     pub(super) thread_manager: Arc<ThreadManager>,
     pub(super) outgoing: Arc<OutgoingMessageSender>,
+    pub(super) account_selection_observer: AccountSelectionObserver,
     pub(super) arg0_paths: Arg0DispatchPaths,
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
@@ -477,12 +478,24 @@ enum RunningThreadResumeResult {
     NotRunning(Option<Box<StoredThread>>),
 }
 
+pub(super) async fn finalize_account_selection_state(
+    thread_state_manager: &ThreadStateManager,
+    account_selection_observer: &AccountSelectionObserver,
+    thread_id: ThreadId,
+) {
+    thread_state_manager.remove_thread_state(thread_id).await;
+    account_selection_observer
+        .remove_thread(&thread_id.to_string())
+        .await;
+}
+
 impl ThreadRequestProcessor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         auth_manager: Arc<AuthManager>,
         thread_manager: Arc<ThreadManager>,
         outgoing: Arc<OutgoingMessageSender>,
+        account_selection_observer: AccountSelectionObserver,
         arg0_paths: Arg0DispatchPaths,
         config: Arc<Config>,
         config_manager: ConfigManager,
@@ -502,6 +515,7 @@ impl ThreadRequestProcessor {
             auth_manager,
             thread_manager,
             outgoing,
+            account_selection_observer,
             arg0_paths,
             config,
             config_manager,
@@ -1024,9 +1038,12 @@ impl ThreadRequestProcessor {
         self.outgoing
             .cancel_requests_for_thread(thread_id, /*error*/ None)
             .await;
-        self.thread_state_manager
-            .remove_thread_state(thread_id)
-            .await;
+        finalize_account_selection_state(
+            &self.thread_state_manager,
+            &self.account_selection_observer,
+            thread_id,
+        )
+        .await;
         self.thread_watch_manager
             .remove_thread(&thread_id.to_string())
             .await;
@@ -1050,6 +1067,9 @@ impl ThreadRequestProcessor {
         let was_subscribed = self
             .thread_state_manager
             .unsubscribe_connection_from_thread(thread_id, connection_id)
+            .await;
+        self.account_selection_observer
+            .remove_connection_from_thread(&thread_id.to_string(), connection_id)
             .await;
 
         let status = if was_subscribed {
@@ -1100,6 +1120,7 @@ impl ThreadRequestProcessor {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
+            account_selection_observer: self.account_selection_observer.clone(),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
             thread_watch_manager: self.thread_watch_manager.clone(),
             thread_list_state_permit: self.thread_list_state_permit.clone(),
@@ -1132,13 +1153,20 @@ impl ThreadRequestProcessor {
         conversation: Arc<CodexThread>,
         thread_state: Arc<Mutex<ThreadState>>,
     ) -> Result<(), JSONRPCErrorError> {
-        super::thread_lifecycle::ensure_listener_task_running(
+        match super::thread_lifecycle::ensure_listener_task_running(
             self.listener_task_context(),
             conversation_id,
             conversation,
             thread_state,
+            None,
         )
-        .await
+        .await?
+        {
+            EnsureListenerTaskRunningResult::Running => Ok(()),
+            EnsureListenerTaskRunningResult::Superseded => {
+                Err(listener_superseded_error(conversation_id))
+            }
+        }
     }
 
     async fn thread_start_inner(
@@ -1232,6 +1260,7 @@ impl ThreadRequestProcessor {
             thread_manager: Arc::clone(&self.thread_manager),
             thread_state_manager: self.thread_state_manager.clone(),
             outgoing: Arc::clone(&self.outgoing),
+            account_selection_observer: self.account_selection_observer.clone(),
             pending_thread_unloads: Arc::clone(&self.pending_thread_unloads),
             thread_watch_manager: self.thread_watch_manager.clone(),
             thread_list_state_permit: self.thread_list_state_permit.clone(),
@@ -3588,6 +3617,10 @@ impl ThreadRequestProcessor {
     pub(crate) async fn connection_closed(&self, connection_id: ConnectionId) {
         let thread_ids = self
             .thread_state_manager
+            .remove_connection(connection_id)
+            .await;
+
+        self.account_selection_observer
             .remove_connection(connection_id)
             .await;
 

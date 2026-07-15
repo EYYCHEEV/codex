@@ -30,8 +30,10 @@ use anyhow::Context;
 use clap::Parser;
 use codex_api::ApiError;
 use codex_api::ResponsesWebsocketClient;
+use codex_api::ResponsesWebsocketClose;
 use codex_api::is_azure_responses_provider;
 use codex_arg0::Arg0DispatchPaths;
+use codex_cli::load_cli_auth_projection;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
@@ -55,7 +57,6 @@ use codex_login::CodexAuth;
 use codex_login::OPENAI_API_KEY_ENV_VAR;
 use codex_login::default_client::create_client_without_request_logging;
 use codex_login::default_client::default_headers;
-use codex_login::load_auth_dot_json;
 use codex_model_provider::create_model_provider;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::AskForApproval;
@@ -380,10 +381,17 @@ async fn build_report(
     }));
     match &config_result {
         Ok(config) => {
-            let auth_manager_result =
-                AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
-            let auth_manager = auth_manager_result.as_ref().ok().cloned();
-            let reachability_plan = provider_reachability_plan(config);
+            let auth_projection_result = load_cli_auth_projection(config).await;
+            let auth_manager = auth_projection_result
+                .as_ref()
+                .ok()
+                .map(|projection| Arc::clone(&projection.auth_manager));
+            let effective_auth = auth_projection_result
+                .as_ref()
+                .map_err(String::as_str)
+                .and_then(|projection| projection.effective_auth());
+            let reachability_plan =
+                provider_reachability_plan(config, effective_auth.unwrap_or(None));
             #[cfg(target_os = "macos")]
             let reachability_url = reachability_plan
                 .endpoints
@@ -414,8 +422,8 @@ async fn build_report(
                     })
                 },
                 async {
-                    run_sync_check("auth", progress.clone(), || match &auth_manager_result {
-                        Ok(_) => auth_check(config),
+                    run_sync_check("auth", progress.clone(), || match &auth_projection_result {
+                        Ok(_) => auth_check(config, effective_auth),
                         Err(error) => DoctorCheck::new(
                             "auth.load",
                             "auth",
@@ -1158,7 +1166,7 @@ fn config_toml_details(config: &Config, details: &mut Vec<String>) {
     }
 }
 
-fn auth_check(config: &Config) -> DoctorCheck {
+fn auth_check(config: &Config, effective_auth: Result<Option<&CodexAuth>, &str>) -> DoctorCheck {
     let mut details = Vec::new();
     let auth_path = config.codex_home.join("auth.json");
     details.push(format!(
@@ -1181,6 +1189,20 @@ fn auth_check(config: &Config) -> DoctorCheck {
             env_auth_vars.join(", ")
         ));
     }
+    let effective_auth = match effective_auth {
+        Ok(auth) => auth,
+        Err(err) => {
+            details.push(format!("effective auth error: {err}"));
+            return DoctorCheck::new(
+                "auth.credentials",
+                "auth",
+                CheckStatus::Fail,
+                "failed to load Codex credentials",
+            )
+            .details(details)
+            .remediation("Fix the configured environment credentials or login policy.");
+        }
+    };
     if let Some(check) = provider_specific_auth_check(
         config.model_provider.requires_openai_auth,
         config.model_provider.env_key.as_deref(),
@@ -1191,58 +1213,54 @@ fn auth_check(config: &Config) -> DoctorCheck {
         return check;
     }
 
-    match load_auth_dot_json(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-    ) {
-        Ok(Some(auth)) => {
-            details.push(format!("stored auth mode: {}", stored_auth_mode(&auth)));
-            details.push(format!("stored API key: {}", auth.openai_api_key.is_some()));
-            details.push(format!("stored ChatGPT tokens: {}", auth.tokens.is_some()));
-            details.push(format!(
-                "stored agent identity: {}",
-                auth.agent_identity.is_some()
-            ));
-            let auth_issues = stored_auth_issues(&auth, env_var_present);
-            details.extend(
-                auth_issues
-                    .iter()
-                    .map(|issue| format!("stored auth issue: {issue}")),
-            );
-            let status = if !auth_issues.is_empty() && env_auth_vars.is_empty() {
-                CheckStatus::Fail
-            } else if !auth_issues.is_empty() || env_auth_vars.len() > 1 {
+    match effective_auth {
+        Some(auth) => {
+            details.push(format!("effective auth mode: {}", auth_mode_name(auth)));
+            if auth
+                .api_key()
+                .is_some_and(|api_key| api_key.trim().is_empty())
+            {
+                details.push("effective API key auth error: API key is empty".to_string());
+                return DoctorCheck::new(
+                    "auth.credentials",
+                    "auth",
+                    CheckStatus::Fail,
+                    "API key credentials are incomplete",
+                )
+                .details(details)
+                .remediation("Provide a non-empty API key through a supported auth source.");
+            }
+            if let Some(issue) = chatgpt_credential_issue(auth) {
+                details.push(format!("effective ChatGPT auth error: {issue}"));
+                return DoctorCheck::new(
+                    "auth.credentials",
+                    "auth",
+                    CheckStatus::Fail,
+                    "ChatGPT credentials are incomplete",
+                )
+                .details(details)
+                .remediation("Run codex logout, then sign in to ChatGPT again.");
+            }
+            let status = if env_auth_vars.len() > 1 {
                 CheckStatus::Warning
             } else {
                 CheckStatus::Ok
             };
-            let summary = match status {
-                CheckStatus::Ok => "auth is configured",
-                CheckStatus::Warning if !auth_issues.is_empty() => {
-                    "auth is provided by environment, but stored credentials are incomplete"
-                }
-                CheckStatus::Warning => {
-                    "auth is configured, but multiple auth env vars are present"
-                }
-                CheckStatus::Fail => "stored credentials are incomplete",
+            let summary = if status == CheckStatus::Warning {
+                "auth is configured, but multiple auth env vars are present"
+            } else {
+                "auth is configured"
             };
-            let mut check =
-                DoctorCheck::new("auth.credentials", "auth", status, summary).details(details);
-            if status == CheckStatus::Fail {
-                check =
-                    check.remediation("Run codex login again or provide a supported auth env var.");
-            }
-            check
+            DoctorCheck::new("auth.credentials", "auth", status, summary).details(details)
         }
-        Ok(None) if !env_auth_vars.is_empty() => DoctorCheck::new(
+        None if !env_auth_vars.is_empty() => DoctorCheck::new(
             "auth.credentials",
             "auth",
             CheckStatus::Ok,
             "auth is provided by environment",
         )
         .details(details),
-        Ok(None) => DoctorCheck::new(
+        None => DoctorCheck::new(
             "auth.credentials",
             "auth",
             CheckStatus::Fail,
@@ -1250,14 +1268,36 @@ fn auth_check(config: &Config) -> DoctorCheck {
         )
         .details(details)
         .remediation("Run codex login or provide an API key through a supported auth env var."),
-        Err(err) => DoctorCheck::new(
-            "auth.credentials",
-            "auth",
-            CheckStatus::Fail,
-            "stored credentials could not be read",
-        )
-        .detail(err.to_string())
-        .remediation("Fix auth storage access or run codex login again."),
+    }
+}
+
+fn chatgpt_credential_issue(auth: &CodexAuth) -> Option<String> {
+    if !matches!(
+        auth,
+        CodexAuth::Chatgpt(_) | CodexAuth::ChatgptAuthTokens(_)
+    ) {
+        return None;
+    }
+    let tokens = match auth.get_token_data() {
+        Ok(tokens) => tokens,
+        Err(err) => return Some(err.to_string()),
+    };
+    if tokens.access_token.trim().is_empty() {
+        return Some("access token is empty".to_string());
+    }
+    match auth {
+        CodexAuth::Chatgpt(_) if tokens.refresh_token.trim().is_empty() => {
+            Some("refresh token is empty".to_string())
+        }
+        CodexAuth::ChatgptAuthTokens(_)
+            if tokens
+                .account_id
+                .as_deref()
+                .is_none_or(|account_id| account_id.trim().is_empty()) =>
+        {
+            Some("account id is empty".to_string())
+        }
+        _ => None,
     }
 }
 
@@ -2305,18 +2345,7 @@ async fn websocket_reachability_check(
                 probe.server_model_present
             ));
             if let Some(close) = probe.immediate_close {
-                details.push(format!("immediate close code: {}", close.code));
-                details.push(format!("immediate close reason: {}", close.reason));
-                return DoctorCheck::new(
-                    "network.websocket_reachability",
-                    "websocket",
-                    CheckStatus::Warning,
-                    "Responses WebSocket closed immediately after handshake",
-                )
-                .details(details)
-                .remediation(
-                    "Check proxy, VPN, firewall, DNS, custom CA, and WebSocket policy support.",
-                );
+                return websocket_immediate_close_warning(details, close);
             }
             DoctorCheck::new(
                 "network.websocket_reachability",
@@ -2337,6 +2366,37 @@ async fn websocket_reachability_check(
             "handshake timed out".to_string(),
         ),
     }
+}
+
+fn websocket_immediate_close_warning(
+    mut details: Vec<String>,
+    close: ResponsesWebsocketClose,
+) -> DoctorCheck {
+    details.push(format!(
+        "immediate close source: {}",
+        if close.frame_received {
+            "close frame"
+        } else {
+            "stream EOF"
+        }
+    ));
+    if let Some(code) = close.code {
+        details.push(format!("immediate close code: {code}"));
+    }
+    if let Some(reason) = close.reason {
+        details.push(format!("immediate close reason: {reason}"));
+    }
+    if close.reason_redacted {
+        details.push("immediate close reason redacted: true".to_string());
+    }
+    DoctorCheck::new(
+        "network.websocket_reachability",
+        "websocket",
+        CheckStatus::Warning,
+        "Responses WebSocket closed immediately after handshake",
+    )
+    .details(details)
+    .remediation("Check proxy, VPN, firewall, DNS, custom CA, and WebSocket policy support.")
 }
 
 fn websocket_probe_warning(
@@ -2362,6 +2422,10 @@ fn websocket_error_detail(err: &ApiError) -> String {
             format!("handshake API error: {status} {message}")
         }
         ApiError::Stream(message) => format!("handshake stream error: {message}"),
+        ApiError::WebsocketClosed(details) => format!(
+            "handshake stream closed: code={:?}, reason={:?}",
+            details.code, details.reason
+        ),
         ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
@@ -2467,26 +2531,22 @@ impl ProviderAuthReachabilityMode {
     }
 }
 
-fn provider_reachability_plan(config: &Config) -> ReachabilityPlan {
+fn provider_reachability_plan(
+    config: &Config,
+    effective_auth: Option<&CodexAuth>,
+) -> ReachabilityPlan {
     let query_params = config.model_provider.query_params.as_ref().map(|params| {
         params
             .iter()
             .map(|(name, value)| (name.clone(), value.as_str().to_owned()))
             .collect::<HashMap<_, _>>()
     });
-    let stored_auth = load_auth_dot_json(
-        &config.codex_home,
-        config.cli_auth_credentials_store_mode,
-        config.auth_keyring_backend_kind(),
-    )
-    .ok()
-    .flatten();
     let mode = provider_auth_reachability_mode_from_auth(
         config.model_provider.requires_openai_auth,
         config.model_provider.env_key.as_deref(),
         config.model_provider.base_url.as_deref(),
         env_var_present,
-        stored_auth.as_ref(),
+        effective_auth,
     );
     let mut plan = provider_reachability_plan_from_parts(
         mode,
@@ -2518,7 +2578,7 @@ fn provider_auth_reachability_mode_from_auth(
     provider_env_key: Option<&str>,
     provider_base_url: Option<&str>,
     env_var_present: impl Fn(&str) -> bool,
-    stored_auth: Option<&AuthDotJson>,
+    effective_auth: Option<&CodexAuth>,
 ) -> ProviderAuthReachabilityMode {
     if !requires_openai_auth {
         return ProviderAuthReachabilityMode::NotRequired;
@@ -2533,7 +2593,7 @@ fn provider_auth_reachability_mode_from_auth(
     if env_var_present(CODEX_ACCESS_TOKEN_ENV_VAR) {
         return ProviderAuthReachabilityMode::Chatgpt;
     }
-    match stored_auth.map(stored_auth_mode_value) {
+    match effective_auth.map(CodexAuth::api_auth_mode) {
         Some(AuthMode::ApiKey | AuthMode::BedrockApiKey | AuthMode::BedrockAccessKeys) => {
             ProviderAuthReachabilityMode::ApiKey
         }
@@ -3176,6 +3236,34 @@ mod tests {
     }
 
     #[test]
+    fn websocket_probe_doctor_json_keeps_sanitized_close_reason() {
+        let raw_sensitive = "bearer sk-proj-sensitive-probe-value";
+        let check = websocket_immediate_close_warning(
+            Vec::new(),
+            ResponsesWebsocketClose {
+                frame_received: true,
+                code: Some(1008),
+                reason: Some("[redacted]".to_string()),
+                reason_redacted: true,
+            },
+        );
+        let report = DoctorReport {
+            schema_version: 1,
+            generated_at: "0s since unix epoch".to_string(),
+            overall_status: CheckStatus::Warning,
+            codex_version: "0.0.0".to_string(),
+            checks: vec![check],
+        };
+
+        let json = serde_json::to_string(&redacted_json_report(&report))
+            .expect("doctor report should serialize");
+
+        assert!(!json.contains(raw_sensitive));
+        assert!(json.contains("[redacted]"));
+        assert!(json.contains("immediate close reason redacted"));
+    }
+
+    #[test]
     fn redacted_json_report_structures_and_sanitizes_details() {
         let report = DoctorReport {
             schema_version: 1,
@@ -3489,18 +3577,252 @@ mod tests {
         );
     }
 
+    async fn auth_check_for_stored_tokens(
+        auth_mode: &str,
+        access_token: &str,
+        refresh_token: &str,
+        account_id: Option<&str>,
+    ) -> DoctorCheck {
+        let codex_home = tempfile::tempdir().expect("temporary CODEX_HOME");
+        let auth_json = serde_json::json!({
+            "auth_mode": auth_mode,
+            "tokens": {
+                "id_token": "e30.e30.signature",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "account_id": account_id,
+            },
+            "last_refresh": "2099-01-01T00:00:00Z",
+        });
+        std::fs::write(
+            codex_home.path().join("auth.json"),
+            serde_json::to_vec(&auth_json).expect("serialize synthetic auth"),
+        )
+        .expect("write synthetic auth");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("test config");
+        let auth_manager =
+            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+                .await
+                .expect("auth manager should initialize");
+        let effective_auth = auth_manager.auth_cached_result();
+        auth_check(
+            &config,
+            effective_auth
+                .as_ref()
+                .map(Option::as_ref)
+                .map_err(std::string::String::as_str),
+        )
+    }
+
+    #[tokio::test]
+    async fn auth_check_validates_projected_api_key() {
+        let codex_home = tempfile::tempdir().expect("temporary CODEX_HOME");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("test config");
+        let valid_auth = CodexAuth::from_api_key("sk-test");
+
+        let valid_check = auth_check(&config, Ok(Some(&valid_auth)));
+
+        assert_eq!(valid_check.status, CheckStatus::Ok);
+        assert!(
+            valid_check
+                .details
+                .iter()
+                .any(|detail| detail == "effective auth mode: api_key")
+        );
+
+        let invalid_auth = CodexAuth::from_api_key(" \t ");
+        let invalid_check = auth_check(&config, Ok(Some(&invalid_auth)));
+
+        assert_eq!(invalid_check.status, CheckStatus::Fail);
+        assert_eq!(invalid_check.summary, "API key credentials are incomplete");
+        assert!(
+            invalid_check
+                .details
+                .iter()
+                .any(|detail| detail == "effective API key auth error: API key is empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_check_rejects_blank_bearer_access_and_refresh_tokens() {
+        let codex_home = tempfile::tempdir().expect("temporary CODEX_HOME");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("test config");
+        let bearer_check = auth_check(&config, Ok(Some(&CodexAuth::from_api_key(" \t "))));
+        assert_eq!(bearer_check.status, CheckStatus::Fail);
+        assert_eq!(bearer_check.summary, "API key credentials are incomplete");
+        assert!(
+            bearer_check
+                .details
+                .iter()
+                .any(|detail| detail == "effective API key auth error: API key is empty")
+        );
+
+        let access_check = auth_check_for_stored_tokens(
+            "chatgpt",
+            " \t ",
+            "sensitive-refresh-token",
+            Some("sensitive-account-id"),
+        )
+        .await;
+        assert_eq!(access_check.status, CheckStatus::Fail);
+        assert_eq!(access_check.summary, "ChatGPT credentials are incomplete");
+        assert!(
+            access_check
+                .details
+                .iter()
+                .any(|detail| detail == "effective ChatGPT auth error: access token is empty")
+        );
+        assert!(access_check.details.iter().all(|detail| {
+            !detail.contains("sensitive-refresh-token") && !detail.contains("sensitive-account-id")
+        }));
+
+        let refresh_check = auth_check_for_stored_tokens(
+            "chatgpt",
+            "sensitive-access-token",
+            " \t ",
+            Some("sensitive-account-id"),
+        )
+        .await;
+        assert_eq!(refresh_check.status, CheckStatus::Fail);
+        assert_eq!(refresh_check.summary, "ChatGPT credentials are incomplete");
+        assert!(
+            refresh_check
+                .details
+                .iter()
+                .any(|detail| detail == "effective ChatGPT auth error: refresh token is empty")
+        );
+        assert!(refresh_check.details.iter().all(|detail| {
+            !detail.contains("sensitive-access-token") && !detail.contains("sensitive-account-id")
+        }));
+    }
+
+    #[tokio::test]
+    async fn auth_check_validates_managed_chatgpt_refresh_token() {
+        let valid_check = auth_check_for_stored_tokens(
+            "chatgpt",
+            "access-token",
+            "refresh-token",
+            Some("account-id"),
+        )
+        .await;
+        assert_eq!(valid_check.status, CheckStatus::Ok);
+
+        let invalid_check =
+            auth_check_for_stored_tokens("chatgpt", "access-token", " \t ", Some("account-id"))
+                .await;
+        assert_eq!(invalid_check.status, CheckStatus::Fail);
+        assert_eq!(invalid_check.summary, "ChatGPT credentials are incomplete");
+        assert!(
+            invalid_check
+                .details
+                .iter()
+                .any(|detail| detail == "effective ChatGPT auth error: refresh token is empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_check_validates_external_chatgpt_account_id() {
+        let valid_check = auth_check_for_stored_tokens(
+            "chatgptAuthTokens",
+            "access-token",
+            /*refresh_token*/ "",
+            Some("account-id"),
+        )
+        .await;
+        assert_eq!(valid_check.status, CheckStatus::Ok);
+
+        for account_id in [None, Some(" \t ")] {
+            let invalid_check = auth_check_for_stored_tokens(
+                "chatgptAuthTokens",
+                "access-token",
+                /*refresh_token*/ "",
+                account_id,
+            )
+            .await;
+            assert_eq!(invalid_check.status, CheckStatus::Fail);
+            assert_eq!(invalid_check.summary, "ChatGPT credentials are incomplete");
+            assert!(
+                invalid_check
+                    .details
+                    .iter()
+                    .any(|detail| detail == "effective ChatGPT auth error: account id is empty")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_check_rejects_chatgpt_auth_without_token_material() {
+        let codex_home = tempfile::tempdir().expect("temporary CODEX_HOME");
+        std::fs::write(
+            codex_home.path().join("auth.json"),
+            r#"{"auth_mode":"chatgpt"}"#,
+        )
+        .expect("write malformed auth");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("test config");
+        let auth_manager =
+            AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false)
+                .await
+                .expect("auth manager should initialize");
+        let effective_auth = auth_manager.auth_cached_result();
+        let check = auth_check(
+            &config,
+            effective_auth
+                .as_ref()
+                .map(Option::as_ref)
+                .map_err(std::string::String::as_str),
+        );
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.summary, "ChatGPT credentials are incomplete");
+        assert!(
+            check
+                .details
+                .iter()
+                .any(|detail| detail.starts_with("effective ChatGPT auth error:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_check_reports_effective_auth_load_error() {
+        let codex_home = tempfile::tempdir().expect("temporary CODEX_HOME");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("test config");
+
+        let check = auth_check(
+            &config,
+            Err("personal access token account is not in an allowed workspace"),
+        );
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.summary, "failed to load Codex credentials");
+        assert!(check.details.iter().any(|detail| {
+            detail
+                == "effective auth error: personal access token account is not in an allowed workspace"
+        }));
+    }
+
     #[test]
-    fn provider_reachability_mode_uses_api_key_auth() {
-        let api_key_auth = AuthDotJson {
-            auth_mode: Some(AuthMode::ApiKey),
-            openai_api_key: Some("sk-test".to_string()),
-            tokens: None,
-            last_refresh: None,
-            agent_identity: None,
-            personal_access_token: None,
-            bedrock_api_key: None,
-            bedrock_access_keys: None,
-        };
+    fn provider_reachability_mode_uses_projected_api_key_auth() {
+        let api_key_auth = CodexAuth::from_api_key("sk-test");
 
         assert_eq!(
             provider_auth_reachability_mode_from_auth(
@@ -3509,52 +3831,6 @@ mod tests {
                 /*provider_base_url*/ None,
                 |_| false,
                 Some(&api_key_auth),
-            ),
-            ProviderAuthReachabilityMode::ApiKey
-        );
-        assert_eq!(
-            provider_auth_reachability_mode_from_auth(
-                /*requires_openai_auth*/ true,
-                /*provider_env_key*/ None,
-                /*provider_base_url*/ None,
-                |name| name == CODEX_API_KEY_ENV_VAR,
-                /*stored_auth*/ None,
-            ),
-            ProviderAuthReachabilityMode::ApiKey
-        );
-
-        let chatgpt_auth = AuthDotJson {
-            auth_mode: Some(AuthMode::Chatgpt),
-            openai_api_key: None,
-            ..api_key_auth
-        };
-        assert_eq!(
-            provider_auth_reachability_mode_from_auth(
-                /*requires_openai_auth*/ true,
-                /*provider_env_key*/ None,
-                Some("https://custom.example/v1"),
-                |name| name == OPENAI_API_KEY_ENV_VAR,
-                Some(&chatgpt_auth),
-            ),
-            ProviderAuthReachabilityMode::Chatgpt
-        );
-        assert_eq!(
-            provider_auth_reachability_mode_from_auth(
-                /*requires_openai_auth*/ true,
-                Some(OPENAI_API_KEY_ENV_VAR),
-                Some("https://custom.example/v1"),
-                |name| name == OPENAI_API_KEY_ENV_VAR,
-                Some(&chatgpt_auth),
-            ),
-            ProviderAuthReachabilityMode::ApiKey
-        );
-        assert_eq!(
-            provider_auth_reachability_mode_from_auth(
-                /*requires_openai_auth*/ true,
-                /*provider_env_key*/ None,
-                /*provider_base_url*/ None,
-                |name| name == CODEX_API_KEY_ENV_VAR,
-                Some(&chatgpt_auth),
             ),
             ProviderAuthReachabilityMode::ApiKey
         );

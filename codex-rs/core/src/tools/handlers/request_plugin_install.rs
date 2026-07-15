@@ -257,10 +257,18 @@ impl RequestPluginInstallHandler {
             .as_ref()
             .is_some_and(|response| response.action == ElicitationAction::Accept);
 
-        let auth = session.services.auth_manager.auth().await;
+        let auth = step_context.effective_auth.as_ref();
+        let connector_cache_key = step_context.connector_directory_cache_key.as_ref();
         let completed = if user_confirmed {
-            verify_request_plugin_install_completed(&session, &turn, mcp, &tool, auth.as_ref())
-                .await
+            verify_request_plugin_install_completed(
+                &session,
+                &turn,
+                mcp,
+                &tool,
+                auth,
+                connector_cache_key,
+            )
+            .await
         } else {
             false
         };
@@ -396,6 +404,7 @@ async fn verify_request_plugin_install_completed(
     mcp: &codex_mcp::McpBinding,
     tool: &DiscoverableTool,
     auth: Option<&codex_login::CodexAuth>,
+    connector_cache_key: Option<&codex_connectors::ConnectorDirectoryCacheKey>,
 ) -> bool {
     match tool {
         DiscoverableTool::Connector(connector) => refresh_missing_requested_connectors(
@@ -403,6 +412,7 @@ async fn verify_request_plugin_install_completed(
             turn,
             mcp,
             auth,
+            connector_cache_key,
             std::slice::from_ref(&connector.id),
             connector.id.as_str(),
         )
@@ -424,6 +434,7 @@ async fn verify_request_plugin_install_completed(
                         turn,
                         mcp,
                         auth,
+                        connector_cache_key,
                         &plugin.app_connector_ids,
                         plugin.id.as_str(),
                     )
@@ -448,6 +459,7 @@ async fn verify_request_plugin_install_completed(
                 turn,
                 mcp,
                 auth,
+                connector_cache_key,
                 &plugin.app_connector_ids,
                 plugin.id.as_str(),
             )
@@ -491,6 +503,7 @@ async fn refresh_missing_requested_connectors(
     turn: &crate::session::turn_context::TurnContext,
     mcp: &codex_mcp::McpBinding,
     auth: Option<&codex_login::CodexAuth>,
+    connector_cache_key: Option<&codex_connectors::ConnectorDirectoryCacheKey>,
     expected_connector_ids: &[String],
     tool_id: &str,
 ) -> Option<Vec<AppInfo>> {
@@ -511,6 +524,7 @@ async fn refresh_missing_requested_connectors(
             connectors::refresh_accessible_connectors_cache_from_mcp_tools(
                 &turn.config,
                 auth,
+                connector_cache_key,
                 &mcp_tools,
             );
             Some(accessible_connectors)

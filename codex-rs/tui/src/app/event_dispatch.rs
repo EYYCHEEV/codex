@@ -784,7 +784,7 @@ impl App {
                 }
             },
             AppEvent::Logout => match app_server.logout_account().await {
-                Ok(()) => {
+                Ok(_) => {
                     self.show_shutdown_feedback(tui)?;
                     return Ok(self
                         .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
@@ -792,6 +792,66 @@ impl App {
                 }
                 Err(err) => {
                     tracing::error!("failed to logout: {err}");
+                    self.chat_widget
+                        .add_error_message(format!("Logout failed: {err}"));
+                }
+            },
+            AppEvent::LogoutManagedAccount { managed_account_id } => {
+                self.invalidate_managed_account_requests();
+                let refresh_origin = self.managed_account_request_origin();
+                self.begin_managed_account_logout_refresh(refresh_origin.clone());
+                match app_server
+                    .logout_managed_account(managed_account_id.clone())
+                    .await
+                {
+                    Ok(response) => {
+                        let selected_account_id = response.selected_account_id;
+                        let previous_binding = self
+                            .chat_widget
+                            .managed_accounts()
+                            .and_then(|accounts| accounts.selected_account_binding_key());
+                        self.chat_widget.replace_managed_accounts_after_logout(
+                            response.accounts,
+                            selected_account_id,
+                        );
+                        let current_binding = self
+                            .chat_widget
+                            .managed_accounts()
+                            .and_then(|accounts| accounts.selected_account_binding_key());
+                        let binding_changed = previous_binding != current_binding;
+                        if binding_changed {
+                            self.on_managed_account_binding_changed(app_server);
+                        }
+                        self.refresh_managed_accounts_cache_from(
+                            app_server,
+                            refresh_origin,
+                            /*refresh_usage*/ binding_changed,
+                        );
+                        self.chat_widget.add_info_message(
+                            "Logged out of the selected ChatGPT account.".to_string(),
+                            /*hint*/ None,
+                        );
+                    }
+                    Err(err) => {
+                        self.finish_managed_account_logout_refresh(&refresh_origin);
+                        tracing::error!(
+                            managed_account_id,
+                            "failed to logout managed account: {err}"
+                        );
+                        self.chat_widget
+                            .add_error_message(format!("Logout failed: {err}"));
+                    }
+                }
+            }
+            AppEvent::LogoutAllAccounts => match app_server.logout_all_accounts().await {
+                Ok(_) => {
+                    self.show_shutdown_feedback(tui)?;
+                    return Ok(self
+                        .handle_exit_mode(app_server, ExitMode::ShutdownFirst)
+                        .await);
+                }
+                Err(err) => {
+                    tracing::error!("failed to logout all accounts: {err}");
                     self.chat_widget
                         .add_error_message(format!("Logout failed: {err}"));
                 }
@@ -1368,7 +1428,75 @@ impl App {
                 }
             }
             AppEvent::RefreshRateLimits { origin } => {
-                self.refresh_rate_limits(app_server, origin);
+                if self.chat_widget.managed_accounts().is_none() {
+                    self.refresh_rate_limits(app_server, origin);
+                }
+            }
+            AppEvent::RefreshManagedAccountsForStatus => {
+                self.refresh_managed_accounts_for_status(app_server);
+            }
+            AppEvent::ManagedAccountsLoadedForStatus { origin, result } => {
+                if !self.is_current_managed_account_request(&origin) {
+                    tracing::debug!(
+                        thread_id = ?origin.thread_id,
+                        model = origin.model,
+                        scope_generation = origin.scope_generation,
+                        "discarding stale managed account status response"
+                    );
+                } else {
+                    let had_managed_accounts = self.chat_widget.managed_accounts().is_some();
+                    match result {
+                        Ok(response) if had_managed_accounts || !response.accounts.is_empty() => {
+                            let previous_binding = self
+                                .chat_widget
+                                .managed_accounts()
+                                .and_then(|accounts| accounts.selected_account_binding_key());
+                            self.chat_widget.replace_managed_accounts(response);
+                            let current_binding = self
+                                .chat_widget
+                                .managed_accounts()
+                                .and_then(|accounts| accounts.selected_account_binding_key());
+                            if previous_binding != current_binding {
+                                self.invalidate_managed_account_requests();
+                                self.on_managed_account_binding_changed(app_server);
+                            }
+                            self.chat_widget.add_status_output(
+                                /*refreshing_rate_limits*/ false, /*request_id*/ None,
+                            );
+                        }
+                        Ok(_) => {
+                            self.chat_widget
+                                .show_status_with_legacy_rate_limit_refresh();
+                        }
+                        Err(err) if had_managed_accounts => {
+                            tracing::debug!(
+                                "account/list unavailable for /status; showing cached managed account state: {err}"
+                            );
+                            self.chat_widget.add_info_message(
+                                "Managed account refresh unavailable; showing cached status."
+                                    .to_string(),
+                                /*hint*/ None,
+                            );
+                            self.chat_widget.add_status_output(
+                                /*refreshing_rate_limits*/ false, /*request_id*/ None,
+                            );
+                        }
+                        Err(err) => {
+                            tracing::debug!(
+                                "account/list unavailable for /status; using singular account state: {err}"
+                            );
+                            self.chat_widget
+                                .show_status_with_legacy_rate_limit_refresh();
+                        }
+                    }
+                }
+            }
+            AppEvent::ManagedAccountsLoadedForCache { origin, result } => {
+                if self.handle_managed_accounts_loaded_for_cache(origin, result) {
+                    self.invalidate_managed_account_requests();
+                    self.on_managed_account_binding_changed(app_server);
+                    self.refresh_managed_accounts_usage_cache(app_server);
+                }
             }
             AppEvent::ApplyBackendBannerFallback { thread_id } => {
                 if self.active_thread_id == Some(thread_id)
@@ -1382,7 +1510,76 @@ impl App {
                 }
             }
             AppEvent::RefreshTokenActivity { request_id } => {
-                self.refresh_token_activity(app_server, request_id);
+                if self.chat_widget.managed_accounts().is_none() {
+                    self.refresh_token_activity(app_server, request_id);
+                }
+            }
+            AppEvent::RefreshManagedTokenActivity { request_id } => {
+                self.refresh_managed_token_activity(app_server, request_id);
+            }
+            AppEvent::ManagedTokenActivityLoaded {
+                origin,
+                request_id,
+                result,
+            } => {
+                if !self.is_current_managed_account_request(&origin) {
+                    tracing::debug!(
+                        thread_id = ?origin.thread_id,
+                        model = origin.model,
+                        scope_generation = origin.scope_generation,
+                        request_id = origin.request_id,
+                        "discarding stale managed token activity response"
+                    );
+                    if self.chat_widget.finish_managed_token_activity_refresh(
+                        request_id,
+                        Err("managed account selection changed during usage refresh".to_string()),
+                    ) {
+                        self.insert_pending_usage_output_if_ready(tui);
+                    }
+                } else {
+                    let token_usage_result = match result {
+                        Ok(response)
+                            if self.chat_widget.managed_accounts().is_some()
+                                || !response.accounts.is_empty() =>
+                        {
+                            let previous_binding = self
+                                .chat_widget
+                                .managed_accounts()
+                                .and_then(|accounts| accounts.selected_account_binding_key());
+                            self.chat_widget.replace_managed_accounts(response);
+                            let current_binding = self
+                                .chat_widget
+                                .managed_accounts()
+                                .and_then(|accounts| accounts.selected_account_binding_key());
+                            if previous_binding != current_binding {
+                                self.invalidate_managed_account_requests();
+                                self.on_managed_account_binding_changed(app_server);
+                            }
+                            self.chat_widget
+                                .managed_accounts()
+                                .and_then(|accounts| accounts.selected_account())
+                                .and_then(|account| account.usage.token_usage.clone())
+                                .map(|summary| {
+                                    codex_app_server_protocol::GetAccountTokenUsageResponse {
+                                        summary,
+                                        daily_usage_buckets: None,
+                                    }
+                                })
+                                .ok_or_else(|| {
+                                    "selected managed account token usage is unavailable"
+                                        .to_string()
+                                })
+                        }
+                        Ok(_) => Err("managed account token usage is unavailable".to_string()),
+                        Err(err) => Err(err),
+                    };
+                    if self
+                        .chat_widget
+                        .finish_managed_token_activity_refresh(request_id, token_usage_result)
+                    {
+                        self.insert_pending_usage_output_if_ready(tui);
+                    }
+                }
             }
             AppEvent::RefreshThreadUsage {
                 thread_id,
@@ -1578,11 +1775,13 @@ impl App {
                     .add_token_activity_output(crate::chatwidget::TokenActivityView::Daily);
             }
             AppEvent::OpenRateLimitResetCredits => {
-                let request_id = self.chat_widget.show_rate_limit_reset_loading_popup();
-                self.refresh_rate_limits(
-                    app_server,
-                    RateLimitRefreshOrigin::ResetPicker { request_id },
-                );
+                if self.chat_widget.managed_accounts().is_none() {
+                    let request_id = self.chat_widget.show_rate_limit_reset_loading_popup();
+                    self.refresh_rate_limits(
+                        app_server,
+                        RateLimitRefreshOrigin::ResetPicker { request_id },
+                    );
+                }
             }
             AppEvent::OpenRateLimitResetConfirmation {
                 picker_request_id,
@@ -1605,16 +1804,18 @@ impl App {
                 idempotency_key,
                 credit_id,
             } => {
-                if let Some(request_id) = self
-                    .chat_widget
-                    .start_rate_limit_reset_consumption(&idempotency_key)
-                {
-                    self.consume_rate_limit_reset_credit(
-                        app_server,
-                        request_id,
-                        idempotency_key,
-                        credit_id,
-                    );
+                if self.chat_widget.managed_accounts().is_none() {
+                    if let Some(request_id) = self
+                        .chat_widget
+                        .start_rate_limit_reset_consumption(&idempotency_key)
+                    {
+                        self.consume_rate_limit_reset_credit(
+                            app_server,
+                            request_id,
+                            idempotency_key,
+                            credit_id,
+                        );
+                    }
                 }
             }
             AppEvent::RateLimitResetCreditConsumed {
@@ -1727,6 +1928,9 @@ impl App {
                         .await;
                     self.sync_active_thread_service_tier_to_cached_session()
                         .await;
+                    if self.chat_widget.managed_accounts().is_some() {
+                        self.refresh_managed_accounts_cache(app_server);
+                    }
                 }
             }
             AppEvent::UpdatePersonality(personality) => {

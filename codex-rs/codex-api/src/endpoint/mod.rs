@@ -9,6 +9,7 @@ pub(crate) mod search;
 mod session;
 
 pub use images::ImagesClient;
+pub use memories::ApiMemoryResponse;
 pub use memories::MemoriesClient;
 pub use models::ModelsClient;
 pub use realtime_call::RealtimeCallClient;

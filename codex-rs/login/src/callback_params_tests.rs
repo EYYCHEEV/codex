@@ -18,6 +18,7 @@ fn accepts_the_allowlisted_life_sciences_suffix() {
         ),
         Some(LoginCallbackResult {
             onboarding_entrypoint: Some(LoginOnboardingEntrypoint::LifeSciences),
+            ..Default::default()
         })
     );
 }
