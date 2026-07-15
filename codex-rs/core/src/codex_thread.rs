@@ -213,6 +213,13 @@ pub struct CodexThread {
     rollout_path: Option<PathBuf>,
     out_of_band_elicitations: Mutex<OutOfBandElicitations>,
 }
+pub struct ThreadRuntimeSnapshot {
+    pub effective_auth: Option<codex_login::CodexAuth>,
+    pub mcp: Arc<codex_mcp::McpBinding>,
+    pub runtime_context: codex_mcp::McpRuntimeContext,
+    pub connector_directory_cache_key: Option<codex_connectors::ConnectorDirectoryCacheKey>,
+    pub codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
+}
 
 #[derive(Default)]
 struct OutOfBandElicitations {
@@ -707,6 +714,44 @@ impl CodexThread {
         (Arc::new(mcp_config), runtime_context)
     }
 
+    /// Returns one atomic provider/auth/MCP snapshot for this thread's default turn.
+    pub async fn current_runtime_snapshot(
+        &self,
+    ) -> codex_protocol::error::Result<ThreadRuntimeSnapshot> {
+        let turn_context = self.session.new_default_turn().await;
+        let setup = self
+            .session
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info.slug),
+                Some(&self.session.session_id().to_string()),
+            )
+            .await?;
+        let step = self
+            .session
+            .capture_step_context_for_setup(turn_context, &setup)
+            .await?;
+        let (_, runtime_context) = self
+            .session
+            .runtime_mcp_config_and_context(&step.turn.config)
+            .await;
+        Ok(ThreadRuntimeSnapshot {
+            effective_auth: setup.effective_auth,
+            mcp: Arc::clone(&step.mcp),
+            runtime_context,
+            connector_directory_cache_key: step.connector_directory_cache_key.clone(),
+            codex_apps_tools_cache_key: step.codex_apps_tools_cache_key.clone(),
+        })
+    }
+
+    /// Returns the exact MCP config, environment bindings, and manager selected for this thread.
+    pub async fn current_mcp_runtime(
+        &self,
+    ) -> codex_protocol::error::Result<Arc<codex_mcp::McpBinding>> {
+        Ok(self.current_runtime_snapshot().await?.mcp)
+    }
+
     pub fn multi_agent_version(&self) -> Option<MultiAgentVersion> {
         self.session.multi_agent_version()
     }
@@ -741,12 +786,10 @@ impl CodexThread {
         server: &str,
         uri: &str,
     ) -> anyhow::Result<serde_json::Value> {
-        self.session.refresh_mcp_if_dirty().await;
         let result = self
-            .session
-            .services
-            .mcp_runtime
-            .latest_read_resource(server, ReadResourceRequestParams::new(uri))
+            .current_mcp_runtime()
+            .await?
+            .read_resource(server, ReadResourceRequestParams::new(uri))
             .await?;
 
         Ok(serde_json::to_value(result)?)
@@ -759,12 +802,11 @@ impl CodexThread {
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
     ) -> anyhow::Result<CallToolResult> {
-        self.session.refresh_mcp_if_dirty().await;
-        self.session
-            .services
-            .mcp_runtime
-            .latest_call_tool(server, tool, arguments, meta)
-            .await
+        let binding = self.current_mcp_runtime().await?;
+        let call = binding
+            .prepare_call(server, tool)
+            .ok_or_else(|| anyhow::anyhow!("MCP tool `{server}/{tool}` is not available"))?;
+        call.call(arguments, meta).await
     }
 
     pub fn enabled(&self, feature: Feature) -> bool {

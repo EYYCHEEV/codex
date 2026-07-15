@@ -125,6 +125,8 @@ impl ChatWidget {
             session_header: SessionHeader::new(header_model),
             initial_user_message,
             status_account_display,
+            pending_managed_account_selection: None,
+            managed_account_updates_enabled: true,
             runtime_model_provider_base_url,
             remote_connection: None,
             token_info: None,
@@ -255,6 +257,9 @@ impl ChatWidget {
             last_non_retry_error: None,
         };
 
+        if widget.managed_accounts().is_some() {
+            widget.project_selected_managed_rate_limits();
+        }
         widget.prefetch_rate_limits();
         if let Some(keymap) = runtime_keymap {
             widget.bottom_pane.set_keymap_bindings(&keymap);

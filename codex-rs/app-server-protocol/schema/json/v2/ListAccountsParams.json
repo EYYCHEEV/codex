@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Parameters for the canonical managed ChatGPT account-pool listing.",
+  "properties": {
+    "model": {
+      "default": null,
+      "description": "Model used when computing a scoped account selection.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "refreshTokens": {
+      "description": "Refresh due managed OAuth tokens before returning the list.",
+      "type": "boolean"
+    },
+    "refreshUsage": {
+      "description": "Refresh account usage before returning the list.",
+      "type": "boolean"
+    },
+    "threadId": {
+      "default": null,
+      "description": "Selects the account pinned to this thread when present.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "title": "ListAccountsParams",
+  "type": "object"
+}

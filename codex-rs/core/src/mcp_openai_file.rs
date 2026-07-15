@@ -36,7 +36,6 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
     let Some(arguments) = arguments_value.as_object() else {
         return Ok(Some(arguments_value));
     };
-    let auth = sess.services.auth_manager.auth().await;
     let mut rewritten_arguments = arguments.clone();
 
     for (field_name, optional_fields) in openai_file_input_optional_fields {
@@ -46,7 +45,7 @@ pub(crate) async fn rewrite_mcp_tool_arguments_for_openai_files(
         let Some(uploaded_value) = rewrite_argument_value_for_openai_files(
             step_context,
             &sess.services.openai_file_upload_client_pool,
-            auth.as_ref(),
+            step_context.effective_auth.as_ref(),
             field_name,
             optional_fields,
             value,

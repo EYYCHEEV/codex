@@ -262,7 +262,7 @@ pub(super) async fn try_run_zsh_fork(
 
 pub(crate) async fn prepare_unified_exec_zsh_fork(
     req: &crate::tools::runtimes::unified_exec::UnifiedExecRequest,
-    _attempt: &SandboxAttempt<'_>,
+    attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx,
     exec_request: ExecRequest,
     shell_zsh_path: &std::path::Path,
@@ -284,9 +284,10 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         return Ok(None);
     }
 
+    let (attempt_file_system_sandbox_policy, _) = attempt.permissions.to_runtime_permissions();
     let sandbox_permissions = sandbox_permissions_preserving_denied_reads(
         req.sandbox_permissions,
-        &exec_request.file_system_sandbox_policy,
+        &attempt_file_system_sandbox_policy,
     );
     let exec_policy = Arc::new(RwLock::new(
         ctx.session.services.exec_policy.current().as_ref().clone(),

@@ -394,7 +394,7 @@ impl ChatWidget {
                 self.request_quit_without_confirmation();
             }
             SlashCommand::Logout => {
-                self.app_event_tx.send(AppEvent::Logout);
+                self.request_account_logout();
             }
             SlashCommand::Copy => {
                 self.copy_last_agent_markdown();
@@ -443,18 +443,11 @@ impl ChatWidget {
                 self.add_hooks_output();
             }
             SlashCommand::Status => {
-                if self.should_prefetch_rate_limits() {
-                    let request_id = self.next_status_refresh_request_id;
-                    self.next_status_refresh_request_id =
-                        self.next_status_refresh_request_id.wrapping_add(1);
-                    self.add_status_output(/*refreshing_rate_limits*/ true, Some(request_id));
-                    self.app_event_tx.send(AppEvent::RefreshRateLimits {
-                        origin: RateLimitRefreshOrigin::StatusCommand { request_id },
-                    });
+                if self.managed_accounts().is_some() {
+                    self.app_event_tx
+                        .send(AppEvent::RefreshManagedAccountsForStatus);
                 } else {
-                    self.add_status_output(
-                        /*refreshing_rate_limits*/ false, /*request_id*/ None,
-                    );
+                    self.show_status_with_legacy_rate_limit_refresh();
                 }
             }
             SlashCommand::Usage => {

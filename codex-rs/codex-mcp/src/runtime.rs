@@ -83,6 +83,7 @@ struct PublishedMcpRuntime {
     config: Option<Arc<McpConfig>>,
     auth: Option<CodexAuth>,
     auth_token: Option<String>,
+    codex_apps_tools_cache_key: Option<ConnectorRuntimeContextKey>,
     plugins_available: bool,
     ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
     cached_binding: Mutex<Option<CachedMcpBinding>>,
@@ -153,6 +154,7 @@ impl McpRuntime {
                 config: None,
                 auth: None,
                 auth_token: None,
+                codex_apps_tools_cache_key: None,
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
                 cached_binding: Mutex::new(None),
@@ -194,6 +196,7 @@ impl McpRuntime {
         let config = Arc::clone(&input.config);
         let auth = input.auth.clone();
         let auth_token = auth.as_ref().and_then(|auth| auth.get_token().ok());
+        let codex_apps_tools_cache_key = input.codex_apps_tools_cache_key.clone();
         let plugins_available = input.plugins_available;
         let ready_selected_capability_roots = input.ready_selected_capability_roots.clone();
         let connections = Arc::new(
@@ -210,6 +213,7 @@ impl McpRuntime {
             config: Some(config),
             auth,
             auth_token,
+            codex_apps_tools_cache_key: Some(codex_apps_tools_cache_key),
             plugins_available,
             ready_selected_capability_roots,
             cached_binding: Mutex::new(None),
@@ -312,6 +316,10 @@ impl McpRuntime {
             return None;
         }
         Self::binding_from_published_runtime(current, /*required_servers*/ &[]).await
+    }
+
+    pub fn current_codex_apps_tools_cache_key(&self) -> Option<ConnectorRuntimeContextKey> {
+        self.current.load().codex_apps_tools_cache_key.clone()
     }
 
     /// Returns the latest published configuration without waiting for clients.

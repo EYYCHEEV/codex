@@ -140,7 +140,7 @@ pub(crate) async fn handle_mcp_tool_call(
         arguments: arguments_value.clone(),
     };
 
-    let Some(prepared_call) = sess.prepare_mcp_call(&server, &tool_name).await else {
+    let Some(prepared_call) = step_context.mcp.prepare_call(&server, &tool_name) else {
         let item_metadata =
             McpToolCallItemMetadata::from_tool_metadata(&server, /*metadata*/ None);
         let result = notify_mcp_tool_call_skip(
@@ -465,7 +465,7 @@ async fn handle_approved_mcp_tool_call(
             )?;
             Ok(maybe_request_codex_apps_auth_elicitation(
                 sess,
-                turn_context,
+                step_context,
                 prepared_call.config().approval_policy.value(),
                 call_id,
                 &invocation.server,
@@ -632,13 +632,14 @@ fn truncate_str_to_char_boundary(value: &str, max_chars: usize) -> &str {
 
 async fn maybe_request_codex_apps_auth_elicitation(
     sess: &Arc<Session>,
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     approval_policy: AskForApproval,
     call_id: &str,
     server: &str,
     metadata: Option<&McpToolApprovalMetadata>,
     result: CallToolResult,
 ) -> CallToolResult {
+    let turn_context = step_context.turn.as_ref();
     if server != CODEX_APPS_MCP_SERVER_NAME {
         return result;
     }
@@ -697,19 +698,20 @@ async fn maybe_request_codex_apps_auth_elicitation(
         return result;
     }
 
-    refresh_codex_apps_after_connector_auth(sess, turn_context).await;
+    refresh_codex_apps_after_connector_auth(sess, step_context).await;
     auth_elicitation_completed_result(&plan.auth_failure, result.meta)
 }
 
-async fn refresh_codex_apps_after_connector_auth(sess: &Arc<Session>, turn_context: &TurnContext) {
+async fn refresh_codex_apps_after_connector_auth(sess: &Arc<Session>, step_context: &StepContext) {
+    let turn_context = step_context.turn.as_ref();
     let mcp_tools_result = sess.hard_refresh_latest_codex_apps_tools().await;
 
     match mcp_tools_result {
         Ok(mcp_tools) => {
-            let auth = sess.services.auth_manager.auth().await;
             connectors::refresh_accessible_connectors_cache_from_mcp_tools(
                 &turn_context.config,
-                auth.as_ref(),
+                step_context.effective_auth.as_ref(),
+                step_context.connector_directory_cache_key.as_ref(),
                 &mcp_tools,
             );
         }

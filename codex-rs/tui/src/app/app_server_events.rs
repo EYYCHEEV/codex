@@ -77,21 +77,45 @@ impl App {
                 self.refresh_mcp_startup_expected_servers_from_config();
             }
             ServerNotification::AccountRateLimitsUpdated(notification) => {
-                if matches!(
-                    notification.rate_limits.rate_limit_reached_type,
-                    Some(
-                        RateLimitReachedType::WorkspaceOwnerCreditsDepleted
-                            | RateLimitReachedType::WorkspaceMemberCreditsDepleted
-                            | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
-                            | RateLimitReachedType::WorkspaceMemberUsageLimitReached
-                    )
-                ) || notification.rate_limits.spend_control_reached == Some(true)
-                {
-                    self.rate_limit_hard_stop_generation =
-                        self.rate_limit_hard_stop_generation.wrapping_add(1);
+                if notification.managed_account_id.is_some() {
+                    self.chat_widget
+                        .apply_managed_rate_limits_update(notification);
+                } else if self.chat_widget.managed_accounts().is_none() {
+                    if matches!(
+                        notification.rate_limits.rate_limit_reached_type,
+                        Some(
+                            RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+                                | RateLimitReachedType::WorkspaceMemberCreditsDepleted
+                                | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+                                | RateLimitReachedType::WorkspaceMemberUsageLimitReached
+                        )
+                    ) || notification.rate_limits.spend_control_reached == Some(true)
+                    {
+                        self.rate_limit_hard_stop_generation =
+                            self.rate_limit_hard_stop_generation.wrapping_add(1);
+                    }
+                    self.chat_widget
+                        .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
                 }
-                self.chat_widget
-                    .on_rolling_rate_limit_snapshot(notification.rate_limits.clone());
+                return;
+            }
+            ServerNotification::AccountPoolUpdated(notification) => {
+                self.chat_widget.apply_account_pool_update(
+                    notification.accounts.clone(),
+                    notification.pool_revision,
+                );
+                return;
+            }
+            ServerNotification::AccountSelectionUpdated(notification) => {
+                self.chat_widget.apply_account_selection_update(
+                    notification.thread_id.as_str(),
+                    notification.selected_account_id.clone(),
+                    notification.selection_revision,
+                );
+                return;
+            }
+            ServerNotification::AccountUsageUpdated(notification) => {
+                self.chat_widget.apply_managed_usage_update(notification);
                 return;
             }
             ServerNotification::AccountUpdated(notification) => {
@@ -104,6 +128,10 @@ impl App {
                             | AuthMode::PersonalAccessToken
                     )
                 );
+                if notification.auth_mode != Some(AuthMode::Chatgpt) {
+                    self.invalidate_managed_account_requests();
+                    self.chat_widget.clear_managed_accounts_cache();
+                }
                 self.chat_widget.update_account_state(
                     status_account_display_from_auth_mode(
                         notification.auth_mode,
@@ -115,6 +143,10 @@ impl App {
                         .is_some_and(AuthMode::has_chatgpt_account),
                     has_codex_backend_auth,
                 );
+                if notification.auth_mode == Some(AuthMode::Chatgpt) {
+                    self.chat_widget.enable_managed_account_updates();
+                    self.refresh_managed_accounts_cache(app_server_client);
+                }
                 return;
             }
             ServerNotification::ExternalAgentConfigImportCompleted(notification) => {

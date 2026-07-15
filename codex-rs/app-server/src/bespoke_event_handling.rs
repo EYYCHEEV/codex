@@ -2,6 +2,7 @@ use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
 use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
+use crate::request_processors::AccountSelectionObserver;
 use crate::request_processors::populate_thread_turns_from_history;
 use crate::request_processors::thread_from_stored_thread;
 use crate::request_processors::thread_settings_from_core_snapshot;
@@ -89,6 +90,7 @@ use codex_app_server_protocol::guardian_auto_approval_review_notification;
 use codex_app_server_protocol::item_event_to_server_notification;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
+use codex_login::ManagedChatgptSelectionScope;
 use codex_protocol::ThreadId;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
 use codex_protocol::items::TurnItem as CoreTurnItem;
@@ -147,6 +149,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     thread_state: Arc<tokio::sync::Mutex<ThreadState>>,
     thread_watch_manager: ThreadWatchManager,
     thread_list_state_permit: Arc<tokio::sync::Semaphore>,
+    account_selection_event_route: Option<AccountSelectionObserver>,
     fallback_model_provider: String,
 ) {
     let Event {
@@ -360,6 +363,22 @@ pub(crate) async fn apply_bespoke_event_handling(
             outgoing
                 .send_server_notification(ServerNotification::ModelRerouted(notification))
                 .await;
+        }
+        EventMsg::ManagedAccountSelected(event) => {
+            if let Some(route) = account_selection_event_route.as_ref() {
+                route
+                    .notify_if_changed(
+                        ManagedChatgptSelectionScope {
+                            thread_id: Some(conversation_id.to_string()),
+                            session_id: event.session_id,
+                            model: event.model,
+                        },
+                        event.selected_account_id,
+                        event.selection_revision,
+                        &outgoing,
+                    )
+                    .await;
+            }
         }
         EventMsg::ModelVerification(event) => {
             let notification = ModelVerificationNotification {
@@ -1579,7 +1598,13 @@ async fn handle_token_count_event(
     token_count_event: TokenCountEvent,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
-    let TokenCountEvent { info, rate_limits } = token_count_event;
+    let TokenCountEvent {
+        info,
+        rate_limits,
+        managed_account_id,
+        account_state_revision,
+        managed_transport_binding: _,
+    } = token_count_event;
     if let Some(token_usage) = info.map(ThreadTokenUsage::from) {
         let notification = ThreadTokenUsageUpdatedNotification {
             thread_id: conversation_id.to_string(),
@@ -1591,13 +1616,17 @@ async fn handle_token_count_event(
             .await;
     }
     if let Some(rate_limits) = rate_limits {
-        outgoing
-            .send_server_notification(ServerNotification::AccountRateLimitsUpdated(
-                AccountRateLimitsUpdatedNotification {
-                    rate_limits: rate_limits.into(),
-                },
-            ))
-            .await;
+        let notification =
+            ServerNotification::AccountRateLimitsUpdated(AccountRateLimitsUpdatedNotification {
+                managed_account_id: managed_account_id.clone(),
+                account_revision: managed_account_id.as_ref().and(account_state_revision),
+                rate_limits: rate_limits.into(),
+            });
+        if managed_account_id.is_some() {
+            outgoing.send_global_server_notification(notification).await;
+        } else {
+            outgoing.send_server_notification(notification).await;
+        }
     }
 }
 
@@ -2140,6 +2169,7 @@ mod tests {
     use codex_protocol::protocol::GuardianAssessmentStatus;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::ItemStartedEvent;
+    use codex_protocol::protocol::ManagedAccountSelectedEvent;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use codex_protocol::protocol::RolloutItem;
@@ -2373,6 +2403,7 @@ mod tests {
                 self.thread_state.clone(),
                 self.thread_watch_manager.clone(),
                 Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+                None,
                 "test-provider".to_string(),
             )
             .await;
@@ -3374,6 +3405,7 @@ mod tests {
             thread_state,
             thread_watch_manager,
             Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+            None,
             "test-provider".to_string(),
         )
         .await;
@@ -3387,6 +3419,87 @@ mod tests {
             }
             other => bail!("unexpected message: {other:?}"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn managed_account_selection_event_notifies_with_exact_request_scope() -> Result<()> {
+        let codex_home = TempDir::new()?;
+        let config = load_default_config_for_test(&codex_home).await;
+        let thread_manager = Arc::new(
+            codex_core::test_support::thread_manager_with_models_provider_and_home(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                config.model_provider.clone(),
+                config.codex_home.to_path_buf(),
+                Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            ),
+        );
+        let codex_core::NewThread {
+            thread_id: conversation_id,
+            thread: conversation,
+            ..
+        } = thread_manager.start_thread(config).await?;
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let account_selection_observer = AccountSelectionObserver::for_test(Arc::clone(&outgoing));
+        let scoped_outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+        let account_selection_event_route = account_selection_observer
+            .activate_thread(&conversation_id.to_string())
+            .await
+            .capture_event()
+            .await
+            .expect("active selection listener");
+
+        apply_bespoke_event_handling(
+            Event {
+                id: "turn-1".to_string(),
+                msg: EventMsg::ManagedAccountSelected(ManagedAccountSelectedEvent {
+                    selected_account_id: "account-b".to_string(),
+                    selection_revision: 17,
+                    session_id: Some("session-2".to_string()),
+                    model: Some("gpt-5".to_string()),
+                }),
+            },
+            conversation_id,
+            conversation,
+            thread_manager,
+            scoped_outgoing,
+            new_thread_state(),
+            ThreadWatchManager::new(),
+            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+            Some(account_selection_event_route),
+            "test-provider".to_string(),
+        )
+        .await;
+
+        let message = recv_broadcast_message(&mut rx).await?;
+        let OutgoingMessage::AppServerNotification(ServerNotification::AccountSelectionUpdated(
+            notification,
+        )) = message
+        else {
+            bail!("unexpected message: {message:?}");
+        };
+        assert_eq!(notification.thread_id, conversation_id.to_string());
+        assert_eq!(
+            notification.selected_account_id.as_deref(),
+            Some("account-b")
+        );
+        assert_eq!(notification.selection_revision, 17);
+
+        let observed_scope = account_selection_observer
+            .observed_scope_for_test(&conversation_id.to_string())
+            .await
+            .expect("selection event should retain its request scope");
+        assert_eq!(observed_scope.thread_id, Some(conversation_id.to_string()));
+        assert_eq!(observed_scope.session_id.as_deref(), Some("session-2"));
+        assert_eq!(observed_scope.model.as_deref(), Some("gpt-5"));
         Ok(())
     }
 
@@ -3451,6 +3564,7 @@ mod tests {
             new_thread_state(),
             thread_watch_manager.clone(),
             Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+            None,
             "test-provider".to_string(),
         )
         .await;
@@ -3540,6 +3654,7 @@ mod tests {
             new_thread_state(),
             ThreadWatchManager::new(),
             Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
+            None,
             "test-provider".to_string(),
         )
         .await;
@@ -3887,6 +4002,9 @@ mod tests {
             TokenCountEvent {
                 info: Some(info),
                 rate_limits: Some(rate_limits),
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
             },
             &outgoing,
         )
@@ -3906,9 +4024,19 @@ mod tests {
             other => bail!("unexpected notification: {other:?}"),
         }
 
-        let second = recv_broadcast_notification(&mut rx).await?;
+        let second = rx.recv().await.expect("singular rate notification");
+        let OutgoingEnvelope::ToConnection {
+            message: second, ..
+        } = second
+        else {
+            bail!("non-pooled rate notification must remain thread scoped");
+        };
         match second {
-            ServerNotification::AccountRateLimitsUpdated(payload) => {
+            OutgoingMessage::AppServerNotification(
+                ServerNotification::AccountRateLimitsUpdated(payload),
+            ) => {
+                assert_eq!(payload.managed_account_id, None);
+                assert_eq!(payload.account_revision, None);
                 assert_eq!(payload.rate_limits.limit_id.as_deref(), Some("codex"));
                 assert_eq!(payload.rate_limits.limit_name, None);
                 assert!(payload.rate_limits.primary.is_some());
@@ -3916,6 +4044,61 @@ mod tests {
             }
             other => bail!("unexpected notification: {other:?}"),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_managed_token_rate_limits_are_keyed_and_global() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            ThreadId::new(),
+        );
+        let rate_limits = RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: None,
+            primary: None,
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        };
+
+        handle_token_count_event(
+            ThreadId::new(),
+            "turn-managed".to_string(),
+            TokenCountEvent {
+                info: None,
+                rate_limits: Some(rate_limits),
+                managed_account_id: Some("email:managed@example.com".to_string()),
+                account_state_revision: Some(44),
+                managed_transport_binding: None,
+            },
+            &outgoing,
+        )
+        .await;
+
+        let envelope = rx.recv().await.expect("managed rate notification");
+        let OutgoingEnvelope::Broadcast { message } = envelope else {
+            bail!("managed rate notification must be global");
+        };
+        let OutgoingMessage::AppServerNotification(ServerNotification::AccountRateLimitsUpdated(
+            payload,
+        )) = message
+        else {
+            bail!("unexpected notification: {message:?}");
+        };
+        assert_eq!(
+            payload.managed_account_id.as_deref(),
+            Some("email:managed@example.com")
+        );
+        assert_eq!(payload.account_revision, Some(44));
         Ok(())
     }
 
@@ -3940,6 +4123,9 @@ mod tests {
             TokenCountEvent {
                 info: None,
                 rate_limits: None,
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
             },
             &outgoing,
         )

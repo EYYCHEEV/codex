@@ -504,10 +504,9 @@ impl ChatWidget {
         &mut self,
         result: Result<AddCreditsNudgeEmailStatus, String>,
     ) {
-        let credit_type = self
-            .add_credits_nudge_email_in_flight
-            .take()
-            .unwrap_or(AddCreditsNudgeCreditType::Credits);
+        let Some(credit_type) = self.add_credits_nudge_email_in_flight.take() else {
+            return;
+        };
         let message = match (credit_type, result) {
             (AddCreditsNudgeCreditType::Credits, Ok(AddCreditsNudgeEmailStatus::Sent)) => {
                 "Workspace owner notified."

@@ -27,6 +27,7 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use wiremock::Mock;
+use wiremock::MockServer;
 use wiremock::Request;
 use wiremock::Respond;
 use wiremock::ResponseTemplate;
@@ -68,6 +69,23 @@ impl Respond for AuthFailureResponder {
             },
         }))
     }
+}
+
+async fn tools_list_request_count(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .expect("mock server should capture requests")
+        .iter()
+        .filter(|request| {
+            serde_json::from_slice::<Value>(&request.body)
+                .ok()
+                .and_then(|body| body.get("method").cloned())
+                .as_ref()
+                .and_then(Value::as_str)
+                == Some("tools/list")
+        })
+        .count()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -155,7 +173,13 @@ default_tools_approval_mode = "auto"
     })
     .await
     else {
-        panic!("default auth elicitation should prompt before completing the turn");
+        let follow_up_output = responses
+            .requests()
+            .get(1)
+            .and_then(|request| request.function_call_output_text(call_id));
+        panic!(
+            "default auth elicitation should prompt before completing the turn; follow-up output: {follow_up_output:?}"
+        );
     };
 
     assert_eq!(request.server_name, CODEX_APPS_MCP_SERVER_NAME);
@@ -188,6 +212,7 @@ default_tools_approval_mode = "auto"
         }
     );
 
+    let tools_list_requests_before_accept = tools_list_request_count(&server).await;
     test.codex
         .submit(Op::ResolveElicitation {
             server_name: request.server_name,
@@ -201,6 +226,11 @@ default_tools_approval_mode = "auto"
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
+    assert_eq!(
+        tools_list_request_count(&server).await,
+        tools_list_requests_before_accept + 1,
+        "accepted authorization should force exactly one tools refresh",
+    );
 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);

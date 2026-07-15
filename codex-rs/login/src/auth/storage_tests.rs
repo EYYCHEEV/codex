@@ -26,6 +26,7 @@ async fn file_storage_load_returns_auth_dot_json() -> anyhow::Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     storage
@@ -49,6 +50,7 @@ async fn file_storage_save_persists_auth_dot_json() -> anyhow::Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     let file = get_auth_file(codex_home.path());
@@ -60,6 +62,79 @@ async fn file_storage_save_persists_auth_dot_json() -> anyhow::Result<()> {
         .try_read_auth_json(&file)
         .context("failed to read auth file after save")?;
     assert_eq!(auth_dot_json, same_auth_dot_json);
+    Ok(())
+}
+
+#[test]
+fn file_storage_locked_delete_follows_in_flight_mutation() -> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let storage = Arc::new(FileAuthStorage::new(codex_home.path().to_path_buf()));
+    storage.save(&auth_with_prefix("initial"))?;
+
+    let (mutation_entered_tx, mutation_entered_rx) = std::sync::mpsc::channel();
+    let (release_mutation_tx, release_mutation_rx) = std::sync::mpsc::channel();
+    let mutation_storage = Arc::clone(&storage);
+    let mutation = std::thread::spawn(move || {
+        mutation_storage.mutate(&mut |current| {
+            mutation_entered_tx
+                .send(())
+                .expect("signal mutation holds auth lock");
+            release_mutation_rx
+                .recv()
+                .expect("wait until delete is ready");
+            Ok(AuthStorageMutation::Save(
+                current.expect("seeded auth remains available to mutation"),
+            ))
+        })
+    });
+    mutation_entered_rx
+        .recv()
+        .expect("mutation should acquire auth lock");
+
+    let delete_ready = Arc::new(std::sync::Barrier::new(2));
+    let delete_storage = Arc::clone(&storage);
+    let delete_thread_ready = Arc::clone(&delete_ready);
+    let deletion = std::thread::spawn(move || {
+        delete_thread_ready.wait();
+        delete_storage.delete_locked()
+    });
+    delete_ready.wait();
+    release_mutation_tx
+        .send(())
+        .expect("allow in-flight mutation to finish");
+
+    mutation
+        .join()
+        .expect("mutation thread should not panic")?
+        .expect("mutation should save auth");
+    assert!(
+        deletion.join().expect("deletion thread should not panic")?,
+        "locked delete should remove the auth saved by the preceding mutation"
+    );
+    assert_eq!(
+        storage.load()?,
+        None,
+        "the preceding mutation must not resurrect auth after locked delete returns"
+    );
+    Ok(())
+}
+
+#[test]
+fn ephemeral_locked_delete_does_not_touch_filesystem() -> anyhow::Result<()> {
+    let parent = tempdir()?;
+    let codex_home = parent.path().join("missing").join("codex-home");
+    let storage = EphemeralAuthStorage::new(codex_home.clone());
+    let auth = auth_with_prefix("ephemeral");
+
+    storage.mutate(&mut |_| Ok(AuthStorageMutation::Save(auth.clone())))?;
+    assert_eq!(storage.load()?, Some(auth));
+    assert!(storage.delete_locked()?);
+    assert_eq!(storage.load()?, None);
+    assert!(
+        !codex_home.exists(),
+        "ephemeral mutation and deletion must not create CODEX_HOME"
+    );
+    assert!(!codex_home.join(".auth.json.lock").exists());
     Ok(())
 }
 
@@ -84,6 +159,7 @@ async fn file_storage_round_trips_agent_identity_auth() -> anyhow::Result<()> {
         agent_identity: Some(AgentIdentityStorage::Jwt(agent_identity)),
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     storage.save(&auth_dot_json)?;
@@ -115,6 +191,7 @@ async fn file_storage_round_trips_registered_agent_identity_auth() -> anyhow::Re
         agent_identity: Some(AgentIdentityStorage::Record(record)),
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     storage.save(&auth_dot_json)?;
@@ -164,6 +241,7 @@ async fn file_storage_loads_empty_agent_identity_email_as_none() -> anyhow::Resu
                 chatgpt_account_is_fedramp: false,
                 task_id: None,
             })),
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: None,
         })
@@ -192,6 +270,7 @@ async fn file_storage_writes_missing_agent_identity_email_as_empty_string() -> a
         })),
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     storage.save(&auth_dot_json)?;
@@ -215,6 +294,7 @@ async fn file_storage_round_trips_personal_access_token_auth() -> anyhow::Result
         agent_identity: None,
         personal_access_token: Some("at-example".to_string()),
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     storage.save(&auth_dot_json)?;
@@ -266,6 +346,7 @@ fn file_storage_delete_removes_auth_file() -> anyhow::Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     let storage = create_auth_storage(
         dir.path().to_path_buf(),
@@ -297,6 +378,7 @@ fn ephemeral_storage_save_load_delete_is_in_memory_only() -> anyhow::Result<()> 
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     storage.save(&auth_dot_json)?;
@@ -430,6 +512,7 @@ fn auth_with_prefix(prefix: &str) -> AuthDotJson {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     }
 }
 
@@ -457,6 +540,7 @@ fn secrets_keyring_auth_storage_load_returns_deserialized_auth() -> anyhow::Resu
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     seed_secrets_backend_with_auth(&mock_keyring, codex_home.path(), &expected)?;
 
@@ -595,6 +679,7 @@ fn secrets_keyring_auth_storage_save_persists_and_removes_fallback_file() -> any
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
 
     storage.save(&auth)?;
@@ -666,7 +751,7 @@ fn secrets_keyring_auth_storage_delete_removes_legacy_direct_keyring_entry() -> 
 }
 
 #[test]
-fn auto_auth_storage_load_prefers_keyring_value() -> anyhow::Result<()> {
+fn auto_auth_storage_load_prefers_present_file_fallback() -> anyhow::Result<()> {
     let codex_home = tempdir()?;
     let mock_keyring = MockKeyringStore::default();
     let storage = AutoAuthStorage::new(
@@ -674,14 +759,14 @@ fn auto_auth_storage_load_prefers_keyring_value() -> anyhow::Result<()> {
         Arc::new(mock_keyring.clone()),
         AuthKeyringBackendKind::Secrets,
     );
-    let keyring_auth = auth_with_prefix("keyring");
-    seed_secrets_backend_with_auth(&mock_keyring, codex_home.path(), &keyring_auth)?;
+    let stale_keyring_auth = auth_with_prefix("keyring");
+    seed_secrets_backend_with_auth(&mock_keyring, codex_home.path(), &stale_keyring_auth)?;
 
     let file_auth = auth_with_prefix("file");
     storage.file_storage.save(&file_auth)?;
 
     let loaded = storage.load()?;
-    assert_eq!(loaded, Some(keyring_auth));
+    assert_eq!(loaded, Some(file_auth));
     Ok(())
 }
 

@@ -6,6 +6,7 @@ use crate::common::SafetyBufferingTreatment;
 use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 use crate::error::ApiError;
 use crate::provider::Provider;
+use crate::rate_limits::parse_all_rate_limits;
 use crate::rate_limits::parse_rate_limit_event;
 use crate::safety_buffering::treatment_from_headers;
 use crate::sse::ResponsesStreamEvent;
@@ -13,6 +14,8 @@ use crate::sse::process_responses_event;
 use crate::telemetry::WebsocketTelemetry;
 use codex_client::TransportError;
 use codex_http_client::HttpClientFactory;
+use codex_protocol::error::WebsocketCloseDetails;
+use codex_protocol::protocol::RateLimitSnapshot;
 use codex_websocket_client::WebSocketConnection;
 use codex_websocket_client::WebSocketConnector;
 use futures::SinkExt;
@@ -34,6 +37,7 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tracing::Instrument;
 use tracing::Span;
@@ -185,6 +189,7 @@ pub struct ResponsesWebsocketConnection {
     idle_timeout: Duration,
     server_reasoning_included: bool,
     models_etag: Option<String>,
+    handshake_rate_limits: Mutex<Option<Vec<RateLimitSnapshot>>>,
     server_model: Option<String>,
     telemetry: Option<Arc<dyn WebsocketTelemetry>>,
 }
@@ -197,6 +202,10 @@ impl std::fmt::Debug for ResponsesWebsocketConnection {
             .field("server_reasoning_included", &self.server_reasoning_included)
             .field("models_etag", &self.models_etag)
             .field("server_model", &self.server_model)
+            .field(
+                "handshake_rate_limits",
+                &"<rate-limit-snapshots-pending-first-generated-request>",
+            )
             .field("telemetry", &self.telemetry.as_ref().map(|_| "<telemetry>"))
             .finish()
     }
@@ -209,6 +218,7 @@ impl ResponsesWebsocketConnection {
         server_reasoning_included: bool,
         models_etag: Option<String>,
         server_model: Option<String>,
+        handshake_rate_limits: Vec<RateLimitSnapshot>,
         telemetry: Option<Arc<dyn WebsocketTelemetry>>,
     ) -> Self {
         Self {
@@ -217,6 +227,7 @@ impl ResponsesWebsocketConnection {
             server_reasoning_included,
             models_etag,
             server_model,
+            handshake_rate_limits: Mutex::new(Some(handshake_rate_limits)),
             telemetry,
         }
     }
@@ -271,6 +282,11 @@ impl ResponsesWebsocketConnection {
             connection_reused,
         };
         let request_text = serialize_websocket_request(&request)?;
+        let generate = match &request {
+            ResponsesWsRequest::ResponseCreate(request) => request.generate,
+        };
+        let handshake_rate_limits =
+            take_handshake_rate_limits(&self.handshake_rate_limits, generate).await;
 
         let current_span = Span::current();
         tokio::spawn(
@@ -279,6 +295,9 @@ impl ResponsesWebsocketConnection {
                 reason = "the guard serializes exclusive use of the websocket stream for the lifetime of the response stream"
             )]
             async move {
+                for snapshot in handshake_rate_limits {
+                    let _ = tx_event.send(Ok(ResponseEvent::RateLimits(snapshot))).await;
+                }
                 if let Some(model) = server_model {
                     let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
                 }
@@ -294,9 +313,9 @@ impl ResponsesWebsocketConnection {
                 let result = {
                     let Some(ws_stream) = guard.as_mut() else {
                         let _ = tx_event
-                            .send(Err(ApiError::Stream(
-                                "websocket connection is closed".to_string(),
-                            )))
+                            .send(Err(ApiError::WebsocketClosed(Box::new(
+                                websocket_close_details(None),
+                            ))))
                             .await;
                         return;
                     };
@@ -338,13 +357,17 @@ pub struct ResponsesWebsocketClient {
     auth: SharedAuthProvider,
 }
 
-/// Close frame information captured by a handshake probe.
+/// Sanitized close information captured by a handshake probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponsesWebsocketClose {
-    /// WebSocket close code returned by the server.
-    pub code: String,
-    /// Human-readable close reason returned by the server.
-    pub reason: String,
+    /// Whether the peer sent a close frame. `false` identifies stream EOF.
+    pub frame_received: bool,
+    /// WebSocket close code returned by the server, when present.
+    pub code: Option<u16>,
+    /// Allowlisted close reason, or `[redacted]` when a reason was unsafe.
+    pub reason: Option<String>,
+    /// Whether the server supplied a reason that was replaced with `[redacted]`.
+    pub reason_redacted: bool,
 }
 
 /// Result of a handshake-only Responses WebSocket probe.
@@ -360,7 +383,8 @@ pub struct ResponsesWebsocketProbe {
     pub models_etag_present: bool,
     /// Whether the server returned a server-selected model in the upgrade response.
     pub server_model_present: bool,
-    /// Close frame received immediately after upgrade, when one arrives quickly.
+    /// Immediate closure observed after upgrade. EOF and frameless close frames
+    /// are represented explicitly; `None` means the grace interval elapsed.
     pub immediate_close: Option<ResponsesWebsocketClose>,
 }
 
@@ -393,14 +417,21 @@ impl ResponsesWebsocketClient {
             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
         self.auth.add_auth_headers(&mut headers);
 
-        let (stream, _status, server_reasoning_included, models_etag, server_model) =
-            connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
+        let (
+            stream,
+            _status,
+            server_reasoning_included,
+            models_etag,
+            server_model,
+            handshake_rate_limits,
+        ) = connect_websocket(ws_url, headers, http_client_factory, turn_state.clone()).await?;
         Ok(ResponsesWebsocketConnection::new(
             stream,
             self.provider.stream_idle_timeout,
             server_reasoning_included,
             models_etag,
             server_model,
+            handshake_rate_limits,
             telemetry,
         ))
     }
@@ -428,23 +459,23 @@ impl ResponsesWebsocketClient {
             merge_request_headers(&self.provider.headers, extra_headers, default_headers);
         self.auth.add_auth_headers(&mut headers);
 
-        let (mut stream, status, reasoning_included, models_etag, server_model) =
-            connect_websocket(
-                ws_url.clone(),
-                headers,
-                http_client_factory,
-                /*turn_state*/ None,
-            )
-            .await?;
-        let immediate_close = tokio::time::timeout(immediate_close_timeout, stream.next())
-            .await
-            .ok()
-            .flatten()
-            .transpose()
-            .map_err(|err| {
-                ApiError::Stream(format!("failed to read websocket probe event: {err}"))
-            })?
-            .and_then(immediate_close_from_message);
+        let (
+            mut stream,
+            status,
+            reasoning_included,
+            models_etag,
+            server_model,
+            _handshake_rate_limits,
+        ) = connect_websocket(
+            ws_url.clone(),
+            headers,
+            http_client_factory,
+            /*turn_state*/ None,
+        )
+        .await?;
+        let immediate_close = immediate_close_from_probe_read(
+            tokio::time::timeout(immediate_close_timeout, stream.next()).await,
+        )?;
 
         Ok(ResponsesWebsocketProbe {
             url: ws_url.to_string(),
@@ -457,17 +488,38 @@ impl ResponsesWebsocketClient {
     }
 }
 
-fn immediate_close_from_message(message: Message) -> Option<ResponsesWebsocketClose> {
-    let Message::Close(frame) = message else {
-        return None;
-    };
-    frame.map(close_frame_to_probe)
+fn immediate_close_from_probe_read(
+    read: Result<Option<Result<Message, WsError>>, tokio::time::error::Elapsed>,
+) -> Result<Option<ResponsesWebsocketClose>, ApiError> {
+    match read {
+        Err(_) => Ok(None),
+        Ok(None) => Ok(Some(close_details_to_probe(
+            false,
+            websocket_close_details(None),
+        ))),
+        Ok(Some(Ok(Message::Close(frame)))) => {
+            let details = websocket_close_details(frame);
+            Ok(Some(close_details_to_probe(true, details)))
+        }
+        Ok(Some(Ok(_))) => Ok(None),
+        Ok(Some(Err(err))) if websocket_error_is_disconnect(&err) => Ok(Some(
+            close_details_to_probe(false, websocket_close_details(None)),
+        )),
+        Ok(Some(Err(err))) => Err(ApiError::Stream(format!(
+            "failed to read websocket probe event: {err}"
+        ))),
+    }
 }
 
-fn close_frame_to_probe(frame: CloseFrame) -> ResponsesWebsocketClose {
+fn close_details_to_probe(
+    frame_received: bool,
+    details: WebsocketCloseDetails,
+) -> ResponsesWebsocketClose {
     ResponsesWebsocketClose {
-        code: frame.code.to_string(),
-        reason: frame.reason.to_string(),
+        frame_received,
+        code: details.code,
+        reason: details.reason,
+        reason_redacted: details.reason_redacted,
     }
 }
 
@@ -491,7 +543,17 @@ async fn connect_websocket(
     headers: HeaderMap,
     http_client_factory: &HttpClientFactory,
     turn_state: Option<Arc<OnceLock<String>>>,
-) -> Result<(WsStream, StatusCode, bool, Option<String>, Option<String>), ApiError> {
+) -> Result<
+    (
+        WsStream,
+        StatusCode,
+        bool,
+        Option<String>,
+        Option<String>,
+        Vec<RateLimitSnapshot>,
+    ),
+    ApiError,
+> {
     info!("connecting to websocket: {url}");
 
     let mut request = url
@@ -529,6 +591,7 @@ async fn connect_websocket(
         .get(OPENAI_MODEL_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
+    let rate_limits = parse_all_rate_limits(response.headers());
     if let Some(turn_state) = turn_state
         && let Some(header_value) = response
             .headers()
@@ -543,6 +606,7 @@ async fn connect_websocket(
         reasoning_included,
         models_etag,
         server_model,
+        rate_limits,
     ))
 }
 
@@ -702,13 +766,18 @@ async fn run_websocket_response_stream(
         }
         let message = match response {
             Ok(Some(Ok(msg))) => msg,
-            Ok(Some(Err(err))) => {
-                return Err(ApiError::Stream(err.to_string()));
+            Ok(Some(Err(error))) if websocket_error_is_disconnect(&error) => {
+                return Err(ApiError::WebsocketClosed(Box::new(
+                    websocket_close_details(None),
+                )));
+            }
+            Ok(Some(Err(error))) => {
+                return Err(ApiError::Stream(error.to_string()));
             }
             Ok(None) => {
-                return Err(ApiError::Stream(
-                    "stream closed before response.completed".into(),
-                ));
+                return Err(ApiError::WebsocketClosed(Box::new(
+                    websocket_close_details(None),
+                )));
             }
             Err(err) => {
                 return Err(err);
@@ -806,10 +875,10 @@ async fn run_websocket_response_stream(
             Message::Binary(_) => {
                 return Err(ApiError::Stream("unexpected binary websocket event".into()));
             }
-            Message::Close(_) => {
-                return Err(ApiError::Stream(
-                    "websocket closed by server before response.completed".into(),
-                ));
+            Message::Close(frame) => {
+                return Err(ApiError::WebsocketClosed(Box::new(
+                    websocket_close_details(frame),
+                )));
             }
             Message::Frame(_) => {}
             Message::Ping(_) | Message::Pong(_) => {}
@@ -848,6 +917,41 @@ fn emit_responses_websocket_timing_event(
     );
 }
 
+const MAX_WEBSOCKET_CLOSE_REASON_BYTES: usize = 160;
+
+fn websocket_close_details(frame: Option<CloseFrame>) -> WebsocketCloseDetails {
+    let Some(frame) = frame else {
+        return WebsocketCloseDetails {
+            code: None,
+            reason: None,
+            reason_redacted: false,
+        };
+    };
+    let reason = frame.reason.trim();
+    let normalized = reason.to_ascii_lowercase();
+    let reason_is_allowlisted = [
+        "going away",
+        "maintenance",
+        "restart",
+        "server restart",
+        "service restart",
+        "drain",
+    ]
+    .contains(&normalized.as_str());
+    let (reason, reason_redacted) = if reason.is_empty() {
+        (None, false)
+    } else if !reason_is_allowlisted || reason.len() > MAX_WEBSOCKET_CLOSE_REASON_BYTES {
+        (Some("[redacted]".to_string()), true)
+    } else {
+        (Some(reason.to_string()), false)
+    };
+    WebsocketCloseDetails {
+        code: Some(u16::from(frame.code)),
+        reason,
+        reason_redacted,
+    }
+}
+
 fn safety_buffering_for_event(
     event: &ResponsesStreamEvent,
     treatment: &mut SafetyBufferingTreatment,
@@ -861,23 +965,82 @@ fn safety_buffering_for_event(
     event.safety_buffering(treatment)
 }
 
+async fn take_handshake_rate_limits(
+    pending: &Mutex<Option<Vec<RateLimitSnapshot>>>,
+    generate: Option<bool>,
+) -> Vec<RateLimitSnapshot> {
+    if generate == Some(false) {
+        return Vec::new();
+    }
+    pending.lock().await.take().unwrap_or_default()
+}
+
+fn websocket_error_is_disconnect(error: &WsError) -> bool {
+    match error {
+        WsError::AlreadyClosed
+        | WsError::ConnectionClosed
+        | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        WsError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::UnexpectedEof
+        ),
+        _ => false,
+    }
+}
+
+const MAX_PENDING_WEBSOCKET_MESSAGES_TO_INSPECT: usize = 32;
+
+fn pending_websocket_close(ws_stream: &mut WsStream) -> Option<ResponsesWebsocketClose> {
+    for _ in 0..MAX_PENDING_WEBSOCKET_MESSAGES_TO_INSPECT {
+        match ws_stream.rx_message.try_recv() {
+            Ok(Ok(Message::Close(frame))) => {
+                return Some(close_details_to_probe(true, websocket_close_details(frame)));
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    None
+}
+
 async fn send_websocket_request(
-    ws_stream: &WsStream,
+    ws_stream: &mut WsStream,
     request_text: String,
     idle_timeout: Duration,
     telemetry: Option<&Arc<dyn WebsocketTelemetry>>,
     connection_reused: bool,
 ) -> Result<(), ApiError> {
     let request_start = Instant::now();
-    let result = tokio::time::timeout(
+    let result = match tokio::time::timeout(
         idle_timeout,
         ws_stream.send(Message::Text(request_text.into())),
     )
     .await
-    .map_err(|_| ApiError::Stream("idle timeout sending websocket request".into()))
-    .and_then(|result| {
-        result.map_err(|err| ApiError::Stream(format!("failed to send websocket request: {err}")))
-    });
+    {
+        Err(_) => Err(ApiError::Stream(
+            "idle timeout sending websocket request".into(),
+        )),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            let pending_close = pending_websocket_close(ws_stream);
+            if websocket_error_is_disconnect(&error) || pending_close.is_some() {
+                let details = pending_close
+                    .map(|close| WebsocketCloseDetails {
+                        code: close.code,
+                        reason: close.reason,
+                        reason_redacted: close.reason_redacted,
+                    })
+                    .unwrap_or_else(|| websocket_close_details(None));
+                Err(ApiError::WebsocketClosed(Box::new(details)))
+            } else {
+                Err(ApiError::Stream(error.to_string()))
+            }
+        }
+    };
 
     if let Some(t) = telemetry.as_ref() {
         t.on_ws_request(
@@ -911,6 +1074,379 @@ mod tests {
     use serde_json::value::to_raw_value;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    fn test_websocket_request() -> ResponsesWsRequest {
+        ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
+            model: "gpt-test".to_string(),
+            instructions: "test".to_string(),
+            previous_response_id: None,
+            input: Vec::new(),
+            tools: None,
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream: true,
+            stream_options: None,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: None,
+            text: None,
+            generate: Some(true),
+            client_metadata: None,
+        })
+    }
+
+    fn ws_stream_with_messages(messages: Vec<Result<Message, WsError>>) -> WsStream {
+        let (tx_command, mut rx_command) = mpsc::channel(1);
+        let (tx_message, rx_message) = mpsc::unbounded_channel();
+        for message in messages {
+            tx_message.send(message).expect("queue websocket message");
+        }
+        drop(tx_message);
+        let pump_task = tokio::spawn(async move {
+            while let Some(WsCommand::Send { tx_result, .. }) = rx_command.recv().await {
+                let _ = tx_result.send(Ok(()));
+            }
+        });
+        WsStream {
+            tx_command,
+            rx_message,
+            pump_task,
+        }
+    }
+
+    #[tokio::test]
+    async fn response_stream_eof_is_websocket_closed() {
+        let mut ws_stream = ws_stream_with_messages(Vec::new());
+        let (tx_event, _rx_event) = mpsc::channel(1);
+
+        let error = run_websocket_response_stream(
+            &mut ws_stream,
+            tx_event,
+            "{}".to_string(),
+            Duration::from_secs(1),
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect_err("EOF before response.completed must fail");
+
+        let ApiError::WebsocketClosed(details) = error else {
+            panic!("expected typed websocket close, got {error:?}");
+        };
+        assert_eq!(*details, websocket_close_details(None));
+    }
+
+    #[tokio::test]
+    async fn response_stream_preserves_non_close_websocket_error() {
+        let protocol_error = ProtocolError::InvalidOpcode(0xff);
+        let mut ws_stream = ws_stream_with_messages(vec![Err(WsError::Protocol(protocol_error))]);
+        let (tx_event, _rx_event) = mpsc::channel(1);
+
+        let error = run_websocket_response_stream(
+            &mut ws_stream,
+            tx_event,
+            "{}".to_string(),
+            Duration::from_secs(1),
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect_err("non-close websocket error must fail");
+
+        assert!(matches!(error, ApiError::Stream(message) if message.contains("opcode")));
+    }
+
+    #[tokio::test]
+    async fn closed_connection_stream_request_returns_typed_close() {
+        let connection = ResponsesWebsocketConnection {
+            stream: Arc::new(Mutex::new(None)),
+            idle_timeout: Duration::from_secs(1),
+            server_reasoning_included: false,
+            models_etag: None,
+            handshake_rate_limits: Mutex::new(None),
+            server_model: None,
+            telemetry: None,
+        };
+
+        let mut response_stream = connection
+            .stream_request(test_websocket_request(), false, None)
+            .await
+            .expect("stream request returns an asynchronous response stream");
+        let error = response_stream
+            .next()
+            .await
+            .expect("closed connection emits a terminal error")
+            .expect_err("closed connection cannot send a request");
+
+        let ApiError::WebsocketClosed(details) = error else {
+            panic!("expected typed websocket close, got {error:?}");
+        };
+        assert_eq!(*details, websocket_close_details(None));
+    }
+
+    #[tokio::test]
+    async fn websocket_probe_grace_timeout_is_success_without_close() {
+        let read = tokio::time::timeout(
+            Duration::ZERO,
+            futures::future::pending::<Option<Result<Message, WsError>>>(),
+        )
+        .await;
+
+        let immediate_close =
+            immediate_close_from_probe_read(read).expect("grace timeout must not fail probe");
+
+        assert_eq!(immediate_close, None);
+    }
+
+    #[test]
+    fn websocket_probe_eof_is_an_explicit_immediate_close() {
+        let close = immediate_close_from_probe_read(Ok(None))
+            .expect("EOF is a legal probe result")
+            .expect("EOF must be reported as an immediate close");
+
+        assert!(!close.frame_received);
+        assert_eq!(close.code, None);
+        assert_eq!(close.reason, None);
+        assert!(!close.reason_redacted);
+    }
+
+    #[test]
+    fn websocket_probe_disconnect_error_is_an_explicit_immediate_close() {
+        let close = immediate_close_from_probe_read(Ok(Some(Err(WsError::ConnectionClosed))))
+            .expect("connection close is a legal probe result")
+            .expect("connection close must be reported");
+
+        assert!(!close.frame_received);
+        assert_eq!(close.code, None);
+        assert_eq!(close.reason, None);
+        assert!(!close.reason_redacted);
+    }
+
+    #[test]
+    fn websocket_probe_preserves_non_close_io_error() {
+        let error = immediate_close_from_probe_read(Ok(Some(Err(WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied"),
+        )))))
+        .expect_err("non-close I/O error must fail the probe");
+
+        assert!(
+            matches!(error, ApiError::Stream(message) if message.contains("permission denied"))
+        );
+    }
+
+    #[test]
+    fn websocket_probe_frameless_close_is_an_explicit_immediate_close() {
+        let close = immediate_close_from_probe_read(Ok(Some(Ok(Message::Close(None)))))
+            .expect("frameless close is a legal probe result")
+            .expect("frameless close must be reported as an immediate close");
+
+        assert!(close.frame_received);
+        assert_eq!(close.code, None);
+        assert_eq!(close.reason, None);
+        assert!(!close.reason_redacted);
+    }
+
+    #[test]
+    fn websocket_probe_close_reasons_use_public_diagnostic_policy() {
+        let safe =
+            immediate_close_from_probe_read(Ok(Some(Ok(Message::Close(Some(CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
+                reason: "maintenance".into(),
+            }))))))
+            .expect("safe close is a legal probe result")
+            .expect("close frame must be reported");
+        assert_eq!(safe.reason.as_deref(), Some("maintenance"));
+        assert!(!safe.reason_redacted);
+
+        let raw_sensitive = "bearer sk-proj-sensitive-probe-value";
+        let sensitive =
+            immediate_close_from_probe_read(Ok(Some(Ok(Message::Close(Some(CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                reason: raw_sensitive.into(),
+            }))))))
+            .expect("sensitive close is a legal probe result")
+            .expect("close frame must be reported");
+        assert_eq!(sensitive.reason.as_deref(), Some("[redacted]"));
+        assert!(sensitive.reason_redacted);
+        assert!(
+            !format!("{sensitive:?}").contains(raw_sensitive),
+            "public probe result must not retain the raw reason"
+        );
+
+        let raw_long = "x".repeat(MAX_WEBSOCKET_CLOSE_REASON_BYTES + 1);
+        let long =
+            immediate_close_from_probe_read(Ok(Some(Ok(Message::Close(Some(CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
+                reason: raw_long.clone().into(),
+            }))))))
+            .expect("long close is a legal probe result")
+            .expect("close frame must be reported");
+        let public_reason = long.reason.as_deref().expect("bounded public reason");
+        assert!(public_reason.len() <= MAX_WEBSOCKET_CLOSE_REASON_BYTES);
+        assert!(!public_reason.contains(&raw_long));
+        assert!(long.reason_redacted);
+    }
+
+    #[test]
+    fn websocket_close_details_are_bounded_and_redacted() {
+        let missing = websocket_close_details(None);
+        assert_eq!(missing.code, None);
+        assert_eq!(missing.reason, None);
+        assert!(!missing.reason_redacted);
+
+        let safe = websocket_close_details(Some(CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(4001),
+            reason: "maintenance".into(),
+        }));
+        assert_eq!(safe.code, Some(4001));
+        assert_eq!(safe.reason.as_deref(), Some("maintenance"));
+        assert!(!safe.reason_redacted);
+
+        let sensitive = websocket_close_details(Some(CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+            reason: "contact operator@example.com with bearer secret".into(),
+        }));
+        assert_eq!(sensitive.reason.as_deref(), Some("[redacted]"));
+        assert!(sensitive.reason_redacted);
+
+        let opaque_secret = websocket_close_details(Some(CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+            reason: "sk-proj-abc123".into(),
+        }));
+        assert_eq!(opaque_secret.reason.as_deref(), Some("[redacted]"));
+        assert!(opaque_secret.reason_redacted);
+
+        let long = websocket_close_details(Some(CloseFrame {
+            code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Away,
+            reason: "x".repeat(MAX_WEBSOCKET_CLOSE_REASON_BYTES + 20).into(),
+        }));
+        assert!(
+            long.reason.as_deref().expect("bounded reason").len()
+                <= MAX_WEBSOCKET_CLOSE_REASON_BYTES
+        );
+    }
+
+    #[test]
+    fn websocket_error_classifier_preserves_non_disconnect_failures() {
+        assert!(websocket_error_is_disconnect(&WsError::ConnectionClosed));
+        assert!(websocket_error_is_disconnect(&WsError::AlreadyClosed));
+        assert!(websocket_error_is_disconnect(&WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "socket EOF")
+        )));
+        assert!(websocket_error_is_disconnect(&WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "connection reset")
+        )));
+        assert!(websocket_error_is_disconnect(&WsError::Protocol(
+            ProtocolError::ResetWithoutClosingHandshake,
+        )));
+        assert!(!websocket_error_is_disconnect(&WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied")
+        )));
+        assert!(!websocket_error_is_disconnect(&WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid data")
+        )));
+        assert!(!websocket_error_is_disconnect(&WsError::Io(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out")
+        )));
+        assert!(!websocket_error_is_disconnect(&WsError::Protocol(
+            ProtocolError::InvalidOpcode(0xff),
+        )));
+    }
+
+    #[tokio::test]
+    async fn websocket_prewarm_preserves_handshake_rate_limits_for_generated_request() {
+        let pending = Mutex::new(Some(Vec::new()));
+
+        assert!(
+            take_handshake_rate_limits(&pending, Some(false))
+                .await
+                .is_empty()
+        );
+        assert!(
+            pending.lock().await.is_some(),
+            "prewarm must not consume pending handshake metadata"
+        );
+        assert!(
+            take_handshake_rate_limits(&pending, Some(true))
+                .await
+                .is_empty()
+        );
+        assert!(
+            pending.lock().await.is_none(),
+            "first generated request consumes pending handshake metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_close_skips_stale_messages() {
+        let (tx_command, _rx_command) = mpsc::channel(1);
+        let (tx_message, rx_message) = mpsc::unbounded_channel::<Result<Message, WsError>>();
+        let pump_task = tokio::spawn(async {});
+        let mut ws_stream = WsStream {
+            tx_command,
+            rx_message,
+            pump_task,
+        };
+        tx_message
+            .send(Ok(Message::Text("stale response".into())))
+            .expect("queue stale response");
+        tx_message
+            .send(Ok(Message::Close(Some(CloseFrame {
+                code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::from(
+                    4001,
+                ),
+                reason: "maintenance".into(),
+            }))))
+            .expect("queue close frame");
+
+        let close = pending_websocket_close(&mut ws_stream).expect("queued close frame");
+        assert!(close.frame_received);
+        assert_eq!(close.code, Some(4001));
+        assert_eq!(close.reason.as_deref(), Some("maintenance"));
+    }
+
+    #[tokio::test]
+    async fn send_error_with_pending_frameless_close_is_typed_close() {
+        let (tx_command, mut rx_command) = mpsc::channel(1);
+        let (tx_message, rx_message) = mpsc::unbounded_channel::<Result<Message, WsError>>();
+        tx_message
+            .send(Ok(Message::Close(None)))
+            .expect("queue frameless close");
+        let pump_task = tokio::spawn(async move {
+            if let Some(WsCommand::Send { tx_result, .. }) = rx_command.recv().await {
+                let _ = tx_result.send(Err(WsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "permission denied",
+                ))));
+            }
+        });
+        let mut ws_stream = WsStream {
+            tx_command,
+            rx_message,
+            pump_task,
+        };
+
+        let error = send_websocket_request(
+            &mut ws_stream,
+            "{}".to_string(),
+            Duration::from_secs(1),
+            None,
+            false,
+        )
+        .await
+        .expect_err("queued close must type the send failure");
+
+        let ApiError::WebsocketClosed(details) = error else {
+            panic!("expected typed websocket close, got {error:?}");
+        };
+        assert_eq!(details.code, None);
+        assert_eq!(details.reason, None);
+        assert!(!details.reason_redacted);
+    }
 
     #[test]
     fn direct_serialization_preserves_websocket_request_payload() {

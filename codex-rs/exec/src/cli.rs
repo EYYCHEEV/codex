@@ -47,6 +47,20 @@ pub struct Cli {
     #[arg(long = "output-schema", value_name = "FILE", global = true)]
     pub output_schema: Option<PathBuf>,
 
+    /// Run a read-only WebSocket diagnostic turn with retries and HTTPS fallback disabled.
+    ///
+    /// If the WebSocket closes before `response.completed`, the session rollout records a bounded
+    /// typed envelope named `responses_websocket_close_diagnostic`. Successful turns add none.
+    #[arg(
+        long = "websocket-diagnostic",
+        default_value_t = false,
+        conflicts_with_all = [
+            "dangerously_bypass_approvals_and_sandbox",
+            "ephemeral"
+        ]
+    )]
+    pub websocket_diagnostic: bool,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 

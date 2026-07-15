@@ -219,6 +219,15 @@ struct ExecRunArgs {
     stderr_with_ansi: bool,
 }
 
+fn configure_websocket_diagnostic(config: &mut Config) -> anyhow::Result<()> {
+    if !config.model_provider.supports_websockets {
+        anyhow::bail!("--websocket-diagnostic requires a model provider with WebSocket support");
+    }
+    config.model_provider.request_max_retries = Some(0);
+    config.model_provider.stream_max_retries = Some(0);
+    Ok(())
+}
+
 fn exec_root_span() -> tracing::Span {
     info_span!(
         "codex.exec",
@@ -250,6 +259,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         ephemeral,
         ignore_user_config,
         ignore_rules,
+        websocket_diagnostic,
         color,
         last_message_file,
         json: json_mode,
@@ -286,7 +296,9 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         .with_writer(std::io::stderr)
         .with_filter(exec_stderr_env_filter());
 
-    let sandbox_mode = if dangerously_bypass_approvals_and_sandbox {
+    let sandbox_mode = if websocket_diagnostic {
+        Some(SandboxMode::ReadOnly)
+    } else if dangerously_bypass_approvals_and_sandbox {
         Some(SandboxMode::DangerFullAccess)
     } else {
         sandbox_mode_cli_arg.map(Into::<SandboxMode>::into)
@@ -434,12 +446,15 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
             .cloud_config_bundle(cloud_config_bundle.clone())
             .build()
     };
-    let config = build_exec_config(
+    let mut config = build_exec_config(
         overrides,
         dangerously_bypass_approvals_and_sandbox,
         build_config,
     )
     .await?;
+    if websocket_diagnostic {
+        configure_websocket_diagnostic(&mut config)?;
+    }
     let resume_approvals_reviewer_override = cli_kv_overrides
         .iter()
         .any(|(key, _)| key == "approvals_reviewer")

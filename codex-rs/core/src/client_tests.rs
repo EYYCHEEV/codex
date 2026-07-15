@@ -1,5 +1,6 @@
 use super::AuthRequestTelemetryContext;
 use super::CompactConversationRequestSettings;
+use super::MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
@@ -9,12 +10,15 @@ use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use super::bounded_websocket_diagnostic_text;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
+use base64::Engine;
+use chrono::Utc;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::ResponseEvent;
@@ -25,7 +29,12 @@ use codex_login::AuthCredentialsStoreMode;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptBlockKindView;
+use codex_login::ManagedChatgptFailure;
+use codex_login::ManagedChatgptOauthCredentials;
+use codex_login::TokenData;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_login::token_data::IdTokenInfo;
 use codex_model_provider::BearerAuthProvider;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
@@ -36,12 +45,18 @@ use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::UnexpectedResponseError;
+use codex_protocol::error::UsageLimitReachedError;
+use codex_protocol::error::WebsocketCloseDetails;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::InternalSessionSource;
+use codex_protocol::protocol::RateLimitReachedType;
+use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_rollout_trace::CompactionTraceContext;
@@ -84,6 +99,27 @@ use wiremock::matchers::path;
 const TEST_CHATGPT_ID_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7ImNoYXRncHRfdXNlcl9pZCI6InVzZXItMTIzNDUiLCJ1c2VyX2lkIjoidXNlci0xMjM0NSIsImNoYXRncHRfcGxhbl90eXBlIjoicHJvIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.c2ln";
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+fn managed_id_token(email: &str, account_id: &str) -> String {
+    let header = json!({"alg": "none", "typ": "JWT"});
+    let payload = json!({
+        "email": email,
+        "email_verified": true,
+        "https://api.openai.com/auth": {
+            "chatgpt_user_id": format!("user-{account_id}"),
+            "user_id": format!("user-{account_id}"),
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": account_id,
+        },
+    });
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    format!(
+        "{}.{}.{}",
+        encode(&serde_json::to_vec(&header).expect("serialize JWT header")),
+        encode(&serde_json::to_vec(&payload).expect("serialize JWT payload")),
+        encode(b"sig"),
+    )
+}
+
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     test_model_client_with_thread_id(ThreadId::new(), session_source)
 }
@@ -108,6 +144,223 @@ fn test_model_client_with_thread_id(
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     )
+}
+
+async fn managed_accounts_model_client(
+    codex_home: &TempDir,
+    base_url: &str,
+    accounts: &[(&str, &str)],
+) -> anyhow::Result<(ModelClient, Arc<AuthManager>)> {
+    let auth_manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        AuthKeyringBackendKind::Direct,
+        /*auth_route_config*/ None,
+    )
+    .await;
+    for &(email, account_id) in accounts {
+        auth_manager
+            .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
+                tokens: TokenData {
+                    id_token: IdTokenInfo {
+                        email: Some(email.to_string()),
+                        chatgpt_account_id: Some(account_id.to_string()),
+                        raw_jwt: managed_id_token(email, account_id),
+                        ..Default::default()
+                    },
+                    access_token: format!("access-{account_id}"),
+                    refresh_token: format!("refresh-{account_id}"),
+                    account_id: Some(account_id.to_string()),
+                },
+                last_refresh: Utc::now(),
+                oauth_api_key: None,
+            })
+            .await?;
+    }
+    let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    provider.base_url = Some(format!("{base_url}/v1"));
+    provider.supports_websockets = false;
+    let client = ModelClient::new(
+        Some(Arc::clone(&auth_manager)),
+        AgentIdentityAuthPolicy::JwtOnly,
+        ThreadId::new(),
+        provider,
+        SessionSource::Cli,
+        "test_originator".to_string(),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*item_ids_enabled*/ false,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    Ok((client, auth_manager))
+}
+
+async fn two_account_model_client(
+    codex_home: &TempDir,
+    base_url: &str,
+) -> anyhow::Result<(ModelClient, Arc<AuthManager>)> {
+    managed_accounts_model_client(
+        codex_home,
+        base_url,
+        &[
+            ("a@example.com", "account-a"),
+            ("b@example.com", "account-b"),
+        ],
+    )
+    .await
+}
+
+#[test]
+fn websocket_diagnostic_text_is_utf8_safe_and_bounded() {
+    let value = "模型".repeat(100);
+    let bounded = bounded_websocket_diagnostic_text(&value);
+    assert!(bounded.len() <= MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES);
+    assert!(bounded.ends_with("..."));
+}
+
+#[tokio::test]
+async fn websocket_close_diagnostic_captures_single_and_pooled_account_snapshots()
+-> anyhow::Result<()> {
+    let account_sets: [&[(&str, &str)]; 2] = [
+        &[("single@example.com", "account-single")],
+        &[
+            ("a@example.com", "account-a"),
+            ("b@example.com", "account-b"),
+        ],
+    ];
+
+    for accounts in account_sets {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/responses"))
+            .respond_with(
+                ResponseTemplate::new(/*status*/ 200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n",
+                    )),
+            )
+            .expect(/*requests*/ 1)
+            .mount(&server)
+            .await;
+
+        let codex_home = TempDir::new()?;
+        let (client, _auth_manager) =
+            managed_accounts_model_client(&codex_home, &server.uri(), accounts).await?;
+        let mut client_session = client.new_session();
+        let prompt = Prompt {
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hello".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }],
+            base_instructions: BaseInstructions {
+                text: "base instructions".to_string(),
+            },
+            ..Default::default()
+        };
+        let responses_metadata = test_responses_metadata_for_client(
+            &client,
+            Some("turn-1"),
+            format!("{}:0", client.state.thread_id),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let model_info = test_model_info();
+        let telemetry = test_session_telemetry();
+        let mut stream = client_session
+            .stream(
+                &prompt,
+                &model_info,
+                &telemetry,
+                /*effort*/ None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                /*service_tier*/ None,
+                &responses_metadata,
+                &InferenceTraceContext::disabled(),
+            )
+            .await?;
+        let mut completed = false;
+        while let Some(event) = stream.next().await {
+            if matches!(event?, ResponseEvent::Completed { .. }) {
+                completed = true;
+                break;
+            }
+        }
+        assert!(completed);
+
+        let diagnostic = client_session
+            .websocket_close_diagnostic_context(
+                &CodexErr::WebsocketClosed(Box::new(WebsocketCloseDetails {
+                    code: Some(4001),
+                    reason: Some("maintenance".to_string()),
+                    reason_redacted: false,
+                })),
+                "turn-1",
+                responses_metadata.session_id.as_str(),
+                model_info.slug.as_str(),
+                /*output_committed*/ false,
+            )
+            .expect("typed websocket close diagnostic")
+            .finish(
+                /*attempt_number*/ 1,
+                /*max_retries*/ 1,
+                ResponsesWebsocketCloseRecovery::ReconnectWebsocket,
+            );
+        assert_eq!(diagnostic.close_code, Some(4001));
+        assert_eq!(diagnostic.thread_id, client.state.thread_id.to_string());
+        assert_eq!(diagnostic.turn_id, "turn-1");
+        assert_eq!(diagnostic.session_id, responses_metadata.session_id);
+        assert_eq!(diagnostic.model, model_info.slug);
+        assert!(!diagnostic.output_committed);
+        assert_eq!(diagnostic.attempt_number, 1);
+        assert_eq!(diagnostic.max_retries, 1);
+        assert_eq!(diagnostic.close_reason.as_deref(), Some("maintenance"));
+        assert!(!diagnostic.connection_reused);
+        assert_eq!(diagnostic.binding_matched, Some(true));
+        assert_eq!(
+            diagnostic.recovery_decision,
+            ResponsesWebsocketCloseRecovery::ReconnectWebsocket
+        );
+
+        let account_fingerprint = diagnostic
+            .account_fingerprint
+            .as_deref()
+            .expect("managed account fingerprint");
+        assert!(account_fingerprint.starts_with("acct-"));
+        assert!(accounts.iter().all(|(email, account_id)| {
+            !account_fingerprint.contains(email) && !account_fingerprint.contains(account_id)
+        }));
+        let serialized = serde_json::to_string(&diagnostic)?;
+        assert!(accounts.iter().all(|(email, account_id)| {
+            !serialized.contains(email) && !serialized.contains(account_id)
+        }));
+        assert!(diagnostic.credential_revision.is_some());
+        assert!(diagnostic.account_state_revision.is_some());
+        assert!(diagnostic.pool_revision.is_some());
+        assert!(diagnostic.selection_revision.is_some());
+        assert!(diagnostic.route_generation.is_some());
+        assert!(
+            diagnostic
+                .request_binding_fingerprint
+                .as_deref()
+                .is_some_and(|fingerprint| fingerprint.starts_with("bind-"))
+        );
+    }
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -153,6 +406,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     );
+    let mut client_session = client.new_session();
     let prompt = Prompt {
         input: vec![ResponseItem::Message {
             id: None,
@@ -180,7 +434,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         .compact_conversation_history(
             &prompt,
             &test_model_info(),
-            /*turn_state*/ None,
+            &mut client_session,
             CompactConversationRequestSettings {
                 effort: None,
                 summary: codex_protocol::config_types::ReasoningSummary::None,
@@ -189,10 +443,11 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
             &test_session_telemetry(),
             &CompactionTraceContext::disabled(),
             &responses_metadata,
+            None,
         )
         .await?;
 
-    assert!(output.is_empty());
+    assert!(output.output.is_empty());
     assert_eq!(registration_count.load(Ordering::SeqCst), 3);
     let requests = server
         .received_requests()
@@ -216,6 +471,263 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
             .and_then(|value| value.to_str().ok()),
         Some("account-123")
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn compact_rotates_to_a_sibling_after_uncommitted_account_quota() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let attempt_count = Arc::new(AtomicUsize::new(0));
+    let response_attempt_count = Arc::clone(&attempt_count);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses/compact"))
+        .respond_with(move |_request: &wiremock::Request| {
+            if response_attempt_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "plan_type": "pro"
+                    }
+                }))
+            } else {
+                ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+                    "output": []
+                }))
+            }
+        })
+        .expect(/*requests*/ 2)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    let (client, auth_manager) = two_account_model_client(&codex_home, &server.uri()).await?;
+    let mut client_session = client.new_session();
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "please compact".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+        },
+        ..Default::default()
+    };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+
+    let output = client
+        .compact_conversation_history(
+            &prompt,
+            &test_model_info(),
+            &mut client_session,
+            CompactConversationRequestSettings {
+                effort: None,
+                summary: codex_protocol::config_types::ReasoningSummary::None,
+                service_tier: None,
+            },
+            &test_session_telemetry(),
+            &CompactionTraceContext::disabled(),
+            &responses_metadata,
+            None,
+        )
+        .await?;
+
+    assert!(output.output.is_empty());
+    let requests = server
+        .received_requests()
+        .await
+        .expect("server should record requests");
+    let account_ids: Vec<_> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/v1/responses/compact")
+        .map(|request| {
+            request
+                .headers
+                .get("ChatGPT-Account-ID")
+                .expect("managed account header")
+                .to_str()
+                .expect("account header text")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(account_ids.len(), 2);
+    assert_ne!(account_ids[0], account_ids[1]);
+    assert_eq!(
+        auth_manager
+            .managed_chatgpt_accounts()?
+            .iter()
+            .filter(|account| account.block_kind == Some(ManagedChatgptBlockKindView::Quota))
+            .count(),
+        1
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn response_stream_attempt_rotates_before_replay_after_account_quota() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let attempt_count = Arc::new(AtomicUsize::new(0));
+    let response_attempt_count = Arc::clone(&attempt_count);
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |_request: &wiremock::Request| {
+            if response_attempt_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(/*status*/ 429).set_body_json(json!({
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "plan_type": "pro"
+                    }
+                }))
+            } else {
+                ResponseTemplate::new(/*status*/ 200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(concat!(
+                        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n",
+                    ))
+            }
+        })
+        .expect(/*requests*/ 2)
+        .mount(&server)
+        .await;
+
+    let codex_home = TempDir::new()?;
+    let (client, auth_manager) = two_account_model_client(&codex_home, &server.uri()).await?;
+    let mut client_session = client.new_session();
+    let prompt = Prompt {
+        input: vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }],
+        base_instructions: BaseInstructions {
+            text: "base instructions".to_string(),
+        },
+        ..Default::default()
+    };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let model_info = test_model_info();
+    let telemetry = test_session_telemetry();
+    let first = client_session
+        .stream(
+            &prompt,
+            &model_info,
+            &telemetry,
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await;
+    let first_error = match first {
+        Ok(_) => panic!("first account should be quota blocked"),
+        Err(error) => error,
+    };
+    assert!(matches!(first_error, CodexErr::UsageLimitReached(_)));
+    assert!(
+        client_session
+            .recover_last_managed_attempt(&first_error, /*committed*/ false)
+            .await
+    );
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &model_info,
+            &telemetry,
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+            &InferenceTraceContext::disabled(),
+        )
+        .await?;
+    let first_selection = client_session
+        .take_managed_selection_update()
+        .expect("first managed request setup should retain its selection signal");
+    assert_eq!(
+        first_selection.session_id.as_deref(),
+        Some(responses_metadata.session_id.as_str())
+    );
+    assert_eq!(
+        first_selection.model.as_deref(),
+        Some(model_info.slug.as_str())
+    );
+    let rotated_selection = client_session
+        .take_managed_selection_update()
+        .expect("managed failover should publish the rotated selection");
+    assert_ne!(
+        rotated_selection.selected_account_id,
+        first_selection.selected_account_id
+    );
+    assert!(
+        rotated_selection.selection_revision > first_selection.selection_revision,
+        "rotation must advance the scoped selection revision"
+    );
+    assert_eq!(rotated_selection.session_id, first_selection.session_id);
+    assert_eq!(rotated_selection.model, first_selection.model);
+    assert!(
+        client_session.take_managed_selection_update().is_none(),
+        "first-pin and rotation signals should each be emitted exactly once"
+    );
+    let mut completed = false;
+    while let Some(event) = stream.next().await {
+        if matches!(event?, ResponseEvent::Completed { .. }) {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed);
+    assert_eq!(
+        auth_manager
+            .managed_chatgpt_accounts()?
+            .iter()
+            .filter(|account| account.block_kind == Some(ManagedChatgptBlockKindView::Quota))
+            .count(),
+        1
+    );
+    let requests = server
+        .received_requests()
+        .await
+        .expect("server should record requests");
+    let account_ids: Vec<_> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/v1/responses")
+        .map(|request| {
+            request
+                .headers
+                .get("ChatGPT-Account-ID")
+                .expect("managed account header")
+                .to_str()
+                .expect("account header text")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(account_ids.len(), 2);
+    assert_ne!(account_ids[0], account_ids[1]);
 
     Ok(())
 }
@@ -887,4 +1399,46 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
         None,
     );
     assert_eq!(attestation_calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn managed_account_failure_classification_is_narrow() {
+    let unauthorized = CodexErr::UnexpectedStatus(UnexpectedResponseError {
+        status: reqwest::StatusCode::UNAUTHORIZED,
+        body: String::new(),
+        user_message: None,
+        url: None,
+        cf_ray: None,
+        request_id: None,
+        identity_authorization_error: None,
+        identity_error_code: None,
+    });
+    assert_eq!(
+        super::managed_chatgpt_failure(&unauthorized),
+        Some(ManagedChatgptFailure::AuthInvalid)
+    );
+
+    let generic_quota = CodexErr::UsageLimitReached(UsageLimitReachedError {
+        plan_type: None,
+        resets_at: None,
+        rate_limits: None,
+        promo_message: None,
+        rate_limit_reached_type: Some(RateLimitReachedType::RateLimitReached),
+    });
+    assert_eq!(
+        super::managed_chatgpt_failure(&generic_quota),
+        Some(ManagedChatgptFailure::Quota { reset_at: None })
+    );
+
+    let workspace_quota = CodexErr::UsageLimitReached(UsageLimitReachedError {
+        plan_type: None,
+        resets_at: None,
+        rate_limits: None,
+        promo_message: None,
+        rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
+    });
+    assert_eq!(
+        super::managed_chatgpt_failure(&workspace_quota),
+        Some(ManagedChatgptFailure::WorkspaceQuota { reset_at: None })
+    );
 }

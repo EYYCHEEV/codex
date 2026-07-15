@@ -505,6 +505,7 @@ fn append_legacy_pre_tool_use_handlers(
             },
             timeout_sec: hook.timeout_sec.max(1),
             status_message: None,
+            additional_context_limit: Default::default(),
             source_path: source_path.clone(),
             source,
             display_order: *display_order,

@@ -41,6 +41,9 @@ use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::ListAccountsParams;
+use codex_app_server_protocol::ListAccountsResponse;
+use codex_app_server_protocol::LogoutAccountParams;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
@@ -258,6 +261,80 @@ pub(crate) struct AppServerBootstrap {
     pub(crate) available_models: Vec<ModelPreset>,
 }
 
+struct BootstrapAccountSummary {
+    account_email: Option<String>,
+    auth_mode: Option<TelemetryAuthMode>,
+    status_account_display: Option<StatusAccountDisplay>,
+    plan_type: Option<codex_protocol::account::PlanType>,
+    feedback_audience: FeedbackAudience,
+    has_chatgpt_account: bool,
+}
+
+fn should_list_managed_accounts(account: &GetAccountResponse) -> bool {
+    matches!(account.account, Some(Account::Chatgpt { .. }))
+        || (account.account.is_none() && account.requires_openai_auth)
+}
+
+fn bootstrap_account_summary(
+    account: Option<Account>,
+    managed_accounts: Option<crate::status::ManagedAccountsState>,
+) -> BootstrapAccountSummary {
+    match account {
+        Some(Account::ApiKey {}) => BootstrapAccountSummary {
+            account_email: None,
+            auth_mode: Some(TelemetryAuthMode::ApiKey),
+            status_account_display: Some(StatusAccountDisplay::ApiKey),
+            plan_type: None,
+            feedback_audience: FeedbackAudience::External,
+            has_chatgpt_account: false,
+        },
+        Some(Account::Chatgpt { email, plan_type }) => {
+            let feedback_audience = if email
+                .as_deref()
+                .is_some_and(|email| email.ends_with("@openai.com"))
+            {
+                FeedbackAudience::OpenAiEmployee
+            } else {
+                FeedbackAudience::External
+            };
+            BootstrapAccountSummary {
+                account_email: email.clone(),
+                auth_mode: Some(TelemetryAuthMode::Chatgpt),
+                status_account_display: managed_accounts
+                    .map(StatusAccountDisplay::ManagedChatGpt)
+                    .or_else(|| {
+                        Some(StatusAccountDisplay::ChatGpt {
+                            email,
+                            plan: Some(plan_type_display_name(plan_type)),
+                        })
+                    }),
+                plan_type: Some(plan_type),
+                feedback_audience,
+                has_chatgpt_account: true,
+            }
+        }
+        Some(Account::AmazonBedrock { .. }) => BootstrapAccountSummary {
+            account_email: None,
+            auth_mode: None,
+            status_account_display: None,
+            plan_type: None,
+            feedback_audience: FeedbackAudience::External,
+            has_chatgpt_account: false,
+        },
+        None => {
+            let has_chatgpt_account = managed_accounts.is_some();
+            BootstrapAccountSummary {
+                account_email: None,
+                auth_mode: None,
+                status_account_display: managed_accounts.map(StatusAccountDisplay::ManagedChatGpt),
+                plan_type: None,
+                feedback_audience: FeedbackAudience::External,
+                has_chatgpt_account,
+            }
+        }
+    }
+}
+
 pub(crate) struct AppServerSession {
     client: AppServerClient,
     next_request_id: i64,
@@ -440,49 +517,39 @@ impl AppServerSession {
             .wrap_err("model/list returned no models for TUI bootstrap")?;
         self.default_model = Some(default_model.clone());
         self.available_models = available_models.clone();
+        let managed_accounts = if should_list_managed_accounts(&account) {
+            match self
+                .list_accounts(
+                    /*thread_id*/ None,
+                    Some(default_model.clone()),
+                    /*refresh_tokens*/ false,
+                    /*refresh_usage*/ false,
+                )
+                .await
+            {
+                Ok(response) if !response.accounts.is_empty() => {
+                    Some(crate::status::ManagedAccountsState::from_response(response))
+                }
+                Ok(_) => None,
+                Err(err) => {
+                    tracing::debug!(
+                        "account/list unavailable during TUI bootstrap; using singular account state: {err}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-        let (
+        let BootstrapAccountSummary {
             account_email,
             auth_mode,
             status_account_display,
             plan_type,
             feedback_audience,
             has_chatgpt_account,
-        ) = match account.account {
-            Some(Account::ApiKey {}) => (
-                None,
-                Some(TelemetryAuthMode::ApiKey),
-                Some(StatusAccountDisplay::ApiKey),
-                None,
-                FeedbackAudience::External,
-                false,
-            ),
-            Some(Account::Chatgpt { email, plan_type }) => {
-                let feedback_audience = if email
-                    .as_deref()
-                    .is_some_and(|email| email.ends_with("@openai.com"))
-                {
-                    FeedbackAudience::OpenAiEmployee
-                } else {
-                    FeedbackAudience::External
-                };
-                (
-                    email.clone(),
-                    Some(TelemetryAuthMode::Chatgpt),
-                    Some(StatusAccountDisplay::ChatGpt {
-                        email,
-                        plan: Some(plan_type_display_name(plan_type)),
-                    }),
-                    Some(plan_type),
-                    feedback_audience,
-                    true,
-                )
-            }
-            Some(Account::AmazonBedrock { .. }) => {
-                (None, None, None, None, FeedbackAudience::External, false)
-            }
-            None => (None, None, None, None, FeedbackAudience::External, false),
-        };
+        } = bootstrap_account_summary(account.account, managed_accounts);
         Ok(AppServerBootstrap {
             duration: started_at.elapsed(),
             account_email,
@@ -516,6 +583,28 @@ impl AppServerSession {
             })
             .await
             .map_err(|err| bootstrap_request_error("account/read failed during TUI bootstrap", err))
+    }
+
+    pub(crate) async fn list_accounts(
+        &mut self,
+        thread_id: Option<ThreadId>,
+        model: Option<String>,
+        refresh_tokens: bool,
+        refresh_usage: bool,
+    ) -> Result<ListAccountsResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ListAccounts {
+                request_id,
+                params: ListAccountsParams {
+                    thread_id: thread_id.map(|thread_id| thread_id.to_string()),
+                    model,
+                    refresh_tokens,
+                    refresh_usage,
+                },
+            })
+            .await
+            .wrap_err("account/list failed in TUI")
     }
 
     pub(crate) async fn external_agent_config_detect(
@@ -1284,17 +1373,38 @@ impl AppServerSession {
             .wrap_err("thread/goal/clear failed in TUI")
     }
 
-    pub(crate) async fn logout_account(&mut self) -> Result<()> {
+    pub(crate) async fn logout_account(&mut self) -> Result<LogoutAccountResponse> {
+        self.logout_account_with_params(/*params*/ None).await
+    }
+
+    pub(crate) async fn logout_managed_account(
+        &mut self,
+        managed_account_id: String,
+    ) -> Result<LogoutAccountResponse> {
+        self.logout_account_with_params(Some(LogoutAccountParams {
+            account_id: Some(managed_account_id),
+            all: false,
+        }))
+        .await
+    }
+
+    pub(crate) async fn logout_all_accounts(&mut self) -> Result<LogoutAccountResponse> {
+        self.logout_account_with_params(Some(LogoutAccountParams {
+            account_id: None,
+            all: true,
+        }))
+        .await
+    }
+
+    async fn logout_account_with_params(
+        &mut self,
+        params: Option<LogoutAccountParams>,
+    ) -> Result<LogoutAccountResponse> {
         let request_id = self.next_request_id();
-        let _: LogoutAccountResponse = self
-            .client
-            .request_typed(ClientRequest::LogoutAccount {
-                request_id,
-                params: None,
-            })
+        self.client
+            .request_typed(ClientRequest::LogoutAccount { request_id, params })
             .await
-            .wrap_err("account/logout failed in TUI")?;
-        Ok(())
+            .wrap_err("account/logout failed in TUI")
     }
 
     pub(crate) async fn thread_unsubscribe(&mut self, thread_id: ThreadId) -> Result<()> {
@@ -2088,6 +2198,10 @@ mod tests {
     use crate::legacy_core::config::ConfigOverrides;
     use app_test_support::create_fake_paginated_rollout;
     use app_test_support::create_fake_rollout;
+    use codex_app_server_protocol::ManagedChatgptAccountRefreshStatus;
+    use codex_app_server_protocol::ManagedChatgptAccountUsage;
+    use codex_app_server_protocol::ManagedChatgptAccountUsageState;
+    use codex_app_server_protocol::ManagedChatgptAccountView;
     use codex_app_server_protocol::ThreadStatus;
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnStatus;
@@ -2137,6 +2251,95 @@ mod tests {
             plan_type: None,
             rate_limit_reached_type: None,
         }
+    }
+
+    fn managed_account(id: &str, eligible: bool) -> ManagedChatgptAccountView {
+        ManagedChatgptAccountView {
+            managed_account_id: id.to_string(),
+            chatgpt_account_id: None,
+            email: Some(format!("{id}@example.com")),
+            plan_type: codex_protocol::account::PlanType::Plus,
+            eligible,
+            eligibility_reason: (!eligible).then(|| "temporarily blocked".to_string()),
+            account_revision: 1,
+            credential_revision: 1,
+            refresh_status: ManagedChatgptAccountRefreshStatus::ReloginRequired {
+                reason_code: "fixture".to_string(),
+                observed_at: 1_700_000_000,
+            },
+            block: None,
+            usage: ManagedChatgptAccountUsage {
+                state: ManagedChatgptAccountUsageState::Unknown,
+                rate_limits: Vec::new(),
+                token_usage: None,
+                observed_at: None,
+                unavailable_reason: None,
+                unavailable_observed_at: None,
+            },
+        }
+    }
+
+    #[test]
+    fn bootstrap_discovers_ineligible_managed_pool_when_singular_account_is_none() {
+        let account = GetAccountResponse {
+            account: None,
+            requires_openai_auth: true,
+        };
+        assert!(should_list_managed_accounts(&account));
+
+        let summary = bootstrap_account_summary(
+            account.account,
+            Some(crate::status::ManagedAccountsState::from_response(
+                ListAccountsResponse {
+                    accounts: vec![managed_account("blocked", false)],
+                    selected_account_id: None,
+                    selection_revision: None,
+                    pool_revision: 4,
+                },
+            )),
+        );
+
+        assert!(summary.has_chatgpt_account);
+        assert_eq!(summary.auth_mode, None);
+        assert!(matches!(
+            summary.status_account_display,
+            Some(StatusAccountDisplay::ManagedChatGpt(accounts)) if accounts.len() == 1
+        ));
+    }
+
+    #[test]
+    fn bootstrap_empty_managed_list_preserves_external_singular_account() {
+        let account = GetAccountResponse {
+            account: Some(Account::Chatgpt {
+                email: Some("external@example.com".to_string()),
+                plan_type: codex_protocol::account::PlanType::Plus,
+            }),
+            requires_openai_auth: true,
+        };
+        assert!(should_list_managed_accounts(&account));
+
+        let summary = bootstrap_account_summary(account.account, None);
+
+        assert!(summary.has_chatgpt_account);
+        assert!(matches!(
+            summary.status_account_display,
+            Some(StatusAccountDisplay::ChatGpt {
+                email: Some(email),
+                ..
+            }) if email == "external@example.com"
+        ));
+    }
+
+    #[test]
+    fn bootstrap_does_not_probe_managed_pool_for_api_key_or_no_auth() {
+        assert!(!should_list_managed_accounts(&GetAccountResponse {
+            account: Some(Account::ApiKey {}),
+            requires_openai_auth: true,
+        }));
+        assert!(!should_list_managed_accounts(&GetAccountResponse {
+            account: None,
+            requires_openai_auth: false,
+        }));
     }
 
     #[test]
@@ -3338,6 +3541,22 @@ mod tests {
                 email: None,
                 plan: Some(ref plan),
             }) if plan == "Business"
+        ));
+
+        assert_eq!(
+            status_account_display_from_auth_mode(Some(AuthMode::ApiKey), None),
+            Some(StatusAccountDisplay::ApiKey)
+        );
+        assert_eq!(
+            status_account_display_from_auth_mode(Some(AuthMode::Headers), None),
+            None
+        );
+        assert!(matches!(
+            status_account_display_from_auth_mode(Some(AuthMode::ChatgptAuthTokens), None),
+            Some(StatusAccountDisplay::ChatGpt {
+                email: None,
+                plan: None,
+            })
         ));
     }
 }

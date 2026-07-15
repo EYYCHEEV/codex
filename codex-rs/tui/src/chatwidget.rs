@@ -296,6 +296,7 @@ use crate::bottom_pane::QUIT_SHORTCUT_TIMEOUT;
 use crate::bottom_pane::QueuedInputAction;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
+use crate::bottom_pane::SelectionRowDisplay;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
@@ -562,6 +563,8 @@ pub(crate) struct ChatWidget {
     session_header: SessionHeader,
     initial_user_message: Option<UserMessage>,
     status_account_display: Option<StatusAccountDisplay>,
+    pending_managed_account_selection: Option<(String, Option<String>, u64)>,
+    managed_account_updates_enabled: bool,
     runtime_model_provider_base_url: Option<String>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     token_info: Option<TokenUsageInfo>,
@@ -1850,6 +1853,11 @@ impl ChatWidget {
 
     pub(crate) fn thread_id(&self) -> Option<ThreadId> {
         self.thread_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_thread_id_for_test(&mut self, thread_id: ThreadId) {
+        self.thread_id = Some(thread_id);
     }
 
     pub(crate) fn thread_name(&self) -> Option<String> {

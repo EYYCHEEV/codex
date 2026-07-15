@@ -2411,6 +2411,50 @@ mod tests {
     }
 
     #[test]
+    fn managed_account_refresh_and_revision_types_are_exported() -> Result<()> {
+        let refresh_status_ts = v2::ManagedChatgptAccountRefreshStatus::export_to_string()?;
+        assert!(refresh_status_ts.contains(r#""type": "healthy""#));
+        assert!(refresh_status_ts.contains(r#""type": "transientUnavailable""#));
+        assert!(refresh_status_ts.contains("observedAt: number"));
+        assert!(refresh_status_ts.contains(r#""type": "reloginRequired""#));
+        assert!(refresh_status_ts.contains("reasonCode: string"));
+        assert_eq!(refresh_status_ts.contains("error:"), false);
+        assert_eq!(refresh_status_ts.contains("message:"), false);
+        assert_eq!(refresh_status_ts.contains("rawError:"), false);
+
+        let account_view_ts = v2::ManagedChatgptAccountView::export_to_string()?;
+        assert!(account_view_ts.contains(
+            r#"import type { ManagedChatgptAccountRefreshStatus } from "./ManagedChatgptAccountRefreshStatus";"#,
+        ));
+        assert!(account_view_ts.contains("refreshStatus: ManagedChatgptAccountRefreshStatus"));
+        assert!(account_view_ts.contains("accountRevision: number"));
+        assert!(account_view_ts.contains("credentialRevision: number"));
+        let list_response_ts = v2::ListAccountsResponse::export_to_string()?;
+        assert!(list_response_ts.contains("selectionRevision: number | null"));
+        assert!(list_response_ts.contains("poolRevision: number"));
+        assert!(
+            v2::AccountPoolUpdatedNotification::export_to_string()?
+                .contains("poolRevision: number")
+        );
+        assert!(
+            v2::AccountSelectionUpdatedNotification::export_to_string()?
+                .contains("selectionRevision: number")
+        );
+        let rate_limits_update_ts = v2::AccountRateLimitsUpdatedNotification::export_to_string()?;
+        assert!(rate_limits_update_ts.contains("managedAccountId: string | null"));
+        assert!(rate_limits_update_ts.contains("accountRevision: number | null"));
+        assert!(
+            v2::AccountLoginCompletedNotification::export_to_string()?
+                .contains("managedAccountId: string | null")
+        );
+        assert!(
+            v2::AccountUsageUpdatedNotification::export_to_string()?
+                .contains("accountRevision: number")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stable_schema_filter_removes_mock_thread_start_field() -> Result<()> {
         let output_dir = std::env::temp_dir().join(format!("codex_schema_{}", Uuid::now_v7()));
         fs::create_dir(&output_dir)?;
@@ -2931,6 +2975,7 @@ permissionProfile?: string | null};
             })
             .collect();
         let missing_client_request_methods: Vec<String> = [
+            "account/list",
             "account/logout",
             "account/rateLimits/read",
             "config/mcpServer/reload",
@@ -2957,6 +3002,9 @@ permissionProfile?: string | null};
                 })
                 .collect();
         let missing_server_notification_methods: Vec<String> = [
+            "account/pool/updated",
+            "account/selection/updated",
+            "account/usage/updated",
             "fuzzyFileSearch/sessionCompleted",
             "fuzzyFileSearch/sessionUpdated",
             "serverRequest/resolved",

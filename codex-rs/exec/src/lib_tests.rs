@@ -23,6 +23,26 @@ fn test_tracing_subscriber() -> impl tracing::Subscriber + Send + Sync {
     tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
+#[tokio::test]
+async fn websocket_diagnostic_requires_websockets_and_disables_retries() {
+    let codex_home = tempdir().expect("create codex home");
+    let cwd = tempdir().expect("create cwd");
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(cwd.path().to_path_buf()))
+        .build()
+        .await
+        .expect("build default config");
+    config.model_provider.request_max_retries = Some(3);
+    config.model_provider.stream_max_retries = Some(4);
+
+    configure_websocket_diagnostic(&mut config).expect("default provider supports WebSockets");
+    assert_eq!(config.model_provider.request_max_retries, Some(0));
+    assert_eq!(config.model_provider.stream_max_retries, Some(0));
+
+    config.model_provider.supports_websockets = false;
+    assert!(configure_websocket_diagnostic(&mut config).is_err());
+}
 #[derive(Clone)]
 struct TestLogWriter {
     buffer: Arc<Mutex<Vec<u8>>>,

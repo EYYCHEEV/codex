@@ -9,6 +9,7 @@ pub(super) struct ListenerTaskContext {
     pub(super) thread_manager: Arc<ThreadManager>,
     pub(super) thread_state_manager: ThreadStateManager,
     pub(super) outgoing: Arc<OutgoingMessageSender>,
+    pub(super) account_selection_observer: AccountSelectionObserver,
     pub(super) pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
     pub(super) thread_watch_manager: ThreadWatchManager,
     pub(super) thread_list_state_permit: Arc<Semaphore>,
@@ -132,6 +133,41 @@ pub(super) enum EnsureConversationListenerResult {
     ConnectionClosed,
 }
 
+pub(super) enum EnsureListenerTaskRunningResult {
+    Running,
+    Superseded,
+}
+
+pub(super) fn listener_superseded_error(conversation_id: ThreadId) -> JSONRPCErrorError {
+    invalid_request(format!(
+        "thread {conversation_id} was replaced while attaching its listener; retry"
+    ))
+}
+
+async fn rollback_listener_registration(
+    pending_thread_unloads: &Arc<Mutex<HashSet<ThreadId>>>,
+    thread_state_manager: &ThreadStateManager,
+    conversation_id: ThreadId,
+    connection_id: Option<ConnectionId>,
+    thread_state: &Arc<Mutex<ThreadState>>,
+    listener_generation: u64,
+) {
+    let _pending_thread_unloads = pending_thread_unloads.lock().await;
+    {
+        let mut thread_state = thread_state.lock().await;
+        if thread_state.listener_generation != listener_generation {
+            return;
+        }
+        thread_state_manager.unregister_listener_command_tx(conversation_id);
+        thread_state.clear_listener();
+    }
+    if let Some(connection_id) = connection_id {
+        let _ = thread_state_manager
+            .unsubscribe_connection_from_thread(conversation_id, connection_id)
+            .await;
+    }
+}
+
 #[expect(
     clippy::await_holding_invalid_type,
     reason = "listener subscription must be serialized against pending unloads"
@@ -170,21 +206,29 @@ pub(super) async fn ensure_conversation_listener(
         };
         thread_state
     };
-    if let Err(error) = ensure_listener_task_running(
+    match ensure_listener_task_running(
         listener_task_context.clone(),
         conversation_id,
         conversation,
         thread_state,
+        Some(connection_id),
     )
     .await
     {
-        let _ = listener_task_context
-            .thread_state_manager
-            .unsubscribe_connection_from_thread(conversation_id, connection_id)
-            .await;
-        return Err(error);
+        Ok(EnsureListenerTaskRunningResult::Running) => {
+            Ok(EnsureConversationListenerResult::Attached)
+        }
+        Ok(EnsureListenerTaskRunningResult::Superseded) => {
+            Err(listener_superseded_error(conversation_id))
+        }
+        Err(error) => {
+            let _ = listener_task_context
+                .thread_state_manager
+                .unsubscribe_connection_from_thread(conversation_id, connection_id)
+                .await;
+            Err(error)
+        }
     }
-    Ok(EnsureConversationListenerResult::Attached)
 }
 
 pub(super) fn log_listener_attach_result(
@@ -216,7 +260,8 @@ pub(super) async fn ensure_listener_task_running(
     conversation_id: ThreadId,
     conversation: Arc<CodexThread>,
     thread_state: Arc<Mutex<ThreadState>>,
-) -> Result<(), JSONRPCErrorError> {
+    rollback_connection_id: Option<ConnectionId>,
+) -> Result<EnsureListenerTaskRunningResult, JSONRPCErrorError> {
     let (cancel_tx, mut cancel_rx) = oneshot::channel();
     let Some(mut unloading_state) = UnloadingState::new(
         &listener_task_context,
@@ -244,7 +289,7 @@ pub(super) async fn ensure_listener_task_running(
     let (mut listener_command_rx, listener_generation) = {
         let mut thread_state = thread_state.lock().await;
         if thread_state.listener_matches(&conversation) {
-            return Ok(());
+            return Ok(EnsureListenerTaskRunningResult::Running);
         }
         let (listener_command_rx, listener_generation) = thread_state.set_listener(
             cancel_tx,
@@ -256,15 +301,40 @@ pub(super) async fn ensure_listener_task_running(
             tracing::warn!(
                 "thread listener command sender missing immediately after listener registration"
             );
-            return Ok(());
+            return Ok(EnsureListenerTaskRunningResult::Running);
         };
         listener_task_context
             .thread_state_manager
             .register_listener_command_tx(conversation_id, listener_command_tx);
         (listener_command_rx, listener_generation)
     };
+    let account_selection_event_observer = listener_task_context
+        .account_selection_observer
+        .activate_thread(&conversation_id.to_string())
+        .await;
+    let listener_is_current = listener_task_context
+        .thread_manager
+        .get_thread(conversation_id)
+        .await
+        .is_ok_and(|current| Arc::ptr_eq(&current, &conversation));
+    if !listener_is_current {
+        rollback_listener_registration(
+            &listener_task_context.pending_thread_unloads,
+            &listener_task_context.thread_state_manager,
+            conversation_id,
+            rollback_connection_id,
+            &thread_state,
+            listener_generation,
+        )
+        .await;
+        account_selection_event_observer
+            .deactivate_if_current()
+            .await;
+        return Ok(EnsureListenerTaskRunningResult::Superseded);
+    }
     let ListenerTaskContext {
         outgoing,
+        account_selection_observer,
         thread_manager,
         thread_state_manager,
         pending_thread_unloads,
@@ -324,6 +394,12 @@ pub(super) async fn ensure_listener_task_running(
                     {
                         continue;
                     }
+                    let account_selection_event_route =
+                        if matches!(&event.msg, EventMsg::ManagedAccountSelected(_)) {
+                            account_selection_event_observer.capture_event().await
+                        } else {
+                            None
+                        };
                     let subscribed_connection_ids = thread_state_manager
                         .subscribed_connection_ids(conversation_id)
                         .await;
@@ -342,6 +418,7 @@ pub(super) async fn ensure_listener_task_running(
                         thread_state.clone(),
                         thread_watch_manager.clone(),
                         thread_list_state_permit.clone(),
+                        account_selection_event_route,
                         fallback_model_provider.clone(),
                     )
                     .await;
@@ -370,6 +447,7 @@ pub(super) async fn ensure_listener_task_running(
                     unload_thread_without_subscribers(
                         thread_manager.clone(),
                         outgoing_for_task.clone(),
+                        account_selection_observer.clone(),
                         pending_thread_unloads.clone(),
                         thread_state_manager.clone(),
                         thread_watch_manager.clone(),
@@ -382,13 +460,17 @@ pub(super) async fn ensure_listener_task_running(
             }
         }
 
+        account_selection_event_observer
+            .deactivate_if_current()
+            .await;
+
         let mut thread_state = thread_state.lock().await;
         if thread_state.listener_generation == listener_generation {
             thread_state_manager.unregister_listener_command_tx(conversation_id);
             thread_state.clear_listener();
         }
     });
-    Ok(())
+    Ok(EnsureListenerTaskRunningResult::Running)
 }
 
 pub(super) async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> ThreadShutdownResult {
@@ -402,6 +484,7 @@ pub(super) async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> Threa
 pub(super) async fn unload_thread_without_subscribers(
     thread_manager: Arc<ThreadManager>,
     outgoing: Arc<OutgoingMessageSender>,
+    account_selection_observer: AccountSelectionObserver,
     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
     thread_state_manager: ThreadStateManager,
     thread_watch_manager: ThreadWatchManager,
@@ -425,10 +508,16 @@ pub(super) async fn unload_thread_without_subscribers(
                     thread_watch_manager
                         .remove_thread(&thread_id.to_string())
                         .await;
+                    account_selection_observer
+                        .remove_thread(&thread_id.to_string())
+                        .await;
                     pending_thread_unloads.lock().await.remove(&thread_id);
                     return;
                 }
                 thread_watch_manager
+                    .remove_thread(&thread_id.to_string())
+                    .await;
+                account_selection_observer
                     .remove_thread(&thread_id.to_string())
                     .await;
                 let notification = ThreadClosedNotification {
@@ -871,4 +960,76 @@ pub(super) fn set_thread_status_and_interrupt_stale_turns(
         }
     }
     thread.status = status;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::thread_state::ThreadListenerCommand;
+
+    #[tokio::test]
+    async fn listener_identity_mismatch_rolls_back_only_registered_generation() {
+        let manager = ThreadStateManager::new();
+        let pending_thread_unloads = Arc::new(Mutex::new(HashSet::new()));
+        let thread_id = ThreadId::new();
+        let connection_id = ConnectionId(1);
+        manager
+            .connection_initialized(connection_id, ConnectionCapabilities::default())
+            .await;
+        let thread_state = manager
+            .try_ensure_connection_subscribed(
+                thread_id,
+                connection_id,
+                /*experimental_raw_events*/ false,
+            )
+            .await
+            .expect("connection should be live");
+        let (cancel_tx, mut cancel_rx) = oneshot::channel();
+        {
+            let mut state = thread_state.lock().await;
+            state.listener_generation = 2;
+            state.cancel_tx = Some(cancel_tx);
+        }
+        let (listener_command_tx, _listener_command_rx) =
+            tokio::sync::mpsc::unbounded_channel::<ThreadListenerCommand>();
+        manager.register_listener_command_tx(thread_id, listener_command_tx);
+
+        rollback_listener_registration(
+            &pending_thread_unloads,
+            &manager,
+            thread_id,
+            Some(connection_id),
+            &thread_state,
+            1,
+        )
+        .await;
+        assert!(manager.current_listener_command_tx(thread_id).is_some());
+        assert_eq!(
+            manager.subscribed_connection_ids(thread_id).await,
+            vec![connection_id]
+        );
+        assert!(
+            cancel_rx.try_recv().is_err(),
+            "an older generation must not clear the current listener"
+        );
+
+        rollback_listener_registration(
+            &pending_thread_unloads,
+            &manager,
+            thread_id,
+            Some(connection_id),
+            &thread_state,
+            2,
+        )
+        .await;
+        assert!(manager.current_listener_command_tx(thread_id).is_none());
+        assert!(
+            manager
+                .subscribed_connection_ids(thread_id)
+                .await
+                .is_empty()
+        );
+        assert_eq!(cancel_rx.await, Ok(()));
+        assert!(thread_state.lock().await.cancel_tx.is_none());
+    }
 }

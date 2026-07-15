@@ -1,5 +1,8 @@
 use super::*;
+use crate::CodexAppsToolsCache;
+use crate::CodexAppsToolsCacheKey;
 use crate::McpBinding;
+use crate::declared_openai_file_input_param_names;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationRequestRouter;
@@ -29,13 +32,16 @@ use codex_config::McpServerToolConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_connectors::ConnectorRuntimeContext;
-use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeFetchSource;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_exec_server_test_support::environment_manager_without_environments;
 use codex_login::AuthHeaders;
 use codex_login::CodexAuth;
+use codex_login::ExternalAuth;
+use codex_login::ExternalAuthFuture;
+use codex_login::TransportAuthBinding;
 use codex_protocol::ToolName;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::McpServerInfo;
 use codex_protocol::models::PermissionProfile;
@@ -152,6 +158,127 @@ impl McpConnectionSet {
     }
 }
 
+fn test_apps_cache_key(
+    account_id: Option<String>,
+    chatgpt_user_id: Option<String>,
+) -> CodexAppsToolsCacheKey {
+    let identity_key = chatgpt_user_id
+        .clone()
+        .or_else(|| account_id.clone())
+        .unwrap_or_else(|| "test-account".to_string());
+    CodexAppsToolsCacheKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key,
+            raw_account_id: account_id,
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 1,
+        },
+        1,
+        "https://chatgpt.com",
+    )
+}
+
+#[derive(Clone)]
+struct StaticExternalAuth(CodexAuth);
+
+impl ExternalAuth for StaticExternalAuth {
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.0.clone()) })
+    }
+
+    fn refresh(
+        &self,
+        _context: codex_login::ExternalAuthRefreshContext,
+    ) -> ExternalAuthFuture<'_, CodexAuth> {
+        self.resolve()
+    }
+}
+
+#[tokio::test]
+async fn external_overlay_provider_observes_same_identity_bearer_refresh() {
+    let initial = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.initial",
+        "selected-account",
+        /*chatgpt_plan_type*/ None,
+    )
+    .expect("initial external auth");
+    let refreshed = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.refreshed",
+        "selected-account",
+        /*chatgpt_plan_type*/ None,
+    )
+    .expect("refreshed external auth");
+    let auth_manager = AuthManager::from_auth_for_testing(initial.clone());
+    auth_manager
+        .set_external_auth(Arc::new(StaticExternalAuth(initial.clone())))
+        .await
+        .expect("install initial overlay");
+    let cache_key = codex_apps_tools_cache_key(Some(&initial));
+    let provider = codex_apps_auth_provider_for_snapshot(
+        Some(&initial),
+        Some(Arc::clone(&auth_manager)),
+        &cache_key,
+    )
+    .expect("auth provider");
+
+    assert_eq!(
+        provider
+            .to_auth_headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer header.e30.initial")
+    );
+
+    auth_manager
+        .set_external_auth(Arc::new(StaticExternalAuth(refreshed)))
+        .await
+        .expect("refresh overlay");
+    let headers = provider.to_auth_headers();
+    assert_eq!(
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer header.e30.refreshed")
+    );
+    assert_eq!(
+        headers
+            .get("chatgpt-account-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("selected-account")
+    );
+}
+
+#[test]
+fn managed_provider_keeps_selected_sibling_auth_static() {
+    let selected = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let ambient = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.ambient",
+        "ambient-account",
+        /*chatgpt_plan_type*/ None,
+    )
+    .expect("ambient external auth");
+    let ambient_manager = AuthManager::from_auth_for_testing(ambient);
+    let cache_key = test_apps_cache_key(selected.get_account_id(), selected.get_chatgpt_user_id());
+    let provider =
+        codex_apps_auth_provider_for_snapshot(Some(&selected), Some(ambient_manager), &cache_key)
+            .expect("auth provider");
+    let headers = provider.to_auth_headers();
+
+    assert_eq!(
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer Access Token")
+    );
+    assert_eq!(
+        headers
+            .get("chatgpt-account-id")
+            .and_then(|value| value.to_str().ok()),
+        Some("account_id")
+    );
+}
+
 fn create_test_tool(server_name: &str, tool_name: &str) -> ToolInfo {
     ToolInfo {
         server_name: server_name.to_string(),
@@ -179,7 +306,7 @@ fn create_codex_apps_tools_cache_context(
 ) -> ConnectorRuntimeContext<ToolInfo> {
     ConnectorRuntimeManager::<ToolInfo>::default().context(
         codex_home,
-        ConnectorRuntimeContextKey::personal(
+        test_apps_cache_key(
             account_id.map(ToOwned::to_owned),
             chatgpt_user_id.map(ToOwned::to_owned),
         ),
@@ -3316,8 +3443,7 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
             codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                /*account_id*/ None,
-                /*chatgpt_user_id*/ None,
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
             ),
             supports_openai_form_elicitation: false,
             auth: None,

@@ -67,6 +67,13 @@ pub enum SandboxErr {
     LandlockRestrict,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebsocketCloseDetails {
+    pub code: Option<u16>,
+    pub reason: Option<String>,
+    pub reason_redacted: bool,
+}
+
 pub struct CodexErr {
     details: CodexErrorDetails,
     retry_delay: Option<Duration>,
@@ -85,7 +92,16 @@ pub enum CodexErrorDetails {
     #[error("shared rollout token budget exhausted")]
     SessionBudgetExceeded,
 
-    /// Returned by ResponsesClient when the SSE stream disconnects or errors out **after** the HTTP
+    /// Returned when the Responses WebSocket closes after the handshake but before
+    /// `response.completed`.
+    ///
+    /// The close frame is kept as bounded, sanitized diagnostic data so the core retry owner can
+    /// persist a failure-only rollout record without enabling per-frame telemetry.
+    #[error(
+        "stream disconnected before completion: websocket closed by server before response.completed"
+    )]
+    WebsocketClosed(Box<WebsocketCloseDetails>),
+    /// Returned by ResponsesClient when a response stream disconnects or errors out **after** the
     /// handshake has succeeded but **before** it finished emitting `response.completed`.
     ///
     /// The Session loop treats this as a transient error and will automatically retry the turn.
@@ -319,6 +335,7 @@ impl CodexErr {
     );
 
     codex_err_tuple_constructors!(
+        WebsocketClosed(details: Box<WebsocketCloseDetails>),
         Stream(message: String),
         ThreadNotFound(thread_id: ThreadId),
         UnexpectedStatus(error: UnexpectedResponseError),
@@ -384,7 +401,8 @@ impl CodexErr {
             | CodexErrorDetails::UsageLimitReached(_)
             | CodexErrorDetails::ServerOverloaded
             | CodexErrorDetails::CyberPolicy { .. } => false,
-            CodexErrorDetails::Stream(..)
+            CodexErrorDetails::WebsocketClosed(_)
+            | CodexErrorDetails::Stream(..)
             | CodexErrorDetails::Timeout
             | CodexErrorDetails::RequestTimeout
             | CodexErrorDetails::UnexpectedStatus(_)
@@ -437,6 +455,9 @@ impl CodexErr {
                     http_status_code: self.http_status_code_value(),
                 }
             }
+            CodexErrorDetails::WebsocketClosed(_) => CodexErrorInfo::ResponseStreamDisconnected {
+                http_status_code: None,
+            },
             CodexErrorDetails::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
             CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::InternalServerError

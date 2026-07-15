@@ -36,7 +36,12 @@ use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_http_client::RouteAwareClientPool;
 use codex_login::CodexAuth;
+use codex_login::ExternalAuth;
+use codex_login::ExternalAuthFuture;
+use codex_login::ExternalAuthRefreshContext;
+use codex_login::auth::AgentIdentityAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_login::auth::AgentIdentityAuthRecord;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::bundled_models_response;
@@ -47,6 +52,8 @@ use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::account::PlanType as AccountPlanType;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicyInherit;
@@ -209,6 +216,9 @@ impl StepContext {
             mcp: Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
             ))),
+            effective_auth: None,
+            connector_directory_cache_key: None,
+            codex_apps_tools_cache_key: codex_mcp::codex_apps_tools_cache_key(/*auth*/ None),
             tool_router: Arc::new(ToolRouter::from_parts(
                 ToolRegistry::empty_for_test(),
                 Vec::new(),
@@ -2613,24 +2623,36 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
         TokenCountEvent {
             info: Some(info1),
             rate_limits: None,
+            managed_account_id: None,
+            account_state_revision: None,
+            managed_transport_binding: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            managed_account_id: None,
+            account_state_revision: None,
+            managed_transport_binding: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: Some(info2.clone()),
             rate_limits: None,
+            managed_account_id: None,
+            account_state_revision: None,
+            managed_transport_binding: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            managed_account_id: None,
+            account_state_revision: None,
+            managed_transport_binding: None,
         },
     )));
 
@@ -4084,7 +4106,7 @@ async fn thread_rollback_fails_when_num_turns_is_zero() {
 }
 
 #[tokio::test]
-async fn set_rate_limits_retains_previous_credits() {
+async fn set_rate_limits_keeps_canonical_projection_when_additional_arrives() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
@@ -4153,7 +4175,7 @@ async fn set_rate_limits_retains_previous_credits() {
         plan_type: Some(codex_protocol::account::PlanType::Plus),
         rate_limit_reached_type: None,
     };
-    state.set_rate_limits(initial.clone());
+    state.set_rate_limits(initial.clone(), None);
 
     let update = RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
@@ -4174,21 +4196,13 @@ async fn set_rate_limits_retains_previous_credits() {
         plan_type: None,
         rate_limit_reached_type: None,
     };
-    state.set_rate_limits(update.clone());
+    state.set_rate_limits(update, None);
 
+    let mut expected = initial;
+    expected.limit_id = Some("codex".to_string());
     assert_eq!(
-        state.latest_rate_limits,
-        Some(RateLimitSnapshot {
-            limit_id: Some("codex_other".to_string()),
-            limit_name: Some("codex_other".to_string()),
-            primary: update.primary.clone(),
-            secondary: update.secondary,
-            credits: initial.credits,
-            individual_limit: initial.individual_limit,
-            spend_control_reached: initial.spend_control_reached,
-            plan_type: initial.plan_type,
-            rate_limit_reached_type: None,
-        })
+        state.latest_rate_limits.map(|latest| latest.snapshot),
+        Some(expected)
     );
 }
 
@@ -4266,7 +4280,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         plan_type: Some(codex_protocol::account::PlanType::Plus),
         rate_limit_reached_type: None,
     };
-    state.set_rate_limits(initial.clone());
+    state.set_rate_limits(initial.clone(), None);
 
     let update = RateLimitSnapshot {
         limit_id: None,
@@ -4283,15 +4297,15 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         plan_type: Some(codex_protocol::account::PlanType::Pro),
         rate_limit_reached_type: None,
     };
-    state.set_rate_limits(update.clone());
+    state.set_rate_limits(update.clone(), None);
 
     assert_eq!(
-        state.latest_rate_limits,
+        state.latest_rate_limits.map(|latest| latest.snapshot),
         Some(RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: None,
             primary: update.primary,
-            secondary: update.secondary,
+            secondary: initial.secondary,
             credits: initial.credits,
             individual_limit: initial.individual_limit,
             spend_control_reached: initial.spend_control_reached,
@@ -8725,6 +8739,292 @@ impl codex_exec_server::NoiseRendezvousConnectProvider for PendingNoiseConnectPr
     > {
         Box::pin(futures::future::pending())
     }
+}
+
+#[tokio::test]
+async fn explicit_unauthenticated_provider_setup_does_not_inherit_managed_mcp_auth()
+-> anyhow::Result<()> {
+    let (session, turn_context, _rx_event) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("ambient-api-key"),
+        Vec::new(),
+        |config| {
+            config.model_provider.experimental_bearer_token =
+                Some("explicit-provider-token".to_string());
+        },
+    )
+    .await;
+
+    session
+        .services
+        .auth_manager
+        .upsert_managed_chatgpt_oauth(codex_login::ManagedChatgptOauthCredentials {
+            tokens: codex_login::TokenData {
+                id_token: codex_login::token_data::IdTokenInfo {
+                    email: Some("managed-leak@example.com".to_string()),
+                    chatgpt_account_id: Some("managed-leak-account".to_string()),
+                    raw_jwt: "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6Im1hbmFnZWQtbGVha0BleGFtcGxlLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF91c2VyX2lkIjoibWFuYWdlZC1sZWFrLXVzZXIiLCJ1c2VyX2lkIjoibWFuYWdlZC1sZWFrLXVzZXIiLCJjaGF0Z3B0X3BsYW5fdHlwZSI6InBybyIsImNoYXRncHRfYWNjb3VudF9pZCI6Im1hbmFnZWQtbGVhay1hY2NvdW50In19.c2ln".to_string(),
+                    ..Default::default()
+                },
+                access_token: "managed-leak-access-token".to_string(),
+                refresh_token: "managed-leak-refresh-token".to_string(),
+                account_id: Some("managed-leak-account".to_string()),
+            },
+            last_refresh: chrono::Utc::now(),
+            oauth_api_key: Some("managed-leak-api-key".to_string()),
+        })
+        .await?;
+    let request_setup = session
+        .services
+        .model_client
+        .current_client_setup(
+            Some(&turn_context.model_info.slug),
+            Some(&session.session_id().to_string()),
+        )
+        .await?;
+    assert!(request_setup.effective_auth.is_none());
+    assert!(request_setup.managed_snapshot.is_none());
+    assert!(request_setup.managed_id.is_none());
+    assert_eq!(request_setup.credential_revision, None);
+    assert_eq!(request_setup.account_state_revision, None);
+    assert_eq!(request_setup.selection_revision, None);
+    assert_eq!(
+        request_setup
+            .api_auth
+            .to_auth_headers()
+            .get("authorization")
+            .expect("explicit provider bearer")
+            .to_str()?,
+        "Bearer explicit-provider-token"
+    );
+    let step = session
+        .capture_step_context_for_setup(Arc::clone(&turn_context), &request_setup)
+        .await?;
+    assert!(step.effective_auth.is_none());
+    assert!(
+        session
+            .services
+            .mcp_runtime
+            .current_auth_matches(/*auth*/ None)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it()
+-> anyhow::Result<()> {
+    struct StaticExternalAuth(CodexAuth);
+
+    impl ExternalAuth for StaticExternalAuth {
+        fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+
+        fn refresh(
+            &self,
+            _context: ExternalAuthRefreshContext,
+        ) -> ExternalAuthFuture<'_, CodexAuth> {
+            Box::pin(async { Ok(self.0.clone()) })
+        }
+    }
+
+    let (mut session, turn_context) = make_session_and_context().await;
+    let auth_home = tempfile::tempdir()?;
+    let initial_auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.initial",
+        "test-account",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        initial_auth.clone(),
+        auth_home.path().to_path_buf(),
+    );
+    auth_manager
+        .set_external_auth(Arc::new(StaticExternalAuth(initial_auth.clone())))
+        .await?;
+    session.services.auth_manager = Arc::clone(&auth_manager);
+
+    let mut request_setup = session
+        .services
+        .model_client
+        .current_client_setup(
+            Some(&turn_context.model_info.slug),
+            Some(&session.session_id().to_string()),
+        )
+        .await?;
+    request_setup.effective_auth = Some(initial_auth);
+    request_setup.transport_auth_binding =
+        TransportAuthBinding::for_nonmanaged_auth(request_setup.effective_auth.as_ref());
+    request_setup.credential_revision = None;
+
+    let session = Arc::new(session);
+    let initial_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup),
+        )
+        .await;
+    let unchanged_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup),
+        )
+        .await;
+    assert!(Arc::ptr_eq(&initial_runtime, &unchanged_runtime));
+
+    let refreshed_auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.refreshed",
+        "test-account",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    auth_manager
+        .set_external_auth(Arc::new(StaticExternalAuth(refreshed_auth.clone())))
+        .await?;
+    request_setup.effective_auth = Some(refreshed_auth);
+    request_setup.transport_auth_binding =
+        TransportAuthBinding::for_nonmanaged_auth(request_setup.effective_auth.as_ref());
+
+    let refreshed_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup),
+        )
+        .await;
+    assert!(!Arc::ptr_eq(&initial_runtime, &refreshed_runtime));
+    assert!(
+        session
+            .services
+            .mcp_runtime
+            .current_auth_matches(request_setup.effective_auth.as_ref())
+    );
+
+    let stable_refreshed_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup),
+        )
+        .await;
+    assert!(Arc::ptr_eq(&refreshed_runtime, &stable_refreshed_runtime));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_change_reuses_it()
+-> anyhow::Result<()> {
+    const AGENT_PRIVATE_KEY: &str =
+        "MC4CAQAwBQYDK2VwBCIEIJ7kFBaOujmoz1gvBNEC+BeM2IX87FFB0xmISOZ/XO0c";
+
+    async fn auth_for_task(task_id: &str) -> anyhow::Result<CodexAuth> {
+        Ok(CodexAuth::AgentIdentity(
+            AgentIdentityAuth::from_record(
+                AgentIdentityAuthRecord {
+                    agent_runtime_id: "agent-runtime-mcp".to_string(),
+                    agent_private_key: AGENT_PRIVATE_KEY.to_string(),
+                    account_id: "account-mcp".to_string(),
+                    chatgpt_user_id: "user-mcp".to_string(),
+                    email: Some("agent-mcp@example.com".to_string()),
+                    plan_type: AccountPlanType::Team,
+                    chatgpt_account_is_fedramp: false,
+                    task_id: Some(task_id.to_string()),
+                },
+                "https://auth.example.test",
+                /*auth_route_config*/ None,
+            )
+            .await?,
+        ))
+    }
+
+    let (session, turn_context) = make_session_and_context().await;
+    let initial_auth = auth_for_task("task-initial").await?;
+    let managed_binding = TransportAuthBinding {
+        identity_key: "managed:account-mcp".to_string(),
+        raw_account_id: Some("account-mcp".to_string()),
+        fedramp: false,
+        auth_mode: AuthMode::AgentIdentity,
+        route_generation: 7,
+    };
+    let mut request_setup = session
+        .services
+        .model_client
+        .current_client_setup(
+            Some(&turn_context.model_info.slug),
+            Some(&session.session_id().to_string()),
+        )
+        .await?;
+    request_setup.effective_auth = Some(initial_auth.clone());
+    request_setup.transport_auth_binding = managed_binding.clone();
+    request_setup.credential_revision = Some(11);
+
+    let session = Arc::new(session);
+    let initial_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup),
+        )
+        .await;
+
+    // A managed row's usage/rate observations only advance state revision. The request setup
+    // retains the same effective auth, transport binding, and credential revision.
+    request_setup.effective_auth = Some(initial_auth.clone());
+    let state_only_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup),
+        )
+        .await;
+    assert!(Arc::ptr_eq(&initial_runtime, &state_only_runtime));
+
+    request_setup.effective_auth = Some(auth_for_task("task-replaced").await?);
+    assert_eq!(request_setup.transport_auth_binding, managed_binding);
+    assert_eq!(request_setup.credential_revision, Some(11));
+    let replaced_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup),
+        )
+        .await;
+    assert!(!Arc::ptr_eq(&state_only_runtime, &replaced_runtime));
+    assert!(
+        session
+            .services
+            .mcp_runtime
+            .current_auth_matches(request_setup.effective_auth.as_ref())
+    );
+
+    let identical_clone_runtime = session
+        .mcp_runtime_for_step(
+            &turn_context,
+            &turn_context.environments,
+            &[],
+            /*executor_capability_discovery*/ None,
+            Some(&request_setup.clone()),
+        )
+        .await;
+    assert!(Arc::ptr_eq(&replaced_runtime, &identical_clone_runtime));
+
+    Ok(())
 }
 
 #[tokio::test]

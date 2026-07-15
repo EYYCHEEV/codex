@@ -56,31 +56,50 @@ pub(super) async fn revoke_auth_tokens(
     auth_dot_json: Option<&AuthDotJson>,
     auth_route_config: &AuthRouteConfig,
 ) -> Result<(), std::io::Error> {
-    let Some((token, kind)) = auth_dot_json.and_then(revocable_token) else {
+    let Some(auth_dot_json) = auth_dot_json else {
         return Ok(());
     };
-
+    let tokens = revocable_tokens(auth_dot_json);
+    if tokens.is_empty() {
+        return Ok(());
+    }
     let endpoint = revoke_token_endpoint();
     let client = create_default_auth_client(&endpoint, auth_route_config)?;
-    revoke_oauth_token(&client, endpoint.as_str(), token, kind, REVOKE_HTTP_TIMEOUT).await
-}
-
-fn revocable_token(auth_dot_json: &AuthDotJson) -> Option<(&str, RevokeTokenKind)> {
-    let tokens = managed_chatgpt_tokens(auth_dot_json)?;
-    if !tokens.refresh_token.is_empty() {
-        Some((tokens.refresh_token.as_str(), RevokeTokenKind::Refresh))
-    } else if !tokens.access_token.is_empty() {
-        Some((tokens.access_token.as_str(), RevokeTokenKind::Access))
-    } else {
-        None
+    let mut first_error = None;
+    for (token, kind) in tokens {
+        if let Err(err) =
+            revoke_oauth_token(&client, endpoint.as_str(), token, kind, REVOKE_HTTP_TIMEOUT).await
+            && first_error.is_none()
+        {
+            first_error = Some(err);
+        }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
-fn managed_chatgpt_tokens(auth_dot_json: &AuthDotJson) -> Option<&TokenData> {
-    if resolved_auth_mode(auth_dot_json) == AuthMode::Chatgpt {
-        auth_dot_json.tokens.as_ref()
-    } else {
-        None
+fn revocable_tokens(auth_dot_json: &AuthDotJson) -> Vec<(&str, RevokeTokenKind)> {
+    if resolved_auth_mode(auth_dot_json) != AuthMode::Chatgpt
+        && auth_dot_json.auth_mode != Some(AuthMode::ChatgptAuthTokens)
+    {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    if let Some(tokens) = auth_dot_json.tokens.as_ref() {
+        push_revocable_token(&mut result, tokens);
+    }
+    if let Some(pool) = auth_dot_json.managed_chatgpt.as_ref() {
+        for account in &pool.accounts {
+            push_revocable_token(&mut result, &account.tokens);
+        }
+    }
+    result
+}
+
+fn push_revocable_token<'a>(result: &mut Vec<(&'a str, RevokeTokenKind)>, tokens: &'a TokenData) {
+    if !tokens.refresh_token.is_empty() {
+        result.push((tokens.refresh_token.as_str(), RevokeTokenKind::Refresh));
+    } else if !tokens.access_token.is_empty() {
+        result.push((tokens.access_token.as_str(), RevokeTokenKind::Access));
     }
 }
 

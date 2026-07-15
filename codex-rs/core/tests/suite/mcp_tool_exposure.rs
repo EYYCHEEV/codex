@@ -1,19 +1,17 @@
 use anyhow::Result;
-use codex_config::Constrained;
+use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
+use codex_config::types::McpServerConfig;
+use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
-use codex_extension_api::McpServerContribution;
-use codex_extension_api::McpServerContributionContext;
-use codex_extension_api::McpServerContributor;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
 use codex_features::Feature;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
-use codex_protocol::models::PermissionProfile;
-use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
@@ -25,12 +23,9 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_CREATE_TOOL;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
+use core_test_support::apps_test_server::apps_enabled_builder;
 use core_test_support::apps_test_server::search_capable_apps_builder;
-use core_test_support::context_snapshot;
-use core_test_support::context_snapshot::ContextSnapshotOptions;
-use core_test_support::context_snapshot::ContextSnapshotRenderMode;
 use core_test_support::responses;
-use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -42,16 +37,13 @@ use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use core_test_support::wait_for_mcp_server;
-use pretty_assertions::assert_eq;
-use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
@@ -222,29 +214,15 @@ impl ThreadLifecycleContributor<Config> for McpResourceClientCapture {
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let client = input
-                .mcp_resource_client
-                .as_ref()
-                .expect("host should supply an MCP resource client");
+                .session_store
+                .get::<McpResourceClient>()
+                .expect("session store should contain an MCP resource client");
             *self
                 .client
                 .lock()
                 .expect("capture lock should not be poisoned") = Some(client.as_ref().clone());
         })
     }
-}
-
-fn config_with_mcp_marker(base: &Config, marker: &str) -> Config {
-    let mut config = base.clone();
-    let server = serde_json::from_value(json!({
-        "url": "http://127.0.0.1:1/mcp",
-        "enabled": false,
-    }))
-    .expect("test MCP server config");
-    config
-        .mcp_servers
-        .set(HashMap::from([(marker.to_string(), server)]))
-        .expect("test config should allow MCP servers");
-    config
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -351,66 +329,6 @@ async fn rapid_mcp_refreshes_coalesce_to_the_latest_config() -> Result<()> {
         ]),
     )
     .await;
-    let contributor = Arc::new(CoalescingMcpContributor::new());
-    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    extensions.mcp_server_contributor(contributor.clone());
-    let test = core_test_support::test_codex::test_codex()
-        .with_extensions(Arc::new(extensions.build()))
-        .build(&server)
-        .await?;
-
-    contributor.block_next.store(true, Ordering::SeqCst);
-    test.codex
-        .refresh_runtime_config(config_with_mcp_marker(&test.config, "config-a"))
-        .await;
-    tokio::time::timeout(Duration::from_secs(5), contributor.entered.acquire())
-        .await
-        .expect("configuration A should enter MCP projection")
-        .expect("entered semaphore should remain open")
-        .forget();
-
-    test.codex
-        .refresh_runtime_config(config_with_mcp_marker(&test.config, "config-b"))
-        .await;
-    test.codex
-        .refresh_runtime_config(config_with_mcp_marker(&test.config, "config-c"))
-        .await;
-    contributor.release.add_permits(1);
-
-    tokio::time::timeout(Duration::from_secs(5), contributor.entered.acquire())
-        .await
-        .expect("the coalesced refresh should project the latest configuration")
-        .expect("entered semaphore should remain open")
-        .forget();
-    let observed = contributor
-        .observed_markers
-        .lock()
-        .expect("observed markers lock should not be poisoned")
-        .iter()
-        .filter(|marker| marker.as_str() != "initial")
-        .cloned()
-        .collect::<Vec<_>>();
-    assert_eq!(
-        observed,
-        vec!["config-a".to_string(), "config-c".to_string()]
-    );
-
-    test.submit_turn("bind the latest MCP state").await?;
-    assert!(
-        !contributor
-            .observed_markers
-            .lock()
-            .expect("observed markers lock should not be poisoned")
-            .iter()
-            .any(|marker| marker == "config-b")
-    );
-    response.single_request();
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn out_of_band_resource_read_reconciles_the_published_mcp_runtime() -> Result<()> {
-    let server = responses::start_mock_server().await;
 
     let captured_client = Arc::new(Mutex::new(None));
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
@@ -428,37 +346,50 @@ async fn out_of_band_resource_read_reconciles_the_published_mcp_runtime() -> Res
         .expect("thread start should capture the MCP resource client");
     assert!(!resource_client.has_server("refreshed").await);
 
-    let mut refresh_config = test.config.clone();
-    let user_config_path = refresh_config.codex_home.join("config.toml");
-    let user_config: toml::Value = toml::from_str(&format!(
-        r#"
-[mcp_servers.refreshed]
-url = "{}/mcp"
-startup_timeout_sec = 0.1
-"#,
-        server.uri()
-    ))?;
-    let refreshed_servers = user_config
-        .get("mcp_servers")
-        .cloned()
-        .map(HashMap::<String, codex_config::types::McpServerConfig>::deserialize)
-        .transpose()?
-        .expect("test config should define MCP servers");
-    refresh_config
-        .mcp_servers
-        .set(refreshed_servers)
-        .expect("test config should allow MCP servers");
-    refresh_config.config_layer_stack = refresh_config
-        .config_layer_stack
-        .with_user_config(&user_config_path, user_config)?;
-    test.codex.refresh_runtime_config(refresh_config).await;
-    test.codex.submit(Op::RefreshMcpServers).await?;
+    let refreshed_server = McpServerConfig {
+        transport: McpServerTransportConfig::StreamableHttp {
+            url: format!("{}/mcp", server.uri()),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+        },
+        auth: Default::default(),
+        environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+        enabled: true,
+        required: false,
+        supports_parallel_tool_calls: false,
+        disabled_reason: None,
+        startup_timeout_sec: Some(Duration::from_millis(100)),
+        tool_timeout_sec: None,
+        default_tools_approval_mode: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        scopes: None,
+        oauth: None,
+        oauth_resource: None,
+        tools: HashMap::new(),
+    };
+    test.codex
+        .submit(Op::RefreshMcpServers {
+            config: McpServerRefreshConfig {
+                mcp_servers: serde_json::to_value(HashMap::from([(
+                    "refreshed".to_string(),
+                    refreshed_server,
+                )]))?,
+                mcp_oauth_credentials_store_mode: serde_json::to_value(
+                    test.config.mcp_oauth_credentials_store_mode,
+                )?,
+                auth_keyring_backend_kind: serde_json::to_value(
+                    test.config.auth_keyring_backend_kind(),
+                )?,
+            },
+        })
+        .await?;
+    test.submit_turn("observe the refreshed MCP runtime")
+        .await?;
 
-    let _ = test
-        .codex
-        .read_mcp_resource("refreshed", "test://resource")
-        .await;
     assert!(resource_client.has_server("refreshed").await);
+    response.single_request();
     Ok(())
 }
 
@@ -631,7 +562,7 @@ async fn code_mode_only_exposes_direct_model_only_mcp_namespaces() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deferred_tool_world_state_is_disabled_by_default() -> Result<()> {
+async fn apps_guidance_appears_after_background_recovery_within_a_turn() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
@@ -889,19 +820,15 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
         ],
     )
     .await;
-    let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
-        .with_extensions(Arc::new(extensions.build()))
-        .with_config(|config| {
+    let mut builder =
+        apps_enabled_builder(apps_server.chatgpt_base_url.clone()).with_config(|config| {
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)
                 .expect("test config should allow feature update");
-            config
-                .features
-                .enable(Feature::DeferredToolWorldState)
-                .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
+    let mcp_runtime = test.codex.current_mcp_runtime().await?;
 
     test.codex
         .submit(Op::UserInput {
@@ -915,13 +842,11 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
             thread_settings: Default::default(),
         })
         .await?;
-    let EventMsg::RequestUserInput(request) = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::RequestUserInput(_))
+    let request = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        _ => None,
     })
-    .await
-    else {
-        unreachable!("wait_for_event should return the request-user-input event")
-    };
+    .await;
 
     let initial_requests = response.requests();
     assert_eq!(initial_requests.len(), 1);
@@ -934,29 +859,17 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
             .count(),
         0
     );
-    let initial_tools_state = initial_request
-        .message_input_texts("developer")
-        .into_iter()
-        .find(|text| text.contains("<tools>"))
-        .expect("initial request should contain tools world state");
-    assert!(
-        !initial_tools_state.contains(SEARCH_CALENDAR_NAMESPACE),
-        "Calendar namespace should not be advertised before recovery: {initial_tools_state}"
-    );
 
-    release_apps_recovery
-        .send(())
-        .expect("background Apps recovery should still be waiting");
-    wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::McpStartupUpdate(update)
-                if update.server == CODEX_APPS_MCP_SERVER_NAME
-                    && matches!(update.status, codex_protocol::protocol::McpStartupStatus::Ready)
-        )
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !mcp_runtime.manager().list_all_tools().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     })
-    .await;
-
+    .await
+    .expect("Apps MCP should recover while the turn is paused");
     test.codex
         .submit(Op::UserInputAnswer {
             id: request.turn_id,
@@ -984,46 +897,6 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
             .filter(|text| text.contains("<apps_instructions>"))
             .count(),
         1
-    );
-    let recovered_tools_state = requests[1]
-        .message_input_texts("developer")
-        .into_iter()
-        .find(|text| text.contains("Added deferred tool namespaces:"))
-        .expect("recovered request should contain a tools world-state delta");
-    assert!(
-        recovered_tools_state.contains(&format!(
-            "- {SEARCH_CALENDAR_NAMESPACE}: Plan events and manage your calendar."
-        )),
-        "Calendar namespace and description should be added after recovery: {recovered_tools_state}"
-    );
-    let recovered_body = requests[1].body_json();
-    assert!(
-        namespace_child_tool(
-            &recovered_body,
-            SEARCH_CALENDAR_NAMESPACE,
-            SEARCH_CALENDAR_CREATE_TOOL,
-        )
-        .is_none(),
-        "deferred Calendar namespace should not be directly advertised: {recovered_body}"
-    );
-    assert!(
-        recovered_body["tools"].as_array().is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|tool| tool.get("type").and_then(Value::as_str) == Some("tool_search"))
-        }),
-        "recovered request should advertise tool_search: {recovered_body}"
-    );
-    assert_eq!(startup_control.initialize_attempts(), 2);
-    insta::assert_snapshot!(
-        "deferred_tools_recover_during_sampling",
-        format_labeled_requests_snapshot(
-            "Deferred namespaces appear after Apps recovers between sampling requests.",
-            &[
-                ("Apps unavailable", &requests[0]),
-                ("Apps recovered", &requests[1]),
-            ],
-        )
     );
 
     Ok(())
@@ -1061,11 +934,6 @@ async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup
 
     let mut builder = search_capable_apps_builder(apps_server.chatgpt_base_url.clone())
         .with_config(move |config| {
-            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
-            config
-                .permissions
-                .set_permission_profile(PermissionProfile::Disabled)
-                .expect("test config should allow disabled permissions");
             config
                 .features
                 .enable(Feature::CodeModeOnly)
@@ -1091,41 +959,26 @@ async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup
 
     tokio::fs::remove_dir_all(test.codex_home_path().join("cache/codex_apps_tools")).await?;
     startup_control.fail_next_initialize_attempts(/*attempts*/ 1);
-    test.codex.submit(Op::RefreshMcpServers).await?;
+    let runtime_mcp_config = test.codex.runtime_mcp_config(&test.config).await;
+    let refresh_config = McpServerRefreshConfig {
+        mcp_servers: serde_json::to_value(codex_mcp::configured_mcp_servers(&runtime_mcp_config))?,
+        mcp_oauth_credentials_store_mode: serde_json::to_value(
+            runtime_mcp_config.mcp_oauth_credentials_store_mode,
+        )?,
+        auth_keyring_backend_kind: serde_json::to_value(
+            runtime_mcp_config.auth_keyring_backend_kind,
+        )?,
+    };
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "use Calendar after transient Apps startup failures".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
+        .submit(Op::RefreshMcpServers {
+            config: refresh_config,
         })
         .await?;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        let mut turn_complete = false;
-        let mut apps_ready = false;
-        while !turn_complete || !apps_ready {
-            let event = test
-                .codex
-                .next_event()
-                .await
-                .expect("event stream should stay open");
-            match event.msg {
-                EventMsg::TurnComplete(_) => turn_complete = true,
-                EventMsg::McpStartupUpdate(update)
-                    if update.server == CODEX_APPS_MCP_SERVER_NAME
-                        && matches!(
-                            update.status,
-                            codex_protocol::protocol::McpStartupStatus::Ready
-                        ) =>
-                {
-                    apps_ready = true;
-                }
-                _ => {}
-            }
+    test.submit_turn("use Calendar after transient Apps startup failures")
+        .await?;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while startup_control.initialize_attempts() < 3 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     })
     .await

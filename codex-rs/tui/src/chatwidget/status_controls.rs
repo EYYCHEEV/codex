@@ -191,6 +191,95 @@ impl ChatWidget {
         self.refresh_status_surfaces();
     }
 
+    pub(crate) fn request_account_logout(&mut self) {
+        let Some(accounts) = self.managed_accounts() else {
+            self.app_event_tx.send(AppEvent::Logout);
+            return;
+        };
+        let rows = accounts
+            .accounts()
+            .map(|account| {
+                (
+                    account.managed_account_id.clone(),
+                    crate::status::managed_account_label(account),
+                    crate::status::plan_type_display_name(account.plan_type),
+                    accounts.selected_account_id() == Some(account.managed_account_id.as_str()),
+                )
+            })
+            .collect::<Vec<_>>();
+        match rows.as_slice() {
+            [] => self.app_event_tx.send(AppEvent::Logout),
+            [(managed_account_id, _, _, _)] => {
+                self.app_event_tx.send(AppEvent::LogoutManagedAccount {
+                    managed_account_id: managed_account_id.clone(),
+                });
+            }
+            _ => {
+                let initial_selected_idx = rows
+                    .iter()
+                    .position(|(_, _, _, selected)| *selected)
+                    .or(Some(0));
+                let mut items = rows
+                    .into_iter()
+                    .map(|(managed_account_id, label, plan, selected)| {
+                        let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                            tx.send(AppEvent::LogoutManagedAccount {
+                                managed_account_id: managed_account_id.clone(),
+                            });
+                        })];
+                        SelectionItem {
+                            name: label,
+                            description: Some(if selected {
+                                format!("{plan} · selected for this thread")
+                            } else {
+                                plan
+                            }),
+                            is_current: selected,
+                            actions,
+                            dismiss_on_select: true,
+                            ..Default::default()
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                items.push(SelectionItem {
+                    name: "Log out all accounts".to_string(),
+                    description: Some(
+                        "Remove every managed ChatGPT account and exit Codex".to_string(),
+                    ),
+                    actions: vec![Box::new(|tx| tx.send(AppEvent::LogoutAllAccounts))],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                });
+                self.bottom_pane.show_selection_view(SelectionViewParams {
+                    title: Some("Log out of ChatGPT".to_string()),
+                    subtitle: Some(
+                        "Choose one account, or log out all accounts. Esc cancels.".to_string(),
+                    ),
+                    items,
+                    initial_selected_idx,
+                    row_display: SelectionRowDisplay::SingleLine,
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    pub(crate) fn show_status_with_legacy_rate_limit_refresh(&mut self) {
+        if self.should_prefetch_rate_limits() {
+            let request_id = self.next_status_refresh_request_id;
+            self.next_status_refresh_request_id =
+                self.next_status_refresh_request_id.wrapping_add(1);
+            self.add_status_output(/*refreshing_rate_limits*/ true, Some(request_id));
+            self.app_event_tx.send(AppEvent::RefreshRateLimits {
+                origin: RateLimitRefreshOrigin::StatusCommand { request_id },
+            });
+        } else {
+            self.add_status_output(
+                /*refreshing_rate_limits*/ false, /*request_id*/ None,
+            );
+        }
+    }
+
     pub(crate) fn add_status_output(
         &mut self,
         refreshing_rate_limits: bool,
@@ -255,6 +344,9 @@ impl ChatWidget {
         request_id: u64,
         snapshots: Vec<RateLimitSnapshot>,
     ) {
+        if self.managed_accounts().is_some() {
+            return;
+        }
         if !self
             .refreshing_status_outputs
             .iter()

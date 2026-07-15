@@ -4,12 +4,16 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_api::is_azure_responses_provider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptAuthSnapshot;
+use codex_login::ManagedChatgptSelectionScope;
+use codex_login::TransportAuthBinding;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::cache::ModelsCache;
 use codex_models_manager::manager::OpenAiModelsManager;
@@ -69,6 +73,21 @@ impl Default for ProviderCapabilities {
 pub struct ProviderAccountState {
     pub account: Option<ProviderAccount>,
     pub requires_openai_auth: bool,
+}
+
+/// Atomic provider, authentication, and account binding selected for one request attempt.
+#[derive(Clone)]
+pub struct ProviderRequestSetup {
+    pub effective_auth: Option<CodexAuth>,
+    pub api_provider: Provider,
+    pub api_auth: SharedAuthProvider,
+    pub agent_identity_telemetry: Option<AgentIdentityTelemetry>,
+    pub managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
+    pub managed_id: Option<String>,
+    pub credential_revision: Option<u64>,
+    pub account_state_revision: Option<u64>,
+    pub selection_revision: Option<u64>,
+    pub transport_auth_binding: TransportAuthBinding,
 }
 
 /// Error returned when a provider cannot construct its app-visible account state.
@@ -204,11 +223,27 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
         Box::pin(async move {
             if !provider_uses_first_party_auth_path(self.info()) {
-                return self.api_auth().await.map(ResolvedProviderAuth::new);
+                let auth = self.auth().await;
+                return resolve_provider_auth(auth.as_ref(), self.info())
+                    .map(|resolved| ResolvedProviderAuth::new(resolved, auth));
             }
-            let auth = self.auth().await;
-            resolve_provider_auth_for_scope(self.auth_manager(), auth.as_ref(), self.info(), scope)
-                .await
+            let setup =
+                resolve_provider_request_setup(self.auth_manager(), self.info(), scope).await?;
+            Ok(ResolvedProviderAuth {
+                auth: setup.api_auth,
+                effective_auth: setup.effective_auth,
+                agent_identity_telemetry: setup.agent_identity_telemetry,
+            })
+        })
+    }
+
+    /// Atomically selects every provider/auth value used by one request attempt.
+    fn request_setup(
+        &self,
+        scope: ProviderAuthScope,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderRequestSetup>> {
+        Box::pin(async move {
+            resolve_provider_request_setup(self.auth_manager(), self.info(), scope).await
         })
     }
 
@@ -254,12 +289,149 @@ pub type ModelProviderFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a
 /// Shared runtime model provider handle.
 pub type SharedModelProvider = Arc<dyn ModelProvider>;
 
-fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
+pub(crate) fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) -> bool {
     provider.requires_openai_auth
         && provider.env_key.is_none()
         && provider.experimental_bearer_token.is_none()
         && provider.auth.is_none()
         && provider.aws.is_none()
+}
+
+pub(crate) async fn resolve_provider_request_setup(
+    auth_manager: Option<Arc<AuthManager>>,
+    provider: &ModelProviderInfo,
+    scope: ProviderAuthScope,
+) -> codex_protocol::error::Result<ProviderRequestSetup> {
+    let first_party_auth = provider_uses_first_party_auth_path(provider);
+    let effective_manager_auth = if first_party_auth {
+        match auth_manager.as_ref() {
+            Some(manager) => match manager.auth_cached() {
+                Some(auth) => Some(auth),
+                None => manager.auth().await,
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+    let managed_chatgpt_mode = if first_party_auth {
+        match auth_manager.as_ref() {
+            Some(manager) if manager.has_external_auth() => false,
+            Some(manager) => match effective_manager_auth.as_ref() {
+                Some(auth) => {
+                    auth.auth_mode() == codex_protocol::auth::AuthMode::Chatgpt
+                        && !auth.is_external_chatgpt_tokens()
+                }
+                None => !manager
+                    .stored_managed_chatgpt_accounts()
+                    .map_err(CodexErr::Io)?
+                    .is_empty(),
+            },
+            None => false,
+        }
+    } else {
+        false
+    };
+    let selection_scope = ManagedChatgptSelectionScope {
+        thread_id: scope.thread_id.clone(),
+        session_id: scope.session_id.clone(),
+        model: scope.model.clone(),
+    };
+    let managed_snapshot = if managed_chatgpt_mode {
+        match auth_manager.as_ref() {
+            Some(manager) => manager
+                .managed_chatgpt_auth_snapshot(&selection_scope)
+                .await
+                .map_err(CodexErr::Io)?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let selected_auth = match managed_snapshot.as_ref() {
+        Some(snapshot) => Some(snapshot.auth.clone()),
+        None => match auth_manager.as_ref() {
+            Some(manager)
+                if managed_chatgpt_mode
+                    && !manager.has_external_auth()
+                    && !effective_manager_auth
+                        .as_ref()
+                        .is_some_and(CodexAuth::is_external_chatgpt_tokens)
+                    && !manager
+                        .managed_chatgpt_accounts()
+                        .map_err(CodexErr::Io)?
+                        .is_empty() =>
+            {
+                return Err(CodexErr::Io(std::io::Error::other(
+                    "managed ChatGPT account pool has no eligible account for this request",
+                )));
+            }
+            Some(_) => effective_manager_auth,
+            None => None,
+        },
+    };
+    let resolved = resolve_provider_auth_for_scope(
+        auth_manager,
+        managed_snapshot.as_ref(),
+        selected_auth.as_ref(),
+        provider,
+        scope,
+    )
+    .await?;
+    let effective_auth = resolved.effective_auth;
+    let api_provider =
+        provider.to_api_provider(effective_auth.as_ref().map(CodexAuth::auth_mode))?;
+    let transport_auth_binding = managed_snapshot.as_ref().map_or_else(
+        || transport_binding_for_auth(effective_auth.as_ref()),
+        |snapshot| {
+            let mut binding = snapshot.transport.clone();
+            if let Some(auth) = effective_auth.as_ref() {
+                binding.raw_account_id = auth.get_account_id();
+                binding.fedramp = auth.is_fedramp_account();
+                binding.auth_mode = auth.auth_mode();
+            }
+            binding
+        },
+    );
+    Ok(ProviderRequestSetup {
+        effective_auth,
+        api_provider,
+        api_auth: resolved.auth,
+        agent_identity_telemetry: resolved.agent_identity_telemetry,
+        managed_id: managed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.identity_key.clone()),
+        credential_revision: managed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.account_revision),
+        account_state_revision: managed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.account_state_revision),
+        selection_revision: managed_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.selection_revision),
+        transport_auth_binding,
+        managed_snapshot,
+    })
+}
+
+pub(crate) fn transport_binding_for_auth(auth: Option<&CodexAuth>) -> TransportAuthBinding {
+    let identity_key = auth
+        .and_then(CodexAuth::get_chatgpt_user_id)
+        .or_else(|| auth.and_then(CodexAuth::get_account_id))
+        .unwrap_or_else(|| {
+            auth.map(|auth| auth.auth_mode().to_string())
+                .unwrap_or_else(|| "unauthenticated".to_string())
+        });
+    TransportAuthBinding {
+        identity_key,
+        raw_account_id: auth.and_then(CodexAuth::get_account_id),
+        fedramp: auth.is_some_and(CodexAuth::is_fedramp_account),
+        auth_mode: auth
+            .map(CodexAuth::auth_mode)
+            .unwrap_or(codex_protocol::auth::AuthMode::ApiKey),
+        route_generation: 0,
+    }
 }
 
 /// Creates the default runtime model provider for configured provider metadata.
@@ -460,12 +632,24 @@ impl ModelProvider for ConfiguredModelProvider {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use chrono::Utc;
     use std::num::NonZeroU64;
 
     use codex_http_client::HttpClientFactory;
     use codex_http_client::OutboundProxyPolicy;
+    use codex_login::AuthCredentialsStoreMode;
+    use codex_login::AuthKeyringBackendKind;
+    use codex_login::ManagedChatgptFailure;
+    use codex_login::ManagedChatgptOauthCredentials;
+    use codex_login::ManagedChatgptRateObservation;
+    use codex_login::ManagedChatgptStatusObservation;
+    use codex_login::ManagedChatgptTokenObservation;
+    use codex_login::TokenData;
     use codex_login::auth::AgentIdentityAuthPolicy;
     use codex_login::auth::BedrockApiKeyAuth;
+    use codex_login::auth::login_with_chatgpt_auth_tokens;
+    use codex_login::token_data::IdTokenInfo;
     use codex_model_provider_info::ModelProviderAwsAuthInfo;
     use codex_model_provider_info::WireApi;
     use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -485,6 +669,64 @@ mod tests {
     use wiremock::matchers::path;
 
     use super::*;
+    use tempfile::tempdir;
+    fn request_scope() -> ProviderAuthScope {
+        ProviderAuthScope {
+            agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
+            session_source: SessionSource::Cli,
+            agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+            thread_id: Some("thread-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            model: Some("gpt-test".to_string()),
+        }
+    }
+
+    fn managed_id_token(email: &str, account_id: &str) -> String {
+        let header = serde_json::json!({"alg": "none", "typ": "JWT"});
+        let payload = serde_json::json!({
+            "email": email,
+            "email_verified": true,
+            "https://api.openai.com/auth": {
+                "chatgpt_user_id": "user-12345",
+                "user_id": "user-12345",
+                "chatgpt_account_id": account_id,
+            },
+        });
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        format!(
+            "{}.{}.{}",
+            encode(&serde_json::to_vec(&header).expect("serialize JWT header")),
+            encode(&serde_json::to_vec(&payload).expect("serialize JWT payload")),
+            encode(b"sig"),
+        )
+    }
+
+    fn managed_credentials(email: &str, account_id: &str) -> ManagedChatgptOauthCredentials {
+        managed_credentials_with_access_token(email, account_id, "managed-access-token")
+    }
+
+    fn managed_credentials_with_access_token(
+        email: &str,
+        account_id: &str,
+        access_token: &str,
+    ) -> ManagedChatgptOauthCredentials {
+        ManagedChatgptOauthCredentials {
+            tokens: TokenData {
+                id_token: IdTokenInfo {
+                    email: Some(email.to_string()),
+                    chatgpt_account_id: Some(account_id.to_string()),
+                    raw_jwt: managed_id_token(email, account_id),
+                    ..Default::default()
+                },
+                access_token: access_token.to_string(),
+                refresh_token: format!("refresh-{access_token}"),
+                account_id: Some(account_id.to_string()),
+            },
+            last_refresh: Utc::now(),
+            oauth_api_key: None,
+        }
+    }
+
     use crate::auth::AgentIdentitySessionFallback;
 
     fn provider_info_with_command_auth() -> ModelProviderInfo {
@@ -564,6 +806,583 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn request_setup_keeps_managed_selection_auth_headers_and_binding_atomic() {
+        let codex_home = tempdir().expect("tempdir");
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        let managed_id = auth_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials(
+                "managed@example.com",
+                "workspace-123",
+            ))
+            .await
+            .expect("insert managed account");
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(Arc::clone(&auth_manager)),
+        );
+
+        let setup = provider
+            .request_setup(request_scope())
+            .await
+            .expect("resolve managed request setup");
+        let snapshot = setup
+            .managed_snapshot
+            .as_ref()
+            .expect("managed snapshot should be retained");
+
+        assert_eq!(setup.managed_id.as_deref(), Some(managed_id.as_str()));
+        assert_eq!(setup.credential_revision, Some(snapshot.account_revision));
+        assert_eq!(
+            setup.account_state_revision,
+            Some(snapshot.account_state_revision)
+        );
+        assert_eq!(setup.selection_revision, Some(snapshot.selection_revision));
+        assert_eq!(setup.transport_auth_binding, snapshot.transport);
+        assert_eq!(
+            setup.transport_auth_binding.raw_account_id.as_deref(),
+            Some("workspace-123")
+        );
+        assert!(!setup.transport_auth_binding.fedramp);
+        assert_eq!(
+            setup
+                .api_auth
+                .to_auth_headers()
+                .get("ChatGPT-Account-ID")
+                .expect("raw account header"),
+            "workspace-123"
+        );
+        assert_eq!(setup.effective_auth, Some(snapshot.auth.clone()));
+    }
+
+    #[tokio::test]
+    async fn managed_dynamic_auth_rejects_same_identity_credential_revision_change() {
+        let codex_home = tempdir().expect("tempdir");
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        let identity = auth_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials_with_access_token(
+                "managed@example.com",
+                "workspace-123",
+                "first-token",
+            ))
+            .await
+            .expect("insert managed account");
+        let snapshot = auth_manager
+            .managed_chatgpt_auth_snapshot_for_identity(&identity)
+            .await
+            .expect("read managed account")
+            .expect("managed account exists");
+        let provider = crate::auth::auth_provider_from_auth_manager(
+            Arc::clone(&auth_manager),
+            &snapshot.auth,
+            snapshot.transport.clone(),
+            Some(snapshot.account_revision),
+        );
+        assert_eq!(
+            provider.to_auth_headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer first-token"))
+        );
+
+        auth_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials_with_access_token(
+                "managed@example.com",
+                "workspace-123",
+                "second-token",
+            ))
+            .await
+            .expect("refresh managed credential");
+
+        assert!(
+            provider.to_auth_headers().is_empty(),
+            "a provider scoped to credential revision r1 must fail closed after r2"
+        );
+    }
+    #[tokio::test]
+    async fn managed_dynamic_auth_survives_account_state_revision_change() {
+        let codex_home = tempdir().expect("tempdir");
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        let identity = auth_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials_with_access_token(
+                "managed@example.com",
+                "workspace-123",
+                "first-token",
+            ))
+            .await
+            .expect("insert managed account");
+        let snapshot = auth_manager
+            .managed_chatgpt_auth_snapshot_for_identity(&identity)
+            .await
+            .expect("read managed account")
+            .expect("managed account exists");
+        let provider = crate::auth::auth_provider_from_auth_manager(
+            Arc::clone(&auth_manager),
+            &snapshot.auth,
+            snapshot.transport.clone(),
+            Some(snapshot.account_revision),
+        );
+
+        auth_manager
+            .record_managed_chatgpt_status_observation(
+                &identity,
+                snapshot.account_revision,
+                snapshot.account_state_revision,
+                ManagedChatgptStatusObservation {
+                    observed_at: Utc::now(),
+                    rate: ManagedChatgptRateObservation::Unavailable {
+                        reason: "state-only observation".to_string(),
+                    },
+                    token: ManagedChatgptTokenObservation::NotObserved,
+                },
+            )
+            .expect("record status observation")
+            .expect("state revision should advance");
+
+        assert_eq!(
+            provider.to_auth_headers().get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer first-token")),
+            "state-only observations must not invalidate dynamic auth"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_setup_refreshes_pinned_identity_without_using_default_sibling() {
+        let codex_home = tempdir().expect("tempdir");
+        let pool_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        let first_id = pool_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials_with_access_token(
+                "first@example.com",
+                "workspace-first",
+                "first-old",
+            ))
+            .await
+            .expect("insert first account");
+        let second_id = pool_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials_with_access_token(
+                "second@example.com",
+                "workspace-second",
+                "second-old",
+            ))
+            .await
+            .expect("insert second account");
+        let selection_scope = ManagedChatgptSelectionScope {
+            thread_id: Some("thread-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            model: Some("gpt-test".to_string()),
+        };
+        let selected_snapshot = pool_manager
+            .managed_chatgpt_auth_snapshot(&selection_scope)
+            .await
+            .expect("select managed account")
+            .expect("eligible selected account");
+        let sibling_id = if selected_snapshot.identity_key == first_id {
+            &second_id
+        } else {
+            &first_id
+        };
+        let sibling_auth = pool_manager
+            .managed_chatgpt_auth_snapshot_for_identity(sibling_id)
+            .await
+            .expect("resolve sibling")
+            .expect("sibling snapshot")
+            .auth;
+        let request_manager = AuthManager::from_auth_for_testing_with_home(
+            sibling_auth,
+            codex_home.path().to_path_buf(),
+        );
+        assert_ne!(
+            request_manager
+                .auth_cached()
+                .expect("singular default")
+                .get_account_id(),
+            selected_snapshot.auth.get_account_id()
+        );
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(request_manager),
+        );
+        let initial = provider
+            .request_setup(request_scope())
+            .await
+            .expect("resolve initially selected account");
+        let initial_revision = initial
+            .credential_revision
+            .expect("selected credential revision should be retained");
+        let (selected_email, selected_account, old_bearer) =
+            if selected_snapshot.identity_key == first_id {
+                ("first@example.com", "workspace-first", "first-old")
+            } else {
+                ("second@example.com", "workspace-second", "second-old")
+            };
+
+        pool_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials_with_access_token(
+                selected_email,
+                selected_account,
+                "selected-refreshed",
+            ))
+            .await
+            .expect("refresh selected account");
+        let refreshed = provider
+            .request_setup(request_scope())
+            .await
+            .expect("resolve refreshed selected account");
+        let refreshed_headers = refreshed.api_auth.to_auth_headers();
+
+        assert_eq!(
+            refreshed.managed_id.as_deref(),
+            Some(selected_snapshot.identity_key.as_str())
+        );
+        assert!(
+            refreshed
+                .credential_revision
+                .is_some_and(|revision| revision > initial_revision)
+        );
+        assert_eq!(
+            refreshed_headers
+                .get(http::header::AUTHORIZATION)
+                .expect("selected bearer"),
+            "Bearer selected-refreshed"
+        );
+        assert_eq!(
+            refreshed_headers
+                .get("ChatGPT-Account-ID")
+                .expect("selected raw account"),
+            selected_account
+        );
+        assert_eq!(
+            initial
+                .api_auth
+                .to_auth_headers()
+                .get(http::header::AUTHORIZATION)
+                .expect("initial attempt bearer")
+                .to_str()
+                .expect("initial attempt bearer text"),
+            format!("Bearer {old_bearer}")
+        );
+        assert_eq!(
+            refreshed.transport_auth_binding.identity_key,
+            initial.transport_auth_binding.identity_key
+        );
+        assert_eq!(
+            refreshed.transport_auth_binding.raw_account_id,
+            initial.transport_auth_binding.raw_account_id
+        );
+        assert_eq!(
+            refreshed.transport_auth_binding.fedramp,
+            initial.transport_auth_binding.fedramp
+        );
+        assert_eq!(
+            refreshed.transport_auth_binding.auth_mode,
+            initial.transport_auth_binding.auth_mode
+        );
+        assert_eq!(refreshed.api_provider.name, initial.api_provider.name);
+        assert_eq!(
+            refreshed.api_provider.base_url,
+            initial.api_provider.base_url
+        );
+    }
+
+    #[tokio::test]
+    async fn request_setup_keeps_api_key_precedence_when_managed_pool_persists() {
+        let codex_home = tempdir().expect("tempdir");
+        let pool_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        pool_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials(
+                "preserved@example.com",
+                "workspace-preserved",
+            ))
+            .await
+            .expect("persist managed account pool");
+        let auth_manager = AuthManager::from_auth_for_testing_with_home(
+            CodexAuth::from_api_key("env-api-key"),
+            codex_home.path().to_path_buf(),
+        );
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(auth_manager),
+        );
+
+        let setup = provider
+            .request_setup(request_scope())
+            .await
+            .expect("API key request setup");
+
+        assert_eq!(
+            setup
+                .api_auth
+                .to_auth_headers()
+                .get(http::header::AUTHORIZATION)
+                .expect("API key bearer"),
+            "Bearer env-api-key"
+        );
+        assert_eq!(
+            setup.effective_auth.as_ref().map(CodexAuth::auth_mode),
+            Some(codex_protocol::auth::AuthMode::ApiKey)
+        );
+        assert!(setup.managed_snapshot.is_none());
+        assert!(setup.managed_id.is_none());
+        assert_eq!(
+            setup.transport_auth_binding.identity_key,
+            codex_protocol::auth::AuthMode::ApiKey.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn request_setup_reloads_replaced_external_overlay_before_pool_selection() {
+        let codex_home = tempdir().expect("tempdir");
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        auth_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials(
+                "managed@example.com",
+                "workspace-managed",
+            ))
+            .await
+            .expect("persist managed account pool");
+        let overlay_a_token = managed_id_token("external-a@example.com", "workspace-external-a");
+        login_with_chatgpt_auth_tokens(
+            codex_home.path(),
+            &overlay_a_token,
+            "workspace-external-a",
+            Some("team"),
+        )
+        .expect("install external overlay A");
+        assert!(
+            auth_manager
+                .auth()
+                .await
+                .is_some_and(|auth| auth.is_external_chatgpt_tokens()),
+            "overlay A must be cached before replacement"
+        );
+
+        let overlay_b_token = managed_id_token("external-b@example.com", "workspace-external-b");
+        login_with_chatgpt_auth_tokens(
+            codex_home.path(),
+            &overlay_b_token,
+            "workspace-external-b",
+            Some("enterprise"),
+        )
+        .expect("replace external overlay A with B");
+        assert!(
+            auth_manager.auth_cached().is_none(),
+            "overlay replacement must invalidate cached overlay A"
+        );
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(auth_manager),
+        );
+
+        let setup = provider
+            .request_setup(request_scope())
+            .await
+            .expect("request setup must reload overlay B");
+        let auth_headers = setup.api_auth.to_auth_headers();
+        let authorization = auth_headers
+            .get(http::header::AUTHORIZATION)
+            .expect("external overlay bearer");
+
+        assert!(
+            authorization.as_bytes() == format!("Bearer {overlay_b_token}").as_bytes(),
+            "request setup must use the exact overlay B bearer"
+        );
+        assert_eq!(setup.transport_auth_binding.identity_key, "user-12345");
+        assert_eq!(
+            setup.transport_auth_binding.raw_account_id.as_deref(),
+            Some("workspace-external-b")
+        );
+        assert!(setup.managed_snapshot.is_none());
+        assert!(setup.managed_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_setup_rejects_managed_pool_without_an_eligible_snapshot() {
+        let codex_home = tempdir().expect("tempdir");
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        auth_manager
+            .upsert_managed_chatgpt_oauth(managed_credentials(
+                "managed@example.com",
+                "workspace-123",
+            ))
+            .await
+            .expect("insert managed account");
+        let selection_scope = ManagedChatgptSelectionScope {
+            thread_id: Some("thread-1".to_string()),
+            session_id: Some("session-1".to_string()),
+            model: Some("gpt-test".to_string()),
+        };
+        let snapshot = auth_manager
+            .managed_chatgpt_auth_snapshot(&selection_scope)
+            .await
+            .expect("select managed account")
+            .expect("eligible managed account");
+        auth_manager
+            .recover_failed_attempt(
+                &snapshot,
+                ManagedChatgptFailure::Quota { reset_at: None },
+                /*committed*/ false,
+                &selection_scope,
+            )
+            .await
+            .expect("block the only account");
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(auth_manager),
+        );
+
+        let error = match provider.request_setup(request_scope()).await {
+            Ok(_) => panic!("blocked managed pool must not fall back to singular auth"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("managed ChatGPT account pool has no eligible account")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_setup_gives_explicit_provider_bearer_precedence_over_managed_auth() {
+        let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        provider_info.experimental_bearer_token = Some("provider-token".to_string());
+        let provider = create_model_provider(
+            provider_info,
+            Some(AuthManager::from_auth_for_testing(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            )),
+        );
+        assert!(
+            provider.auth_manager().is_none(),
+            "static provider bearer must not inherit the managed auth manager"
+        );
+        assert!(!provider.supports_attestation());
+
+        let setup = provider
+            .request_setup(request_scope())
+            .await
+            .expect("resolve external provider setup");
+
+        assert!(setup.effective_auth.is_none());
+        assert!(setup.managed_snapshot.is_none());
+        assert!(setup.managed_id.is_none());
+        assert!(setup.credential_revision.is_none());
+        assert!(setup.account_state_revision.is_none());
+        assert!(setup.selection_revision.is_none());
+        assert_eq!(
+            setup
+                .api_auth
+                .to_auth_headers()
+                .get(http::header::AUTHORIZATION)
+                .expect("provider bearer header"),
+            "Bearer provider-token"
+        );
+        assert_eq!(setup.transport_auth_binding.identity_key, "unauthenticated");
+    }
+
+    #[tokio::test]
+    async fn request_setup_preserves_non_pooled_api_key_auth() {
+        let auth = CodexAuth::from_api_key("openai-api-key");
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(AuthManager::from_auth_for_testing(auth.clone())),
+        );
+
+        let setup = provider
+            .request_setup(request_scope())
+            .await
+            .expect("resolve API key setup");
+
+        assert_eq!(setup.effective_auth, Some(auth));
+        assert!(setup.managed_snapshot.is_none());
+        assert_eq!(
+            setup
+                .api_auth
+                .to_auth_headers()
+                .get(http::header::AUTHORIZATION)
+                .expect("API key header"),
+            "Bearer openai-api-key"
+        );
+    }
+
+    #[tokio::test]
+    async fn bedrock_request_setup_preserves_managed_bedrock_auth() {
+        let auth = bedrock_api_key_auth();
+        let provider = create_model_provider(
+            ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
+            Some(AuthManager::from_auth_for_testing(auth.clone())),
+        );
+
+        let setup = provider
+            .request_setup(request_scope())
+            .await
+            .expect("resolve Bedrock request setup");
+
+        assert_eq!(setup.effective_auth, Some(auth));
+        assert!(setup.managed_snapshot.is_none());
+        assert!(setup.managed_id.is_none());
+    }
+
+    #[tokio::test]
     async fn scoped_auth_ignores_scope_for_non_openai_provider() {
         let provider = create_model_provider(
             create_oss_provider_with_base_url("http://localhost:11434/v1", WireApi::Responses),
@@ -575,6 +1394,9 @@ mod tests {
                 agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
                 session_source: SessionSource::Cli,
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                thread_id: None,
+                session_id: None,
+                model: None,
             })
             .await
             .expect("auth should resolve");
@@ -967,14 +1789,27 @@ mod tests {
             )),
         );
 
-        let manager =
-            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+        let codex_home = tempdir().expect("codex home");
+        let manager = provider.models_manager(
+            codex_home.path().to_path_buf(),
+            /*config_model_catalog*/ None,
+        );
         let catalog = manager
             .raw_model_catalog(
                 RefreshStrategy::Online,
                 HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
             )
             .await;
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("recorded model requests");
+        assert_eq!(requests.len(), 1, "expected one provider models request");
+        assert_eq!(
+            requests[0].headers.get(http::header::AUTHORIZATION),
+            Some(&http::HeaderValue::from_static("Bearer provider-token"))
+        );
 
         assert!(
             catalog

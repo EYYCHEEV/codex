@@ -10,4 +10,12 @@ import type { RateLimitSnapshot } from "./RateLimitSnapshot";
  * or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and
  * does not clear a previously observed value.
  */
-export type AccountRateLimitsUpdatedNotification = { rateLimits: RateLimitSnapshot, };
+export type AccountRateLimitsUpdatedNotification = {
+/**
+ * Stable managed OAuth identity, or `null` for every non-pooled auth mode.
+ */
+managedAccountId: string | null,
+/**
+ * Managed account row revision, or `null` for every non-pooled auth mode.
+ */
+accountRevision: number | null, rateLimits: RateLimitSnapshot, };

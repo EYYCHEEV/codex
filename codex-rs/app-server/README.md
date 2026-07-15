@@ -2150,7 +2150,7 @@ $demo-app Pull the latest updates from the team.
 
 ## Auth endpoints
 
-The JSON-RPC auth/account surface exposes request/response methods plus server-initiated notifications (no `id`). Use these to determine auth state, start or cancel logins, logout, and inspect ChatGPT rate limits.
+The JSON-RPC auth/account surface exposes request/response methods plus server-initiated notifications (which do not have an `id`). Use these methods to inspect auth state, manage the managed ChatGPT account pool, start or cancel logins, log out, and inspect ChatGPT rate limits and usage.
 
 ### Authentication modes
 
@@ -2161,23 +2161,33 @@ Codex supports these authentication modes. The current mode is surfaced in `acco
 - **Codex managed Amazon Bedrock auth (`amazonBedrock`, experimental)**: Caller supplies an Amazon Bedrock API key and region via `account/login/start` with `type: "amazonBedrock"`. The client must enable the `experimentalApi` initialization capability for Codex-managed Amazon Bedrock login. Codex replaces the current primary auth with the Bedrock credential and writes `model_provider = "amazon-bedrock"` to the user config.
 - **Personal access token (`personalAccessToken`)**: Codex uses a ChatGPT-backed personal access token loaded outside the app-server login RPCs, such as with `codex login --with-access-token` or `CODEX_ACCESS_TOKEN`.
 
+`account/updated.authMode` can also be `chatgptAuthTokens`, `headers`, `agentIdentity`, or `bedrockApiKey` when those provider modes are active, or `null` when no account is active. The `account/updated` payload always contains `authMode` and `planType`; either value can be `null`.
+
 ### API Overview
 
-- `account/read` — fetch current account info; optionally refresh tokens.
-- `account/login/start` — begin login (`apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`).
-- `account/login/completed` (notify) — emitted when a login attempt finishes (success or error).
-- `account/login/cancel` — cancel a pending managed ChatGPT login by `loginId`.
-- `account/logout` — sign out; triggers `account/updated` on success.
-- `account/updated` (notify) — emitted whenever auth mode changes (`authMode`: `apikey`, `bedrockApiKey`, `chatgpt`, `personalAccessToken`, or `null`) and includes the current ChatGPT `planType` when available.
-- `account/rateLimits/read` — fetch ChatGPT rate limits, an optional effective monthly credit limit, whether spend control has been reached, and the earned rate-limit resets currently available, including expiry details when provided by the backend. Rate-limit updates arrive via `account/rateLimits/updated` (notify); reset-credit data is snapshot-only.
-- `account/rateLimitResetCredit/consume` — consume one earned reset using a caller-provided idempotency key, optionally selecting a reset-credit ID returned by `account/rateLimits/read`.
-- `account/usage/read` — fetch ChatGPT account token-activity summary and daily buckets.
-- `account/workspaceMessages/read` — fetch active workspace messages, including workspace notification headlines when available.
-- `account/rateLimits/updated` (notify) — emitted whenever a user's ChatGPT rate limits change. This is a sparse rolling update; merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot.
+- `account/read`: fetch current account info and optionally refresh managed tokens.
+- `account/login/start`: begin login with `apiKey`, `chatgpt`, `chatgptDeviceCode`, `amazonBedrock`, or the unstable internal `chatgptAuthTokens` form.
+- `account/login/completed` (notify): emitted when a login attempt finishes; successful API-key and externally supplied-token logins use `loginId: null`.
+- `account/login/cancel`: cancel a pending managed ChatGPT login by `loginId`; returns `canceled` or `notFound`.
+- `account/list`: list managed ChatGPT accounts, with optional thread/model selection context and token/usage refreshes.
+- `account/logout`: log out the current account, one managed account (`accountId`), or all managed accounts (`all`); returns the remaining managed-account pool.
+- `account/updated` (notify): emitted after an auth-mode change and includes the current `authMode` and ChatGPT `planType` when available.
+- `account/pool/updated` (notify): emitted when global managed-account membership or account data changes.
+- `account/selection/updated` (notify): emitted when the selected managed account changes for a thread observed through a thread-scoped `account/list`.
+- `account/usage/updated` (notify): emitted when a managed account's persisted usage observation changes.
+- `account/rateLimits/read`: fetch the backward-compatible rate-limit snapshot, per-limit snapshots, an optional effective monthly credit limit, spend-control state, and earned reset credits.
+- `account/rateLimits/updated` (notify): emitted when ChatGPT rate limits change.
+  This is a sparse rolling update; merge available values into the latest `account/rateLimits/read` response or refetch that snapshot.
   `spendControlReached` is `true` or `false` when the backend reports spend-control state; `null` means unavailable and must not clear a previously observed value in a sparse update.
-- `account/sendAddCreditsNudgeEmail` — ask ChatGPT to email the workspace owner about depleted credits or a reached usage limit.
-- `mcpServer/oauthLogin/completed` (notify) — emitted after a `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.
-- `mcpServer/startupStatus/updated` (notify) — emitted when a configured MCP server's startup status changes; payload includes `{ threadId, name, status, error, failureReason }`, where `threadId` is the owning thread when startup is thread-scoped and `null` when it is app-scoped, and `status` is `starting`, `ready`, `failed`, or `cancelled`. `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed, so clients can prompt the user to reconnect the named server.
+- `account/rateLimitResetCredit/consume`: consume one earned reset using a caller-provided idempotency key and an optional reset-credit ID returned by `account/rateLimits/read`.
+- `account/usage/read`: fetch the ChatGPT account token-activity summary and optional daily buckets.
+- `account/workspaceMessages/read`: fetch active workspace messages, including workspace notification headlines when available.
+- `account/sendAddCreditsNudgeEmail`: ask ChatGPT to email the workspace owner about depleted credits or a reached usage limit.
+- `mcpServer/oauthLogin/completed` (notify): emitted after an `mcpServer/oauth/login` flow finishes for a server; payload includes `{ name, threadId, success, error? }`.
+- `mcpServer/startupStatus/updated` (notify): emitted when a configured MCP server's startup status changes; payload includes `{ threadId, name, status, error, failureReason }`.
+  `threadId` is the owning thread for thread-scoped startup and `null` for app-scoped startup.
+  `status` is `starting`, `ready`, `failed`, or `cancelled`.
+  `failureReason` is `reauthenticationRequired` when stored OAuth credentials have expired and cannot be refreshed.
 
 ### 1) Check auth state
 
@@ -2190,13 +2200,17 @@ Request:
 Response examples:
 
 ```json
+{ "id": 1, "result": { "account": null, "requiresOpenaiAuth": false } }
+{ "id": 1, "result": { "account": null, "requiresOpenaiAuth": true } }
+{ "id": 1, "result": { "account": { "type": "apiKey" }, "requiresOpenaiAuth": true } }
 { "id": 1, "result": { "account": { "type": "chatgpt", "email": "user@example.com", "planType": "pro" }, "requiresOpenaiAuth": true } }
 { "id": 1, "result": { "account": { "type": "amazonBedrock", "usesCodexManagedCredentials": false }, "requiresOpenaiAuth": false } }
+{ "id": 1, "result": { "account": { "type": "chatgpt", "email": null, "planType": "enterprise" }, "requiresOpenaiAuth": true } }
 ```
 
 Field notes:
 
-- `refreshToken` (bool): set `true` to force a token refresh.
+- `refreshToken` (bool): set `true` to force a managed-token refresh.
 - `email` is `null` when the ChatGPT account does not have an email address.
 - `requiresOpenaiAuth` reflects the active provider; when `false`, Codex can run without OpenAI credentials.
 - Amazon Bedrock reports `usesCodexManagedCredentials: true` when it uses a Bedrock API key managed by Codex. It reports `false` for external credential paths, including the AWS credential chain and configured command auth. This identifies whether Codex-managed credentials are selected; it does not validate that the credential source can resolve credentials.
@@ -2208,7 +2222,7 @@ Field notes:
    {
      "method": "account/login/start",
      "id": 2,
-     "params": { "type": "apiKey", "apiKey": "sk-…" }
+     "params": { "type": "apiKey", "apiKey": "<api-key>" }
    }
    ```
 2. Expect:
@@ -2225,22 +2239,30 @@ Field notes:
 
 1. Start:
    ```json
-   { "method": "account/login/start", "id": 3, "params": { "type": "chatgpt" } }
+   {
+     "method": "account/login/start",
+     "id": 3,
+     "params": {
+       "type": "chatgpt",
+       "codexStreamlinedLogin": false,
+       "useHostedLoginSuccessPage": false,
+       "appBrand": null
+     }
+   }
    { "id": 3, "result": { "type": "chatgpt", "loginId": "<uuid>", "authUrl": "https://chatgpt.com/…&redirect_uri=http%3A%2F%2Flocalhost%3A<port>%2Fauth%2Fcallback" } }
    ```
-2. Open `authUrl` in a browser; the app-server hosts the local callback.
-   By default, a successful callback redirects to the local success page. Clients may set
+2. Open `authUrl` in a browser; the app-server hosts the local callback. Set
    `useHostedLoginSuccessPage: true` to redirect successful callbacks that do not require
-   organization setup to the hosted Codex success page instead. When hosted login success is
-   enabled, clients may set `appBrand` to `"codex"` or `"chatgpt"` to select the matching hosted
-   page artwork; omitted or `null` values default to `"codex"`.
+   organization setup to the hosted Codex success page. When hosted login success is
+   enabled, `appBrand` can be `"codex"` or `"chatgpt"`; omitted or `null` values default to
+   `"codex"`. `codexStreamlinedLogin` is an optional boolean for the streamlined login flow.
 3. Wait for notifications:
    ```json
-   { "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": true, "error": null, "onboardingEntrypoint": "life_sciences" } }
+   { "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": true, "error": null, "onboardingEntrypoint": "life_sciences", "managedAccountId": "managed-account-1" } }
    { "method": "account/updated", "params": { "authMode": "chatgpt", "planType": "plus" } }
    ```
    `onboardingEntrypoint` is optional and is only emitted when the OAuth callback carries a
-   recognized onboarding hint.
+   recognized onboarding hint. `managedAccountId` identifies the persisted managed account.
 
 ### 3) Log in with an Amazon Bedrock API key
 
@@ -2276,103 +2298,366 @@ Codex stores the key and region as the primary Codex auth, replacing any previou
 2. Show `verificationUrl` and `userCode` to the user; the frontend owns the UX.
 3. Wait for notifications:
    ```json
-   { "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": true, "error": null } }
+   { "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": true, "error": null, "managedAccountId": "managed-account-1" } }
    { "method": "account/updated", "params": { "authMode": "chatgpt", "planType": "plus" } }
    ```
+
+The unstable internal `chatgptAuthTokens` form accepts
+`{ "type": "chatgptAuthTokens", "accessToken": "<access-token>", "chatgptAccountId": "<account-id>", "chatgptPlanType": null }`
+and returns `{ "type": "chatgptAuthTokens" }`. It sends `account/login/completed` with
+`loginId: null`, `success: true`, `error: null`, and `managedAccountId: null`, followed by
+`account/updated`.
 
 ### 5) Cancel a ChatGPT login
 
 ```json
 { "method": "account/login/cancel", "id": 5, "params": { "loginId": "<uuid>" } }
-{ "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": false, "error": "…" } }
+{ "id": 5, "result": { "status": "canceled" } }
 ```
 
-### 6) Logout
+If no matching login is pending, the response status is `"notFound"`. Canceling an active
+browser or device-code login also results in:
 
 ```json
-{ "method": "account/logout", "id": 6 }
-{ "id": 6, "result": {} }
-{ "method": "account/updated", "params": { "authMode": null, "planType": null } }
+{ "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": false, "error": "<error>" } }
 ```
 
-When using a Codex-managed Bedrock key, logout removes the key and clears `model_provider` if it is still set to `"amazon-bedrock"`. When using AWS-managed credentials, manage them through AWS or switch providers before logging out.
+### 6) List managed ChatGPT accounts
 
-### 7) Rate limits (ChatGPT)
+`account/list` always takes a params object; `{}` is valid for an unscoped list. Use
+`threadId` to include the selected account for a thread, and optionally pass `model` to
+compute selection for that model.
 
 ```json
-{ "method": "account/rateLimits/read", "id": 7 }
+{
+  "method": "account/list",
+  "id": 6,
+  "params": {
+    "threadId": "thread-123",
+    "model": "gpt-5",
+    "refreshTokens": false,
+    "refreshUsage": false
+  }
+}
+```
+
+Set `refreshTokens: true` to refresh due managed OAuth tokens before constructing the
+response. Set `refreshUsage: true` to refresh each account's rate-limit and token-usage
+observation before constructing the response. Both flags default to `false`. Omitting
+`threadId` (or passing `null`) leaves the response unscoped; `model` is also nullable.
+
+The response contains the complete managed-account pool and its revisions:
+
+```json
+{
+  "id": 6,
+  "result": {
+    "accounts": [
+      {
+        "managedAccountId": "managed-account-1",
+        "chatgptAccountId": "workspace-account-1",
+        "email": "person@example.com",
+        "planType": "pro",
+        "eligible": true,
+        "eligibilityReason": null,
+        "accountRevision": 12,
+        "credentialRevision": 4,
+        "refreshStatus": { "type": "healthy" },
+        "block": null,
+        "usage": {
+          "state": "fresh",
+          "rateLimits": [
+            {
+              "limitId": "codex",
+              "limitName": null,
+              "primary": { "usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1730947200 },
+              "secondary": null,
+              "credits": null,
+              "individualLimit": null,
+              "planType": "pro",
+              "rateLimitReachedType": null
+            }
+          ],
+          "tokenUsage": null,
+          "observedAt": 1730940000,
+          "unavailableReason": null,
+          "unavailableObservedAt": null
+        }
+      }
+    ],
+    "selectedAccountId": "managed-account-1",
+    "selectionRevision": 5,
+    "poolRevision": 12
+  }
+}
+```
+
+Response fields:
+
+- `accounts` is an array of `ManagedChatgptAccountView` rows. `managedAccountId` is the stable identity for a row; do not join rows by array position, email, or the optional `chatgptAccountId`.
+- When externally supplied ChatGPT auth is active, the managed pool is hidden: `accounts` is empty, `selectedAccountId` and scoped `selectionRevision` are `null`, and `poolRevision` still identifies the underlying pool revision.
+- `chatgptAccountId` and `email` are nullable account metadata. `planType` is the current plan classification.
+- `eligible` reports whether the account can be selected. `eligibilityReason` is nullable and supplies a stable reason when the account is not eligible.
+- `accountRevision` is the monotonic revision of mutable account state. `credentialRevision` is the monotonic revision of the credential generation; status and usage observations do not change it.
+- `refreshStatus` is `{ "type": "healthy" }`, `{ "type": "transientUnavailable", "observedAt": <unix-seconds> }`, or `{ "type": "reloginRequired", "reasonCode": "<stable-code>", "observedAt": <unix-seconds> }`.
+- `block` is nullable; when present it contains `{ "reason": "<stable-code>", "blockedUntil": <unix-seconds-or-null> }`.
+- `usage.state` is `unknown`, `fresh`, `stale`, or `unavailable`. `usage.rateLimits` contains account-keyed rate-limit snapshots. `usage.tokenUsage` is nullable and has the fields documented under `account/usage/read`. `observedAt`, `unavailableReason`, and `unavailableObservedAt` are nullable.
+- `selectedAccountId` is the selected managed-account identity, or `null`.
+- `selectionRevision` is included for a scoped list when a managed pool is available; it is `null` for an unscoped list or a non-pooled auth mode.
+- `poolRevision` is the monotonic revision of global managed-account membership and account data.
+
+### 7) Logout
+
+`account/logout` accepts omitted or `null` params, or an object with optional `accountId`
+and `all`. `accountId` selects one managed account by its stable identity, a supported
+identity alias, its ChatGPT account id, or its case-insensitive email. `all: true` removes
+all managed accounts. `accountId` and `all: true` cannot be combined.
+
+```json
+{
+  "method": "account/logout",
+  "id": 7,
+  "params": { "accountId": "managed-account-1", "all": false }
+}
+```
+
+The response always contains the removed identities, the remaining managed-account rows,
+and the current selected identity:
+
+```json
 {
   "id": 7,
   "result": {
+    "removedAccountIds": ["managed-account-1"],
+    "accounts": [],
+    "selectedAccountId": null
+  }
+}
+```
+
+`removedAccountIds` and `accounts` default to empty arrays; `selectedAccountId` defaults to
+`null`. With multiple managed accounts, omitting params or passing `{ "all": false }` is
+rejected; select one account with `accountId` or remove all with `all: true`. After a
+successful logout, the server emits `account/updated` and updates any affected account
+pool or thread selection notifications.
+
+When using a Codex-managed Bedrock key, logout removes the key and clears `model_provider` if it is still set to `"amazon-bedrock"`.
+When using AWS-managed credentials, manage them through AWS or switch providers before logging out.
+
+### 8) Rate limits (ChatGPT)
+
+`account/rateLimits/read` has no request parameters (omit `params` or pass `null`):
+
+```json
+{ "method": "account/rateLimits/read", "id": 8 }
+{
+  "id": 8,
+  "result": {
     "rateLimits": {
-      "primary": { "usedPercent": 25, "windowDurationMins": 15, "resetsAt": 1730947200 },
+      "limitId": "codex",
+      "limitName": null,
+      "primary": { "usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1730947200 },
       "secondary": null,
+      "credits": { "hasCredits": true, "unlimited": false, "balance": null },
+      "individualLimit": { "limit": "1000000", "used": "250000", "remainingPercent": 75, "resetsAt": 1733616000 },
+      "planType": "pro",
       "rateLimitReachedType": null
+    },
+    "rateLimitsByLimitId": {
+      "codex": {
+        "limitId": "codex",
+        "limitName": null,
+        "primary": { "usedPercent": 25, "windowDurationMins": 300, "resetsAt": 1730947200 },
+        "secondary": null,
+        "credits": null,
+        "individualLimit": null,
+        "planType": "pro",
+        "rateLimitReachedType": null
+      }
     },
     "rateLimitResetCredits": {
       "availableCount": 2,
       "credits": [
         {
-          "id": "RateLimitResetCredit_1",
+          "id": "reset-credit-1",
           "resetType": "codexRateLimits",
           "status": "available",
-          "grantedAt": 1781654400,
-          "expiresAt": 1784246400,
-          "title": "Full reset (Weekly + 5 hr)",
-          "description": "Ready to redeem"
+          "grantedAt": 1730000000,
+          "expiresAt": 1732592000,
+          "title": "Rate-limit reset",
+          "description": "Available reset"
         }
       ]
     }
   }
 }
-{ "method": "account/rateLimits/updated", "params": { "rateLimits": { … } } }
 ```
 
-Field notes:
+Each `RateLimitSnapshot` contains nullable `limitId`, `limitName`, `primary`,
+`secondary`, `credits`, `individualLimit`, `planType`, and `rateLimitReachedType`.
+`primary` and `secondary` are `RateLimitWindow` values with required `usedPercent` and
+nullable `windowDurationMins` and `resetsAt` (Unix seconds). `credits`, when present,
+contains `hasCredits`, `unlimited`, and nullable `balance`.
 
-- `usedPercent` is current usage within the OpenAI quota window.
-- `windowDurationMins` is the quota window length.
-- `resetsAt` is a Unix timestamp (seconds) for the next reset.
-- `rateLimitReachedType` identifies the backend-classified limit state when one has been reached.
-- `individualLimit` describes the effective monthly credit limit when available. In an `account/rateLimits/read` response, `null` means no monthly limit is available. In a sparse `account/rateLimits/updated` notification, nullable account metadata may be unavailable and does not clear a previously observed value.
-- `rateLimitResetCredits` contains the available earned-reset count when the backend provides it; otherwise it is `null`.
-- `rateLimitResetCredits.credits` is `null` when only the count is available. An empty array means details were fetched and no available credits were returned.
-- The backend may cap `rateLimitResetCredits.credits`, so `availableCount` is the authoritative total and can be greater than the number of detail rows.
-- Refetch `account/rateLimits/read` after consuming a reset.
+`individualLimit`, when present, contains string-valued `limit` and `used`, integer
+`remainingPercent`, and Unix-seconds `resetsAt`. `planType` uses the values `free`,
+`go`, `plus`, `pro`, `prolite`, `team`, `self_serve_business_usage_based`, `business`,
+`enterprise_cbp_usage_based`, `enterprise`, `edu`, or `unknown`. `rateLimitReachedType`
+is one of `rate_limit_reached`, `workspace_owner_credits_depleted`,
+`workspace_member_credits_depleted`, `workspace_owner_usage_limit_reached`, or
+`workspace_member_usage_limit_reached`.
 
-### 8) Earned rate-limit resets (ChatGPT)
+`rateLimits` is the backward-compatible single-bucket view. `rateLimitsByLimitId` is a
+nullable map of additional metered snapshots keyed by `limitId`. `rateLimitResetCredits`
+is nullable; when present, `availableCount` is authoritative and `credits` is either
+`null` (only the count is known) or an array of detail rows. Each detail row has
+`id`, `resetType` (`codexRateLimits` or `unknown`), `status` (`available`, `redeeming`,
+`redeemed`, or `unknown`), `grantedAt`, nullable `expiresAt`, nullable `title`, and
+nullable `description`.
+
+`account/rateLimits/updated` is a sparse rolling notification. Its `rateLimits` field
+has the same `RateLimitSnapshot` shape; `managedAccountId` and `accountRevision` are
+nullable and are omitted for non-pooled auth modes:
 
 ```json
-{ "method": "account/rateLimitResetCredit/consume", "id": 8, "params": { "idempotencyKey": "8ae96ff3-3425-4f4c-8772-b6fd61502868", "creditId": "RateLimitResetCredit_1" } }
-{ "id": 8, "result": { "outcome": "reset" } }
+{
+  "method": "account/rateLimits/updated",
+  "params": {
+    "managedAccountId": "managed-account-1",
+    "accountRevision": 13,
+    "rateLimits": {
+      "limitId": "codex",
+      "limitName": null,
+      "primary": { "usedPercent": 30, "windowDurationMins": 300, "resetsAt": 1730947200 },
+      "secondary": null,
+      "credits": null,
+      "individualLimit": null,
+      "planType": "pro",
+      "rateLimitReachedType": null
+    }
+  }
+}
+```
+
+Merge fields present in this notification into the latest snapshot or refetch
+`account/rateLimits/read`; nullable account metadata unavailable in a rolling update does
+not clear a previously observed value.
+
+### 9) Earned rate-limit resets (ChatGPT)
+
+```json
+{ "method": "account/rateLimitResetCredit/consume", "id": 9, "params": { "idempotencyKey": "attempt-1", "creditId": "reset-credit-1" } }
+{ "id": 9, "result": { "outcome": "reset" } }
 ```
 
 Field notes:
 
 - `idempotencyKey` must be non-empty. A UUID is recommended for each logical redemption attempt; reuse the same value when retrying that attempt.
 - `creditId` is optional. When provided, it must be a non-empty opaque ID returned by `account/rateLimits/read`; when omitted, the backend selects the next available credit.
-- `reset` means a credit was consumed.
-- `alreadyRedeemed` means the same redemption completed previously. Treat it as an idempotent success and refresh account limits.
-- `nothingToReset` means there is no eligible rate-limit window to reset.
-- `noCredit` means the account has no earned reset credits available.
+- `outcome` is `reset`, `alreadyRedeemed`, `nothingToReset`, or `noCredit`.
 - Refetch `account/rateLimits/read` after consuming a reset instead of inferring updated state from this response.
 
-### 9) Workspace messages (ChatGPT)
+### 10) Token usage (ChatGPT)
 
 ```json
-{ "method": "account/workspaceMessages/read", "id": 9 }
-{ "id": 9, "result": { "featureEnabled": true, "messages": [
+{ "method": "account/usage/read", "id": 10 }
+{
+  "id": 10,
+  "result": {
+    "summary": {
+      "lifetimeTokens": 1000000,
+      "peakDailyTokens": 50000,
+      "longestRunningTurnSec": 900,
+      "currentStreakDays": 3,
+      "longestStreakDays": 14
+    },
+    "dailyUsageBuckets": [
+      { "startDate": "2025-01-01", "tokens": 25000 }
+    ]
+  }
+}
+```
+
+`dailyUsageBuckets` is nullable. Each summary field is nullable; each bucket has a
+`startDate` string and integer `tokens`. Managed account rows expose the same summary
+shape under `usage.tokenUsage`.
+
+`account/usage/updated` identifies the managed row and the account revision carrying the
+observation:
+
+```json
+{
+  "method": "account/usage/updated",
+  "params": {
+    "managedAccountId": "managed-account-1",
+    "accountRevision": 14,
+    "usage": {
+      "state": "fresh",
+      "rateLimits": [],
+      "tokenUsage": null,
+      "observedAt": 1730940000,
+      "unavailableReason": null,
+      "unavailableObservedAt": null
+    }
+  }
+}
+```
+
+`usage.state` is `unknown`, `fresh`, `stale`, or `unavailable`. `usage.rateLimits` is an
+array of `RateLimitSnapshot` values. `unavailableReason` and `unavailableObservedAt`
+describe a failed refresh while retaining any prior observation.
+
+### 11) Managed-account pool and selection notifications
+
+`account/pool/updated` carries the complete current pool and global revision:
+
+```json
+{
+  "method": "account/pool/updated",
+  "params": {
+    "accounts": [],
+    "poolRevision": 13
+  }
+}
+```
+
+`accounts` uses the same `ManagedChatgptAccountView` shape returned by `account/list`.
+An empty array is a valid pool update. `poolRevision` is monotonic.
+An auth-mode transition that clears managed accounts can emit an empty pool update; use `poolRevision` to order pool changes.
+
+`account/selection/updated` carries the selected identity for a thread:
+
+```json
+{
+  "method": "account/selection/updated",
+  "params": {
+    "threadId": "thread-123",
+    "selectedAccountId": null,
+    "selectionRevision": 6
+  }
+}
+```
+
+`selectionRevision` is monotonic for that thread. The notification is sent for
+thread-scoped account selection observed by the connection; `selectedAccountId` is
+nullable when no managed account is selected.
+
+### 12) Workspace messages (ChatGPT)
+
+```json
+{ "method": "account/workspaceMessages/read", "id": 11 }
+{ "id": 11, "result": { "featureEnabled": true, "messages": [
     { "messageId": "msg_123", "messageType": "headline", "messageBody": "Workspace maintenance starts at 5pm.", "createdAt": 1781395200, "archivedAt": null }
 ] } }
 ```
 
-When the upstream workspace-message feature is disabled, `featureEnabled` is `false` and `messages` is empty.
+When the upstream workspace-message feature is disabled, `featureEnabled` is `false` and `messages` is empty. `messageType` is `headline`, `announcement`, or `unknown`; `createdAt` and `archivedAt` are nullable Unix timestamps.
 
-### 10) Notify a workspace owner about a limit
+### 13) Notify a workspace owner about a limit
 
 ```json
-{ "method": "account/sendAddCreditsNudgeEmail", "id": 9, "params": { "creditType": "credits" } }
-{ "id": 9, "result": { "status": "sent" } }
+{ "method": "account/sendAddCreditsNudgeEmail", "id": 12, "params": { "creditType": "credits" } }
+{ "id": 12, "result": { "status": "sent" } }
 ```
 
 Use `creditType: "credits"` when workspace credits are depleted, or `creditType: "usage_limit"` when the workspace usage limit has been reached. If the owner was already notified recently, the response status is `cooldown_active`.

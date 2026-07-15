@@ -513,6 +513,14 @@ enum LoginSubcommand {
 struct LogoutCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
+
+    /// Log out a specific managed ChatGPT account by stable ID, email, or account ID.
+    #[arg(long, value_name = "IDENTITY", conflicts_with = "all")]
+    account: Option<String>,
+
+    /// Log out every managed ChatGPT account.
+    #[arg(long, conflicts_with = "account")]
+    all: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -1433,7 +1441,12 @@ async fn cli_main(
                 &mut logout_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            run_logout(logout_cli.config_overrides).await;
+            run_logout(
+                logout_cli.config_overrides,
+                logout_cli.account,
+                logout_cli.all,
+            )
+            .await;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -2670,6 +2683,44 @@ mod tests {
         );
     }
 
+    fn parse_logout(args: &[&str]) -> Result<LogoutCommand, clap::Error> {
+        let cli = MultitoolCli::try_parse_from(args)?;
+        let Some(Subcommand::Logout(command)) = cli.subcommand else {
+            panic!("expected logout command");
+        };
+        Ok(command)
+    }
+
+    #[test]
+    fn logout_flags_parse() {
+        let command = parse_logout(&["codex", "logout", "--account", "person@example.com"])
+            .expect("parse targeted logout");
+        assert_eq!(command.account.as_deref(), Some("person@example.com"));
+        assert!(!command.all);
+
+        let command =
+            parse_logout(&["codex", "logout", "--all"]).expect("parse all-account logout");
+        assert_eq!(command.account, None);
+        assert!(command.all);
+
+        let command = parse_logout(&["codex", "logout"]).expect("parse legacy logout");
+        assert_eq!(command.account, None);
+        assert!(!command.all);
+    }
+
+    #[test]
+    fn logout_account_and_all_conflict() {
+        let error = parse_logout(&[
+            "codex",
+            "logout",
+            "--account",
+            "person@example.com",
+            "--all",
+        ])
+        .expect_err("conflicting selectors must fail");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
     #[test]
     fn exec_server_remote_auth_accepts_api_key_auth() {
         let auth = CodexAuth::from_api_key("sk-test");
@@ -3440,6 +3491,32 @@ mod tests {
         let remove_result =
             MultitoolCli::try_parse_from(["codex", "marketplace", "remove", "debug"]);
         assert!(remove_result.is_err());
+    }
+
+    #[test]
+    fn exec_websocket_diagnostic_parses_and_rejects_ephemeral_mode() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "exec",
+            "--websocket-diagnostic",
+            "reply with ok",
+        ])
+        .expect("diagnostic flag should parse");
+        let Some(Subcommand::Exec(exec)) = cli.subcommand else {
+            panic!("expected exec subcommand");
+        };
+        assert!(exec.websocket_diagnostic);
+
+        assert!(
+            MultitoolCli::try_parse_from([
+                "codex",
+                "exec",
+                "--websocket-diagnostic",
+                "--ephemeral",
+                "reply with ok",
+            ])
+            .is_err()
+        );
     }
 
     fn sample_exit_info(conversation_id: Option<&str>, thread_name: Option<&str>) -> AppExitInfo {

@@ -14,6 +14,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
     pub(super) auth: Option<CodexAuth>,
+    pub(super) codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
     pub(super) submit_id: String,
     pub(super) originator: String,
     pub(super) session_source: SessionSource,
@@ -30,7 +31,6 @@ impl McpDesiredState {
             .unwrap_or_else(|| self.config.cwd.to_path_buf())
     }
 }
-
 impl Session {
     /// Waits on this session's refreshed server before tool execution is admitted.
     pub(crate) async fn wait_for_mcp_server(self: &Arc<Self>, server: &str) {
@@ -59,6 +59,16 @@ impl Session {
         &self,
         auth: Option<CodexAuth>,
     ) -> McpDesiredState {
+        let cache_key = codex_mcp::codex_apps_tools_cache_key(auth.as_ref());
+        self.latest_mcp_desired_state_with_cache_key(auth, cache_key)
+            .await
+    }
+
+    pub(super) async fn latest_mcp_desired_state_with_cache_key(
+        &self,
+        auth: Option<CodexAuth>,
+        codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
+    ) -> McpDesiredState {
         let session_configuration = {
             let state = self.state.lock().await;
             state.session_configuration.clone()
@@ -73,6 +83,7 @@ impl Session {
         McpDesiredState {
             config: Arc::new(config),
             auth,
+            codex_apps_tools_cache_key,
             submit_id: self.next_internal_sub_id(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -92,9 +103,11 @@ impl Session {
         let cwd = AbsolutePathBuf::from_absolute_path(local_stdio_fallback_cwd)
             .unwrap_or_else(|_| session_configuration.cwd().clone());
         let config = Self::build_per_turn_config(session_configuration, cwd);
+        let codex_apps_tools_cache_key = codex_mcp::codex_apps_tools_cache_key(auth.as_ref());
         let desired = McpDesiredState {
             config: Arc::new(config),
             auth,
+            codex_apps_tools_cache_key,
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -124,13 +137,14 @@ impl Session {
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
     ) {
-        let input = self.build_mcp_runtime_input(
-            desired,
-            mcp_projection,
-            ready_selected_capability_roots,
-            elicitation_reviewer,
-        )
-        .await;
+        let input = self
+            .build_mcp_runtime_input(
+                desired,
+                mcp_projection,
+                ready_selected_capability_roots,
+                elicitation_reviewer,
+            )
+            .await;
         self.services.mcp_runtime.replace(input).await;
     }
 
@@ -188,7 +202,7 @@ impl Session {
             runtime_context,
             codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
             tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
+            codex_apps_tools_cache_key: desired.codex_apps_tools_cache_key.clone(),
             client_mcp_extensions: self.services.client_mcp_extensions.clone(),
             auth,
             codex_apps_auth_manager,

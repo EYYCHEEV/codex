@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use clap::Parser;
+use codex_cli::load_cli_auth_projection;
 use codex_core::config::Config;
 use codex_core::config::find_codex_home;
 use codex_core_plugins::ConfiguredMarketplace;
@@ -18,7 +19,7 @@ use codex_core_plugins::marketplace::MarketplacePluginAuthPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginInstallPolicy;
 use codex_core_plugins::marketplace::MarketplacePluginSource;
 use codex_core_plugins::marketplace::find_marketplace_manifest_path;
-use codex_login::AuthManager;
+use codex_login::CodexAuth;
 use codex_plugin::PluginId;
 use codex_plugin::validate_plugin_segment;
 use codex_protocol::auth::AuthMode;
@@ -590,7 +591,7 @@ async fn load_plugin_command_context(
         .context("failed to load configuration")?;
     let plugins_input = config.plugins_config_input();
     let manager = PluginsManager::new(codex_home.to_path_buf());
-    manager.set_auth_mode(load_cli_auth_mode(&config).await);
+    manager.set_auth_mode(load_cli_auth_mode(&config).await?);
     Ok(PluginCommandContext {
         codex_home: codex_home.to_path_buf(),
         plugins_input,
@@ -598,12 +599,17 @@ async fn load_plugin_command_context(
     })
 }
 
-pub(crate) async fn load_cli_auth_mode(config: &Config) -> Option<AuthMode> {
-    AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true)
-        .await
-        .auth()
-        .await
-        .map(|auth| auth.api_auth_mode())
+pub(crate) async fn load_cli_auth_mode(config: &Config) -> Result<Option<AuthMode>> {
+    let projection = load_cli_auth_projection(config).await;
+    cli_auth_mode_from_effective_auth(projection.effective_auth())
+}
+
+fn cli_auth_mode_from_effective_auth(
+    effective_auth: Result<Option<&CodexAuth>, &str>,
+) -> Result<Option<AuthMode>> {
+    effective_auth
+        .map(|auth| auth.map(CodexAuth::api_auth_mode))
+        .map_err(|err| anyhow::anyhow!("{err}"))
 }
 
 struct PluginSelection {
@@ -855,3 +861,7 @@ fn path_ends_with(path: &Path, suffix: &[&str]) -> bool {
             .collect::<Vec<_>>(),
     )
 }
+
+#[cfg(test)]
+#[path = "plugin_cmd_tests.rs"]
+mod tests;

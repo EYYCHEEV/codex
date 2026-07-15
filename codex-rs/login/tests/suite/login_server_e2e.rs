@@ -28,6 +28,27 @@ const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 
+fn test_id_token(email: &str, chatgpt_account_id: &str) -> String {
+    let header = serde_json::json!({
+        "alg": "none",
+        "typ": "JWT",
+    });
+    let payload = serde_json::json!({
+        "email": email,
+        "https://api.openai.com/auth": {
+            "chatgpt_plan_type": "pro",
+            "chatgpt_account_id": chatgpt_account_id,
+        }
+    });
+    let encode = |value: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value);
+    format!(
+        "{}.{}.{}",
+        encode(&serde_json::to_vec(&header).expect("header should serialize")),
+        encode(&serde_json::to_vec(&payload).expect("payload should serialize")),
+        encode(b"sig"),
+    )
+}
+
 // See spawn.rs for details
 
 fn start_mock_issuer(chatgpt_account_id: &str) -> (SocketAddr, thread::JoinHandle<()>) {
@@ -44,32 +65,7 @@ fn start_mock_issuer(chatgpt_account_id: &str) -> (SocketAddr, thread::JoinHandl
                 // Read body
                 let mut body = String::new();
                 let _ = req.as_reader().read_to_string(&mut body);
-                // Build minimal JWT with plan=pro
-                #[derive(serde::Serialize)]
-                struct Header {
-                    alg: &'static str,
-                    typ: &'static str,
-                }
-                let header = Header {
-                    alg: "none",
-                    typ: "JWT",
-                };
-                let payload = serde_json::json!({
-                    "email": "user@example.com",
-                    "https://api.openai.com/auth": {
-                        "chatgpt_plan_type": "pro",
-                        "chatgpt_account_id": chatgpt_account_id,
-                    }
-                });
-                let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
-                let header_bytes = serde_json::to_vec(&header).unwrap();
-                let payload_bytes = serde_json::to_vec(&payload).unwrap();
-                let id_token = format!(
-                    "{}.{}.{}",
-                    b64(&header_bytes),
-                    b64(&payload_bytes),
-                    b64(b"sig")
-                );
+                let id_token = test_id_token("user@example.com", &chatgpt_account_id);
 
                 let tokens = serde_json::json!({
                     "id_token": id_token,
@@ -108,7 +104,7 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     let stale_auth = serde_json::json!({
         "OPENAI_API_KEY": "sk-stale",
         "tokens": {
-            "id_token": "stale.header.payload",
+            "id_token": test_id_token("stale@example.com", "stale-acc"),
             "access_token": "stale-access",
             "refresh_token": "stale-refresh",
             "account_id": "stale-acc"
@@ -170,6 +166,7 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
         callback_result,
         LoginCallbackResult {
             onboarding_entrypoint: Some(LoginOnboardingEntrypoint::LifeSciences),
+            ..Default::default()
         }
     );
 
@@ -177,13 +174,16 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     let auth_path = codex_home.join("auth.json");
     let data = std::fs::read_to_string(&auth_path)?;
     let json: serde_json::Value = serde_json::from_str(&data)?;
-    // The following assert is here because of the old oauth flow that exchanges tokens for an
-    // API key. See obtain_api_key in server.rs for details. Once we remove this old mechanism
-    // from the code, this test should be updated to expect that the API key is no longer present.
-    assert_eq!(json["OPENAI_API_KEY"], "access-123");
-    assert_eq!(json["tokens"]["access_token"], "access-123");
-    assert_eq!(json["tokens"]["refresh_token"], "refresh-123");
-    assert_eq!(json["tokens"]["account_id"], chatgpt_account_id);
+    assert!(
+        json["OPENAI_API_KEY"].is_null(),
+        "managed login must not write a process-wide API key"
+    );
+    let account = &json["managed_chatgpt"]["accounts"][0];
+    assert_eq!(account["oauth_api_key"], "access-123");
+    let tokens = &account["tokens"];
+    assert_eq!(tokens["access_token"], "access-123");
+    assert_eq!(tokens["refresh_token"], "refresh-123");
+    assert_eq!(tokens["account_id"], chatgpt_account_id);
 
     // Stop mock issuer
     drop(issuer_handle);

@@ -24,10 +24,12 @@
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use codex_api::AgentIdentityTelemetry;
@@ -67,13 +69,24 @@ use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptAuthSnapshot;
+use codex_login::ManagedChatgptFailure;
+use codex_login::ManagedChatgptLimitKind;
+use codex_login::ManagedChatgptRateObservation;
+use codex_login::ManagedChatgptRateWindowView;
+use codex_login::ManagedChatgptRecoveryDecision;
+use codex_login::ManagedChatgptSelectionScope;
+use codex_login::ManagedChatgptStatusObservation;
+use codex_login::ManagedChatgptTokenObservation;
 use codex_login::RefreshTokenError;
+use codex_login::TransportAuthBinding;
 use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::add_originator_header;
 use codex_login::default_client::create_client_for_route;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::auth::AuthMode;
+use codex_protocol::error::WebsocketCloseDetails;
 
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -83,6 +96,11 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::InternalSessionSource;
+use codex_protocol::protocol::ManagedAccountSelectedEvent;
+use codex_protocol::protocol::RateLimitReachedType;
+use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::ResponsesWebsocketCloseDiagnostic;
+use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
@@ -118,6 +136,7 @@ use crate::client_common::ResponseStream;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
+use crate::state::ManagedRateLimitBinding;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
@@ -126,6 +145,7 @@ use codex_login::auth_env_telemetry::AuthEnvTelemetry;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_model_provider::AgentIdentitySessionFallback;
 use codex_model_provider::ProviderAuthScope;
+use codex_model_provider::ProviderRequestSetup;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 #[cfg(test)]
@@ -133,6 +153,7 @@ use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::extract_response_debug_context_from_api_error;
@@ -171,6 +192,10 @@ pub(crate) struct CompactConversationRequestSettings {
     pub(crate) effort: Option<ReasoningEffortConfig>,
     pub(crate) summary: ReasoningSummaryConfig,
     pub(crate) service_tier: Option<String>,
+}
+pub(crate) struct CompactConversationResult {
+    pub(crate) output: Vec<ResponseItem>,
+    pub(crate) rate_limits: Option<RateLimitSnapshot>,
 }
 
 fn reasoning_effort_for_request(effort: ReasoningEffortConfig) -> ReasoningEffortConfig {
@@ -218,14 +243,8 @@ struct ModelClientState {
 
 /// Resolved API client setup for a single request attempt.
 ///
-/// Keeping this as a single bundle ensures prewarm and normal request paths
-/// share the same auth/provider setup flow.
-struct CurrentClientSetup {
-    auth: Option<CodexAuth>,
-    api_provider: ApiProvider,
-    api_auth: SharedAuthProvider,
-    agent_identity_telemetry: Option<AgentIdentityTelemetry>,
-}
+/// The provider constructs this atomically from one selected account snapshot.
+pub type CurrentClientSetup = ProviderRequestSetup;
 
 #[derive(Clone, Copy)]
 struct RequestRouteTelemetry {
@@ -284,6 +303,18 @@ pub struct ModelClientSession {
     /// keep sending it unchanged between turn requests (e.g., for retries, incremental
     /// appends, or continuation requests), and must not send it between different turns.
     turn_state: Arc<OnceLock<String>>,
+    /// Exact managed account snapshot and selection scope used by the latest request attempt.
+    ///
+    /// This is cleared before every stream request and replaced after request setup resolves so
+    /// outer retry loops can rotate only the account that actually produced an uncommitted error.
+    managed_attempt: Option<ManagedChatgptAttemptContext>,
+    /// Account binding associated with rate limits emitted by the active request attempt.
+    managed_rate_limit_binding: Option<ManagedRateLimitBinding>,
+    /// An inner transport refresh completed; the outer owner must rebuild request-scoped state.
+    request_scope_refresh_pending: bool,
+    /// Last managed selection resolved by this turn and any update not yet emitted to clients.
+    last_managed_selection: Option<ManagedAccountSelectedEvent>,
+    pending_managed_selections: VecDeque<ManagedAccountSelectedEvent>,
 }
 
 #[derive(Debug, Clone)]
@@ -292,13 +323,304 @@ struct LastResponse {
     items_added: Vec<ResponseItem>,
 }
 
+#[derive(Clone)]
+struct ManagedChatgptAttemptContext {
+    snapshot: ManagedChatgptAuthSnapshot,
+    transport_binding: TransportAuthBinding,
+    scope: ManagedChatgptSelectionScope,
+}
+
+const MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES: usize = 128;
+
+fn bounded_websocket_diagnostic_text(value: &str) -> String {
+    if value.len() <= MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES {
+        return value.to_string();
+    }
+    let mut end = MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES.saturating_sub(3);
+    while !value.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}...", &value[..end])
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct WebsocketCloseDiagnosticContext {
+    details: WebsocketCloseDetails,
+    thread_id: String,
+    turn_id: String,
+    session_id: String,
+    model: String,
+    account_fingerprint: Option<String>,
+    credential_revision: Option<u64>,
+    account_state_revision: Option<u64>,
+    pool_revision: Option<u64>,
+    selection_revision: Option<u64>,
+    route_generation: Option<u64>,
+    handshake_binding_fingerprint: Option<String>,
+    request_binding_fingerprint: Option<String>,
+    binding_matched: Option<bool>,
+    connection_reused: bool,
+    output_committed: bool,
+}
+
+impl WebsocketCloseDiagnosticContext {
+    pub(crate) fn finish(
+        self,
+        attempt_number: u64,
+        max_retries: u64,
+        recovery_decision: ResponsesWebsocketCloseRecovery,
+    ) -> ResponsesWebsocketCloseDiagnostic {
+        ResponsesWebsocketCloseDiagnostic {
+            close_code: self.details.code,
+            close_reason: self.details.reason,
+            close_reason_redacted: self.details.reason_redacted,
+            thread_id: self.thread_id,
+            turn_id: self.turn_id,
+            session_id: self.session_id,
+            model: self.model,
+            account_fingerprint: self.account_fingerprint,
+            credential_revision: self.credential_revision,
+            account_state_revision: self.account_state_revision,
+            pool_revision: self.pool_revision,
+            selection_revision: self.selection_revision,
+            route_generation: self.route_generation,
+            handshake_binding_fingerprint: self.handshake_binding_fingerprint,
+            request_binding_fingerprint: self.request_binding_fingerprint,
+            binding_matched: self.binding_matched,
+            connection_reused: self.connection_reused,
+            output_committed: self.output_committed,
+            attempt_number,
+            max_retries,
+            recovery_decision,
+        }
+    }
+}
+
+fn managed_chatgpt_failure(error: &CodexErr) -> Option<ManagedChatgptFailure> {
+    match error.details() {
+        CodexErrorDetails::RefreshTokenFailed(_) => Some(ManagedChatgptFailure::AuthInvalid),
+        CodexErrorDetails::UnexpectedStatus(error) if error.status == StatusCode::UNAUTHORIZED => {
+            Some(ManagedChatgptFailure::AuthInvalid)
+        }
+        CodexErrorDetails::UsageLimitReached(error) => match error.rate_limit_reached_type {
+            None | Some(RateLimitReachedType::RateLimitReached) => {
+                Some(ManagedChatgptFailure::Quota {
+                    reset_at: error.resets_at,
+                })
+            }
+            Some(
+                RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+                | RateLimitReachedType::WorkspaceMemberCreditsDepleted
+                | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+                | RateLimitReachedType::WorkspaceMemberUsageLimitReached,
+            ) => Some(ManagedChatgptFailure::WorkspaceQuota {
+                reset_at: error.resets_at,
+            }),
+        },
+        CodexErrorDetails::QuotaExceeded => Some(ManagedChatgptFailure::Quota { reset_at: None }),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
+    binding: Option<TransportAuthBinding>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
     last_response_from_untraced_warmup: bool,
     connection_reused: StdMutex<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UnauthorizedRecoveryKey {
+    transport_binding: TransportAuthBinding,
+    credential_revision: Option<u64>,
+}
+
+impl UnauthorizedRecoveryKey {
+    fn for_setup(setup: &ProviderRequestSetup) -> Self {
+        Self {
+            transport_binding: setup.transport_auth_binding.clone(),
+            credential_revision: setup.credential_revision,
+        }
+    }
+}
+
+struct ManagedRateLimitRecorder {
+    auth_manager: Arc<AuthManager>,
+    managed_id: String,
+    credential_revision: u64,
+    account_state_revision: u64,
+    shared_account_state_revision: Option<Arc<AtomicU64>>,
+    observed_snapshot: bool,
+    windows: Vec<ManagedChatgptRateWindowView>,
+    retained_windows: Vec<ManagedChatgptRateWindowView>,
+}
+
+impl ManagedRateLimitRecorder {
+    fn for_setup(
+        auth_manager: Option<&Arc<AuthManager>>,
+        setup: &ProviderRequestSetup,
+    ) -> Option<Self> {
+        Self::for_setup_with_revision(auth_manager, setup, None)
+    }
+
+    fn for_setup_with_revision(
+        auth_manager: Option<&Arc<AuthManager>>,
+        setup: &ProviderRequestSetup,
+        shared_account_state_revision: Option<Arc<AtomicU64>>,
+    ) -> Option<Self> {
+        let auth_manager = Arc::clone(auth_manager?);
+        let managed_id = setup.managed_id.clone()?;
+        let credential_revision = setup.credential_revision?;
+        let setup_account_state_revision = setup.account_state_revision?;
+        let account_state_revision = shared_account_state_revision
+            .as_ref()
+            .map_or(setup_account_state_revision, |revision| {
+                revision.load(Ordering::Acquire)
+            });
+        let retained_windows = auth_manager
+            .managed_chatgpt_accounts()
+            .ok()
+            .and_then(|accounts| {
+                accounts.into_iter().find(|account| {
+                    account.identity_key == managed_id && account.revision == account_state_revision
+                })
+            })
+            .and_then(|account| account.usage)
+            .map_or_else(Vec::new, |usage| usage.rate_windows);
+        Some(Self {
+            auth_manager,
+            managed_id,
+            credential_revision,
+            account_state_revision,
+            shared_account_state_revision,
+            observed_snapshot: false,
+            retained_windows,
+            windows: Vec::new(),
+        })
+    }
+
+    fn replace_window(
+        windows: &mut Vec<ManagedChatgptRateWindowView>,
+        observed: ManagedChatgptRateWindowView,
+    ) {
+        if let Some(existing) = windows.iter_mut().find(|existing| {
+            existing.kind == observed.kind && existing.limit_id == observed.limit_id
+        }) {
+            *existing = observed;
+        } else {
+            windows.push(observed);
+        }
+    }
+
+    fn observe(&mut self, snapshot: &RateLimitSnapshot) {
+        self.observed_snapshot = true;
+        let limit_id = snapshot
+            .limit_id
+            .clone()
+            .unwrap_or_else(|| "codex".to_string());
+        let canonical = limit_id == "codex";
+        for (kind, suffix, window) in [
+            (
+                if canonical {
+                    ManagedChatgptLimitKind::Primary
+                } else {
+                    ManagedChatgptLimitKind::Additional
+                },
+                "primary",
+                snapshot.primary.as_ref(),
+            ),
+            (
+                if canonical {
+                    ManagedChatgptLimitKind::Secondary
+                } else {
+                    ManagedChatgptLimitKind::Additional
+                },
+                "secondary",
+                snapshot.secondary.as_ref(),
+            ),
+        ] {
+            let Some(window) = window else {
+                continue;
+            };
+            Self::replace_window(
+                &mut self.windows,
+                ManagedChatgptRateWindowView {
+                    limit_id: if canonical {
+                        limit_id.clone()
+                    } else {
+                        format!("{limit_id}:{suffix}")
+                    },
+                    kind,
+                    remaining_percent: Some((100.0 - window.used_percent).clamp(0.0, 100.0)),
+                    window_duration_mins: window.window_minutes,
+                    reset_at: window
+                        .resets_at
+                        .and_then(|timestamp| chrono::DateTime::from_timestamp(timestamp, 0)),
+                },
+            );
+        }
+    }
+
+    fn observe_error(&mut self, error: &CodexErr) {
+        if let CodexErrorDetails::UsageLimitReached(error) = error.details()
+            && let Some(snapshot) = error.rate_limits.as_deref()
+        {
+            self.observe(snapshot);
+        }
+    }
+
+    fn flush(&mut self) {
+        if !std::mem::take(&mut self.observed_snapshot) {
+            return;
+        }
+        let rate = if self.windows.is_empty() {
+            ManagedChatgptRateObservation::Unavailable {
+                reason: "rate limit usage was absent from the response".to_string(),
+            }
+        } else {
+            for window in std::mem::take(&mut self.windows) {
+                Self::replace_window(&mut self.retained_windows, window);
+            }
+            ManagedChatgptRateObservation::Available(self.retained_windows.clone())
+        };
+        let observation = ManagedChatgptStatusObservation {
+            observed_at: chrono::Utc::now(),
+            rate,
+            token: ManagedChatgptTokenObservation::NotObserved,
+        };
+        match self.auth_manager.record_managed_chatgpt_status_observation(
+            &self.managed_id,
+            self.credential_revision,
+            self.account_state_revision,
+            observation,
+        ) {
+            Ok(Some(account)) => {
+                self.account_state_revision = account.revision;
+                if let Some(revision) = self.shared_account_state_revision.as_ref() {
+                    revision.fetch_max(account.revision, Ordering::AcqRel);
+                }
+            }
+            Ok(None) => trace!(
+                managed_id = self.managed_id,
+                account_state_revision = self.account_state_revision,
+                "discarded stale managed account rate-limit observation"
+            ),
+            Err(err) => warn!(
+                managed_id = self.managed_id,
+                account_state_revision = self.account_state_revision,
+                "failed to record managed account rate-limit observation: {err}"
+            ),
+        }
+    }
+}
+
+impl Drop for ManagedRateLimitRecorder {
+    fn drop(&mut self) {
+        self.flush();
+    }
 }
 
 // This is intentionally not a `PartialEq` implementation: request equality includes `input` and
@@ -387,6 +709,23 @@ impl WebsocketSession {
             .connection_reused
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn reset_transport_state(&mut self) {
+        self.connection = None;
+        self.last_request = None;
+        self.last_response_rx = None;
+        self.last_response_from_untraced_warmup = false;
+        self.set_connection_reused(/*connection_reused*/ false);
+    }
+
+    fn ensure_binding(&mut self, binding: &TransportAuthBinding) -> bool {
+        if self.binding.as_ref() == Some(binding) {
+            return false;
+        }
+        self.reset_transport_state();
+        self.binding = Some(binding.clone());
+        true
     }
 }
 
@@ -495,6 +834,11 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
+            managed_attempt: None,
+            managed_rate_limit_binding: None,
+            request_scope_refresh_pending: false,
+            last_managed_selection: None,
+            pending_managed_selections: VecDeque::new(),
         }
     }
 
@@ -552,100 +896,210 @@ impl ModelClient {
         &self,
         prompt: &Prompt,
         model_info: &ModelInfo,
-        turn_state: Option<Arc<OnceLock<String>>>,
+        client_session: &mut ModelClientSession,
         settings: CompactConversationRequestSettings,
         session_telemetry: &SessionTelemetry,
         compaction_trace: &CompactionTraceContext,
         responses_metadata: &CodexResponsesMetadata,
-    ) -> Result<Vec<ResponseItem>> {
+        mut request_setup: Option<CurrentClientSetup>,
+    ) -> Result<CompactConversationResult> {
         if prompt.input.is_empty() {
-            return Ok(Vec::new());
+            return Ok(CompactConversationResult {
+                output: Vec::new(),
+                rate_limits: None,
+            });
         }
-        let client_setup = self.current_client_setup().await?;
-        let transport =
-            self.build_api_transport(&client_setup.api_provider, RESPONSES_COMPACT_ENDPOINT)?;
-        let request_telemetry = Self::build_request_telemetry(
-            session_telemetry,
-            AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                client_setup.api_auth.as_ref(),
-                client_setup.agent_identity_telemetry.clone(),
-                PendingUnauthorizedRetry::default(),
-            ),
-            RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
-            self.state.auth_env_telemetry.clone(),
-        );
-        let request = self.build_responses_request(
-            &client_setup.api_provider,
-            prompt,
-            model_info,
-            settings.effort,
-            settings.summary,
-            settings.service_tier,
-            responses_metadata,
-        )?;
-        let ResponsesApiRequest {
-            model,
-            instructions,
-            mut input,
-            tools,
-            parallel_tool_calls,
-            reasoning,
-            service_tier,
-            prompt_cache_key,
-            text,
-            ..
-        } = request;
-        self.prepare_response_items_for_request(&mut input);
-        let payload = ApiCompactionInput {
-            model: &model,
-            input: &input,
-            instructions: &instructions,
-            tools,
-            parallel_tool_calls,
-            reasoning,
-            service_tier: service_tier.as_deref(),
-            prompt_cache_key: prompt_cache_key.as_deref(),
-            text,
-        };
+        let auth_manager = self.state.provider.auth_manager();
+        let mut auth_recovery = None;
+        let mut auth_recovery_key = None;
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        let explicit_setup = request_setup.is_some();
+        loop {
+            let client_setup = match request_setup.take() {
+                Some(setup) => setup,
+                None => {
+                    self.current_client_setup(
+                        Some(model_info.slug.as_str()),
+                        Some(responses_metadata.session_id.as_str()),
+                    )
+                    .await?
+                }
+            };
+            client_session.observe_managed_selection(
+                &client_setup,
+                Some(model_info.slug.as_str()),
+                Some(responses_metadata.session_id.as_str()),
+            );
+            client_session.ensure_transport_binding(&client_setup.transport_auth_binding);
+            client_session.update_managed_rate_limit_binding(&client_setup);
+            client_session.managed_attempt = self.managed_attempt_context(
+                &client_setup,
+                Some(model_info.slug.as_str()),
+                Some(responses_metadata.session_id.as_str()),
+            );
+            let recovery_key = UnauthorizedRecoveryKey::for_setup(&client_setup);
+            if auth_recovery_key.as_ref() != Some(&recovery_key) {
+                auth_recovery = auth_manager.as_ref().map(|manager| {
+                    client_setup.managed_snapshot.as_ref().map_or_else(
+                        || manager.unauthorized_recovery(),
+                        |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
+                    )
+                });
+                auth_recovery_key = Some(recovery_key);
+                pending_retry = PendingUnauthorizedRetry::default();
+            }
+            let attempt_turn_state = client_session.turn_state();
+            let transport =
+                self.build_api_transport(&client_setup.api_provider, RESPONSES_COMPACT_ENDPOINT)?;
+            let request_telemetry = Self::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    client_setup
+                        .effective_auth
+                        .as_ref()
+                        .map(CodexAuth::auth_mode),
+                    client_setup.api_auth.as_ref(),
+                    client_setup.agent_identity_telemetry.clone(),
+                    pending_retry,
+                ),
+                RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
+                self.state.auth_env_telemetry.clone(),
+            );
+            let request = self.build_responses_request(
+                &client_setup.api_provider,
+                prompt,
+                model_info,
+                settings.effort.clone(),
+                settings.summary,
+                settings.service_tier.clone(),
+                responses_metadata,
+            )?;
+            let ResponsesApiRequest {
+                model,
+                instructions,
+                mut input,
+                tools,
+                parallel_tool_calls,
+                reasoning,
+                service_tier,
+                prompt_cache_key,
+                text,
+                ..
+            } = request;
+            self.prepare_response_items_for_request(&mut input);
+            let payload = ApiCompactionInput {
+                model: &model,
+                input: &input,
+                instructions: &instructions,
+                tools,
+                parallel_tool_calls,
+                reasoning,
+                service_tier: service_tier.as_deref(),
+                prompt_cache_key: prompt_cache_key.as_deref(),
+                text,
+            };
 
-        let mut extra_headers = ApiHeaderMap::new();
-        if let Ok(header_value) = HeaderValue::from_str(&responses_metadata.installation_id) {
-            extra_headers.insert(X_CODEX_INSTALLATION_ID_HEADER, header_value);
+            let mut extra_headers = ApiHeaderMap::new();
+            if let Ok(header_value) = HeaderValue::from_str(&responses_metadata.installation_id) {
+                extra_headers.insert(X_CODEX_INSTALLATION_ID_HEADER, header_value);
+            }
+            extra_headers.extend(build_responses_headers(
+                self.state.beta_features_header.as_deref(),
+                Some(&attempt_turn_state),
+            ));
+            add_originator_header(&mut extra_headers, self.state.originator.as_str());
+            extra_headers.extend(self.build_responses_compatibility_headers(responses_metadata));
+            extra_headers.extend(build_session_headers(
+                Some(responses_metadata.session_id.to_string()),
+                Some(responses_metadata.thread_id.to_string()),
+            ));
+            if let Some(header_value) = self.generate_attestation_header_for().await {
+                extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
+            }
+            add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
+            let compact_request_timeout = client_setup
+                .api_provider
+                .stream_idle_timeout
+                .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
+            let mut rate_limit_recorder = ManagedRateLimitRecorder::for_setup_with_revision(
+                auth_manager.as_ref(),
+                &client_setup,
+                client_session
+                    .managed_rate_limit_binding
+                    .as_ref()
+                    .and_then(|binding| binding.shared_account_state_revision.clone()),
+            );
+            let client =
+                ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
+            let trace_attempt = compaction_trace.start_attempt(&payload);
+            let raw_result = client
+                .compact_input(
+                    &payload,
+                    extra_headers,
+                    compact_request_timeout,
+                    Some(attempt_turn_state.as_ref()),
+                )
+                .await;
+            let result = match raw_result {
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    if explicit_setup {
+                        Err(client_session
+                            .refresh_request_scope_after_unauthorized(
+                                unauthorized_transport,
+                                &mut auth_recovery,
+                                session_telemetry,
+                            )
+                            .await)
+                    } else {
+                        match handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.state.provider,
+                        )
+                        .await
+                        {
+                            Ok(recovery) => {
+                                pending_retry = PendingUnauthorizedRetry::from_recovery(recovery);
+                                client_session.reset_account_bound_state();
+                                continue;
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
+                result => result.map_err(|error| self.state.provider.map_api_error(error)),
+            };
+            if let Ok(response) = &result
+                && let Some(rate_limits) = response.rate_limits.as_ref()
+                && let Some(recorder) = rate_limit_recorder.as_mut()
+            {
+                recorder.observe(rate_limits);
+            }
+            if let Err(error) = &result
+                && let CodexErrorDetails::UsageLimitReached(error) = error.details()
+                && let Some(rate_limits) = error.rate_limits.as_ref()
+                && let Some(recorder) = rate_limit_recorder.as_mut()
+            {
+                recorder.observe(rate_limits);
+            }
+            trace_attempt.record_result(result.as_ref().map(|response| response.output.as_slice()));
+            if let Err(error) = &result
+                && !explicit_setup
+                && client_session
+                    .recover_last_managed_attempt(error, /*committed*/ false)
+                    .await
+            {
+                continue;
+            }
+            return result.map(|response| CompactConversationResult {
+                output: response.output,
+                rate_limits: response.rate_limits,
+            });
         }
-        extra_headers.extend(build_responses_headers(
-            self.state.beta_features_header.as_deref(),
-            turn_state.as_ref(),
-        ));
-        add_originator_header(&mut extra_headers, self.state.originator.as_str());
-        extra_headers.extend(self.build_responses_compatibility_headers(responses_metadata));
-        extra_headers.extend(build_session_headers(
-            Some(responses_metadata.session_id.to_string()),
-            Some(responses_metadata.thread_id.to_string()),
-        ));
-        if let Some(header_value) = self.generate_attestation_header_for().await {
-            extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
-        }
-        add_responses_lite_header(&mut extra_headers, model_info.use_responses_lite);
-        let compact_request_timeout = client_setup
-            .api_provider
-            .stream_idle_timeout
-            .saturating_mul(COMPACT_REQUEST_TIMEOUT_IDLE_MULTIPLIER);
-        let client =
-            ApiCompactClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .with_telemetry(Some(request_telemetry));
-        let trace_attempt = compaction_trace.start_attempt(&payload);
-        let result = client
-            .compact_input(
-                &payload,
-                extra_headers,
-                compact_request_timeout,
-                turn_state.as_deref(),
-            )
-            .await
-            .map_err(|error| self.state.provider.map_api_error(error));
-        trace_attempt.record_result(result.as_deref());
-        result
     }
 
     pub(crate) async fn create_realtime_call_with_headers(
@@ -657,7 +1111,7 @@ impl ModelClient {
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
-        let client_setup = self.current_client_setup().await?;
+        let client_setup = self.current_client_setup(None, None).await?;
         if let Some(header_value) = self.generate_attestation_header_for().await {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
@@ -695,24 +1149,6 @@ impl ModelClient {
             return Ok(Vec::new());
         }
 
-        let client_setup = self.current_client_setup().await?;
-        let transport =
-            self.build_api_transport(&client_setup.api_provider, MEMORIES_SUMMARIZE_ENDPOINT)?;
-        let request_telemetry = Self::build_request_telemetry(
-            session_telemetry,
-            AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
-                client_setup.api_auth.as_ref(),
-                client_setup.agent_identity_telemetry.clone(),
-                PendingUnauthorizedRetry::default(),
-            ),
-            RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
-            self.state.auth_env_telemetry.clone(),
-        );
-        let client =
-            ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
-                .with_telemetry(Some(request_telemetry));
-
         let payload = ApiMemorySummarizeInput {
             model: model_info.slug.clone(),
             raw_memories,
@@ -725,10 +1161,96 @@ impl ModelClient {
                 }),
         };
 
-        client
-            .summarize_input(&payload, self.build_subagent_headers())
-            .await
-            .map_err(|error| self.state.provider.map_api_error(error))
+        let auth_manager = self.state.provider.auth_manager();
+        let mut auth_recovery = None;
+        let mut auth_recovery_key = None;
+        let mut pending_retry = PendingUnauthorizedRetry::default();
+        loop {
+            let client_setup = self
+                .current_client_setup(Some(model_info.slug.as_str()), None)
+                .await?;
+            let managed_attempt =
+                self.managed_attempt_context(&client_setup, Some(model_info.slug.as_str()), None);
+            let recovery_key = UnauthorizedRecoveryKey::for_setup(&client_setup);
+            if auth_recovery_key.as_ref() != Some(&recovery_key) {
+                auth_recovery = auth_manager.as_ref().map(|manager| {
+                    client_setup.managed_snapshot.as_ref().map_or_else(
+                        || manager.unauthorized_recovery(),
+                        |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
+                    )
+                });
+                auth_recovery_key = Some(recovery_key);
+                pending_retry = PendingUnauthorizedRetry::default();
+            }
+            let request_telemetry = Self::build_request_telemetry(
+                session_telemetry,
+                AuthRequestTelemetryContext::new(
+                    client_setup
+                        .effective_auth
+                        .as_ref()
+                        .map(CodexAuth::auth_mode),
+                    client_setup.api_auth.as_ref(),
+                    client_setup.agent_identity_telemetry.clone(),
+                    pending_retry,
+                ),
+                RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
+                self.state.auth_env_telemetry.clone(),
+            );
+            let mut rate_limit_recorder =
+                ManagedRateLimitRecorder::for_setup(auth_manager.as_ref(), &client_setup);
+            let transport =
+                self.build_api_transport(&client_setup.api_provider, MEMORIES_SUMMARIZE_ENDPOINT)?;
+            let client =
+                ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
+            let result = match client
+                .summarize_input(&payload, self.build_subagent_headers())
+                .await
+            {
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.state.provider,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                result => result.map_err(|error| self.state.provider.map_api_error(error)),
+            };
+            let result = match result {
+                Ok(response) => {
+                    if let Some(rate_limits) = &response.rate_limits
+                        && let Some(recorder) = rate_limit_recorder.as_mut()
+                    {
+                        recorder.observe(rate_limits);
+                    }
+                    Ok(response.output)
+                }
+                Err(error) => {
+                    if let CodexErrorDetails::UsageLimitReached(rate_error) = error.details()
+                        && let Some(rate_limits) = rate_error.rate_limits.as_ref()
+                        && let Some(recorder) = rate_limit_recorder.as_mut()
+                    {
+                        recorder.observe(rate_limits);
+                    }
+                    Err(error)
+                }
+            };
+            if let (Err(error), Some(attempt)) = (&result, managed_attempt.as_ref())
+                && self
+                    .recover_managed_attempt(attempt, error, /*committed*/ false)
+                    .await
+            {
+                continue;
+            }
+            return result;
+        }
     }
 
     fn build_subagent_headers(&self) -> ApiHeaderMap {
@@ -956,28 +1478,78 @@ impl ModelClient {
         true
     }
 
-    /// Returns auth + provider configuration resolved from the current session auth state.
+    /// Whether a failed WebSocket attempt may replay over the HTTPS transport.
     ///
-    /// This centralizes setup used by both prewarm and normal request paths so they stay in
-    /// lockstep when auth/provider resolution changes.
-    async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
-        let auth = self.state.provider.auth().await;
-        let api_provider = self.state.provider.api_provider().await?;
-        let resolved_auth = self
-            .state
+    /// A zero stream retry budget means the initial WebSocket attempt is the only transport
+    /// attempt, which is required by the diagnostic exec mode.
+    pub(crate) fn websocket_http_fallback_allowed(&self) -> bool {
+        self.state.provider.info().stream_max_retries() > 0
+    }
+
+    /// Returns auth + provider configuration resolved from one account snapshot.
+    pub async fn current_client_setup(
+        &self,
+        model: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<CurrentClientSetup> {
+        self.state
             .provider
-            .api_auth_for_scope(ProviderAuthScope {
+            .request_setup(ProviderAuthScope {
                 agent_identity_policy: self.agent_identity_policy,
                 session_source: self.state.session_source.clone(),
                 agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
+                thread_id: Some(self.state.thread_id.to_string()),
+                session_id: session_id.map(str::to_owned),
+                model: model.map(str::to_owned),
             })
-            .await?;
-        Ok(CurrentClientSetup {
-            auth,
-            api_provider,
-            api_auth: resolved_auth.auth,
-            agent_identity_telemetry: resolved_auth.agent_identity_telemetry,
+            .await
+    }
+
+    fn managed_attempt_context(
+        &self,
+        setup: &ProviderRequestSetup,
+        model: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Option<ManagedChatgptAttemptContext> {
+        Some(ManagedChatgptAttemptContext {
+            snapshot: setup.managed_snapshot.clone()?,
+            transport_binding: setup.transport_auth_binding.clone(),
+            scope: ManagedChatgptSelectionScope {
+                thread_id: Some(self.state.thread_id.to_string()),
+                session_id: session_id.map(str::to_owned),
+                model: model.map(str::to_owned),
+            },
         })
+    }
+
+    async fn recover_managed_attempt(
+        &self,
+        attempt: &ManagedChatgptAttemptContext,
+        error: &CodexErr,
+        committed: bool,
+    ) -> bool {
+        let Some(failure) = managed_chatgpt_failure(error) else {
+            return false;
+        };
+        let Some(auth_manager) = self.state.provider.auth_manager() else {
+            return false;
+        };
+        match auth_manager
+            .recover_failed_attempt(&attempt.snapshot, failure, committed, &attempt.scope)
+            .await
+        {
+            Ok(ManagedChatgptRecoveryDecision::Rotate(_)) => true,
+            Ok(ManagedChatgptRecoveryDecision::Keep(_) | ManagedChatgptRecoveryDecision::Stop) => {
+                false
+            }
+            Err(err) => {
+                warn!(
+                    managed_id = attempt.snapshot.identity_key,
+                    "failed to persist managed account recovery decision: {err}"
+                );
+                false
+            }
+        }
     }
 
     fn build_api_transport(
@@ -996,7 +1568,7 @@ impl ModelClient {
     }
 
     pub(crate) async fn prewarm_auth(&self) -> Result<()> {
-        self.current_client_setup().await.map(|_| ())
+        self.current_client_setup(None, None).await.map(|_| ())
     }
 
     /// Opens a websocket connection using the same header and telemetry wiring as normal turns.
@@ -1132,17 +1704,191 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn websocket_http_fallback_allowed(&self) -> bool {
+        self.client.websocket_http_fallback_allowed()
+    }
+
     pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
         Arc::clone(&self.turn_state)
     }
+    /// Resolves one atomic provider/auth setup for an outer request-attempt owner.
+    pub async fn current_client_setup(
+        &self,
+        model: Option<&str>,
+        session_id: Option<&str>,
+    ) -> Result<CurrentClientSetup> {
+        self.client.current_client_setup(model, session_id).await
+    }
+
+    fn observe_managed_selection(
+        &mut self,
+        setup: &ProviderRequestSetup,
+        model: Option<&str>,
+        session_id: Option<&str>,
+    ) {
+        let Some(snapshot) = setup.managed_snapshot.as_ref() else {
+            return;
+        };
+        let selection = ManagedAccountSelectedEvent {
+            selected_account_id: snapshot.identity_key.clone(),
+            selection_revision: snapshot.selection_revision,
+            session_id: session_id.map(str::to_owned),
+            model: model.map(str::to_owned),
+        };
+        if self.last_managed_selection.as_ref() == Some(&selection) {
+            return;
+        }
+        self.last_managed_selection = Some(selection.clone());
+        self.pending_managed_selections.push_back(selection);
+    }
+    pub(crate) fn take_managed_selection_update(&mut self) -> Option<ManagedAccountSelectedEvent> {
+        self.pending_managed_selections.pop_front()
+    }
+    pub(crate) fn managed_rate_limit_binding(&self) -> Option<ManagedRateLimitBinding> {
+        self.managed_rate_limit_binding
+            .as_ref()
+            .map(ManagedRateLimitBinding::refreshed)
+    }
+
+    fn update_managed_rate_limit_binding(&mut self, setup: &ProviderRequestSetup) {
+        let next_identity = setup.managed_id.clone().zip(setup.account_state_revision);
+        self.managed_rate_limit_binding =
+            next_identity.map(|(managed_account_id, account_state_revision)| {
+                let preserve_revision =
+                    self.managed_rate_limit_binding
+                        .as_ref()
+                        .is_some_and(|current| {
+                            current.managed_account_id == managed_account_id
+                                && current.transport_binding == setup.transport_auth_binding
+                        });
+                let shared_account_state_revision = if preserve_revision {
+                    let revision = self
+                        .managed_rate_limit_binding
+                        .as_ref()
+                        .and_then(|binding| binding.shared_account_state_revision.as_ref())
+                        .expect("managed binding revision source");
+                    revision.fetch_max(account_state_revision, Ordering::AcqRel);
+                    Arc::clone(revision)
+                } else {
+                    Arc::new(AtomicU64::new(account_state_revision))
+                };
+                ManagedRateLimitBinding {
+                    managed_account_id,
+                    account_state_revision,
+                    transport_binding: setup.transport_auth_binding.clone(),
+                    shared_account_state_revision: Some(shared_account_state_revision),
+                }
+            });
+    }
 
     fn reset_websocket_session(&mut self) {
-        self.websocket_session.connection = None;
-        self.websocket_session.last_request = None;
-        self.websocket_session.last_response_rx = None;
-        self.websocket_session.last_response_from_untraced_warmup = false;
-        self.websocket_session
-            .set_connection_reused(/*connection_reused*/ false);
+        self.websocket_session.reset_transport_state();
+    }
+
+    fn reset_account_bound_state(&mut self) {
+        self.websocket_session.reset_transport_state();
+        self.websocket_session.binding = None;
+        self.turn_state = Arc::new(OnceLock::new());
+    }
+
+    async fn refresh_request_scope_after_unauthorized(
+        &mut self,
+        transport: TransportError,
+        auth_recovery: &mut Option<UnauthorizedRecovery>,
+        session_telemetry: &SessionTelemetry,
+    ) -> CodexErr {
+        match handle_unauthorized(
+            transport,
+            auth_recovery,
+            session_telemetry,
+            &self.client.state.provider,
+        )
+        .await
+        {
+            Ok(_) => {
+                self.request_scope_refresh_pending = true;
+                CodexErr::Stream("request authentication refreshed".to_string())
+            }
+            Err(error) => error,
+        }
+    }
+
+    pub(crate) fn websocket_close_diagnostic_context(
+        &self,
+        error: &CodexErr,
+        turn_id: &str,
+        session_id: &str,
+        model: &str,
+        output_committed: bool,
+    ) -> Option<Box<WebsocketCloseDiagnosticContext>> {
+        let CodexErrorDetails::WebsocketClosed(details) = error.details() else {
+            return None;
+        };
+        let attempt = self.managed_attempt.as_ref();
+        let request_binding = attempt
+            .map(|attempt| &attempt.transport_binding)
+            .or(self.websocket_session.binding.as_ref());
+        let handshake_binding = self.websocket_session.binding.as_ref();
+        let binding_matched = match (handshake_binding, request_binding) {
+            (Some(handshake), Some(request)) => Some(handshake == request),
+            _ => None,
+        };
+        Some(Box::new(WebsocketCloseDiagnosticContext {
+            details: details.as_ref().clone(),
+            thread_id: self.client.state.thread_id.to_string(),
+            turn_id: bounded_websocket_diagnostic_text(turn_id),
+            session_id: bounded_websocket_diagnostic_text(session_id),
+            model: bounded_websocket_diagnostic_text(model),
+            account_fingerprint: attempt
+                .map(|attempt| attempt.snapshot.diagnostic_account_fingerprint()),
+            credential_revision: attempt.map(|attempt| attempt.snapshot.account_revision),
+            account_state_revision: attempt.map(|attempt| attempt.snapshot.account_state_revision),
+            pool_revision: attempt.map(|attempt| attempt.snapshot.pool_revision),
+            selection_revision: attempt.map(|attempt| attempt.snapshot.selection_revision),
+            route_generation: request_binding.map(|binding| binding.route_generation),
+            handshake_binding_fingerprint: handshake_binding
+                .map(TransportAuthBinding::diagnostic_fingerprint),
+            request_binding_fingerprint: request_binding
+                .map(TransportAuthBinding::diagnostic_fingerprint),
+            binding_matched,
+            connection_reused: self.websocket_session.connection_reused(),
+            output_committed,
+        }))
+    }
+
+    pub(crate) fn request_scope_refresh_pending(&self) -> bool {
+        self.request_scope_refresh_pending
+    }
+
+    pub async fn recover_last_managed_attempt(
+        &mut self,
+        error: &CodexErr,
+        committed: bool,
+    ) -> bool {
+        if !committed && std::mem::take(&mut self.request_scope_refresh_pending) {
+            self.reset_account_bound_state();
+            return true;
+        }
+        let Some(attempt) = self.managed_attempt.clone() else {
+            return false;
+        };
+        if !self
+            .client
+            .recover_managed_attempt(&attempt, error, committed)
+            .await
+        {
+            return false;
+        }
+        self.reset_account_bound_state();
+        true
+    }
+
+    fn ensure_transport_binding(&mut self, binding: &TransportAuthBinding) -> bool {
+        if !self.websocket_session.ensure_binding(binding) {
+            return false;
+        }
+        self.turn_state = Arc::new(OnceLock::new());
+        true
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1274,17 +2020,25 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        if self.websocket_session.connection.is_some() {
+
+        let client_setup = self
+            .client
+            .current_client_setup(None, Some(responses_metadata.session_id.as_str()))
+            .await
+            .map_err(|err| {
+                ApiError::Stream(format!(
+                    "failed to build websocket prewarm client setup: {err}"
+                ))
+            })?;
+        let binding_changed = self.ensure_transport_binding(&client_setup.transport_auth_binding);
+        if self.websocket_session.connection.is_some() && !binding_changed {
             return Ok(());
         }
-
-        let client_setup = self.client.current_client_setup().await.map_err(|err| {
-            ApiError::Stream(format!(
-                "failed to build websocket prewarm client setup: {err}"
-            ))
-        })?;
         let auth_context = AuthRequestTelemetryContext::new(
-            client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+            client_setup
+                .effective_auth
+                .as_ref()
+                .map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
             client_setup.agent_identity_telemetry.clone(),
             PendingUnauthorizedRetry::default(),
@@ -1300,6 +2054,7 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
             )
             .await?;
+        self.websocket_session.binding = Some(client_setup.transport_auth_binding);
         self.websocket_session.connection = Some(connection);
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
@@ -1329,7 +2084,9 @@ impl ModelClientSession {
             responses_metadata,
             auth_context,
             request_route_telemetry,
+            binding,
         } = params;
+        self.ensure_transport_binding(&binding);
         let needs_new = match self.websocket_session.connection.as_ref() {
             Some(conn) => conn.is_closed().await,
             None => true,
@@ -1359,6 +2116,7 @@ impl ModelClientSession {
                     return Err(err);
                 }
             };
+            self.websocket_session.binding = Some(binding);
             self.websocket_session.connection = Some(new_conn);
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
@@ -1404,7 +2162,7 @@ impl ModelClientSession {
         )
     )]
     async fn stream_responses_api(
-        &self,
+        &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -1413,19 +2171,56 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
+        mut request_setup: Option<CurrentClientSetup>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
-        let mut auth_recovery = auth_manager
-            .as_ref()
-            .map(AuthManager::unauthorized_recovery);
+        let mut auth_recovery = None;
+        let mut auth_recovery_key = None;
         let mut pending_retry = PendingUnauthorizedRetry::default();
+        let explicit_setup = request_setup.is_some();
         loop {
-            let client_setup = self.client.current_client_setup().await?;
+            let client_setup = match request_setup.take() {
+                Some(setup) => setup,
+                None => {
+                    self.client
+                        .current_client_setup(
+                            Some(model_info.slug.as_str()),
+                            Some(responses_metadata.session_id.as_str()),
+                        )
+                        .await?
+                }
+            };
+            self.observe_managed_selection(
+                &client_setup,
+                Some(model_info.slug.as_str()),
+                Some(responses_metadata.session_id.as_str()),
+            );
+            self.ensure_transport_binding(&client_setup.transport_auth_binding);
+            self.update_managed_rate_limit_binding(&client_setup);
+            self.managed_attempt = self.client.managed_attempt_context(
+                &client_setup,
+                Some(model_info.slug.as_str()),
+                Some(responses_metadata.session_id.as_str()),
+            );
+            let recovery_key = UnauthorizedRecoveryKey::for_setup(&client_setup);
+            if auth_recovery_key.as_ref() != Some(&recovery_key) {
+                auth_recovery = auth_manager.as_ref().map(|manager| {
+                    client_setup.managed_snapshot.as_ref().map_or_else(
+                        || manager.unauthorized_recovery(),
+                        |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
+                    )
+                });
+                auth_recovery_key = Some(recovery_key);
+                pending_retry = PendingUnauthorizedRetry::default();
+            }
             let transport = self
                 .client
                 .build_api_transport(&client_setup.api_provider, RESPONSES_ENDPOINT)?;
             let request_auth_context = AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup
+                    .effective_auth
+                    .as_ref()
+                    .map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
@@ -1436,7 +2231,8 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(RESPONSES_ENDPOINT),
                 self.client.state.auth_env_telemetry.clone(),
             );
-            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let compression =
+                self.responses_request_compression(client_setup.effective_auth.as_ref());
             let mut options = self
                 .build_responses_options(
                     responses_metadata,
@@ -1461,6 +2257,13 @@ impl ModelClientSession {
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             inference_trace_attempt.record_started(&request);
+            let mut rate_limit_recorder = ManagedRateLimitRecorder::for_setup_with_revision(
+                auth_manager.as_ref(),
+                &client_setup,
+                self.managed_rate_limit_binding
+                    .as_ref()
+                    .and_then(|binding| binding.shared_account_state_revision.clone()),
+            );
             let client = ApiResponsesClient::new(
                 transport,
                 client_setup.api_provider,
@@ -1476,6 +2279,7 @@ impl ModelClientSession {
                         request_session_telemetry,
                         inference_trace_attempt,
                         Arc::clone(&self.client.state.provider),
+                        rate_limit_recorder,
                     );
                     return Ok(stream);
                 }
@@ -1489,6 +2293,15 @@ impl ModelClientSession {
                         response_debug_context.request_id.as_deref(),
                         /*output_items*/ &[],
                     );
+                    if explicit_setup {
+                        return Err(self
+                            .refresh_request_scope_after_unauthorized(
+                                unauthorized_transport,
+                                &mut auth_recovery,
+                                session_telemetry,
+                            )
+                            .await);
+                    }
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
@@ -1504,6 +2317,12 @@ impl ModelClientSession {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
                     let err = self.client.state.provider.map_api_error(err);
+                    if let CodexErrorDetails::UsageLimitReached(rate_error) = err.details()
+                        && let Some(rate_limits) = rate_error.rate_limits.as_ref()
+                        && let Some(recorder) = rate_limit_recorder.as_mut()
+                    {
+                        recorder.observe(rate_limits);
+                    }
                     inference_trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
@@ -1542,17 +2361,53 @@ impl ModelClientSession {
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
+        mut request_setup: Option<CurrentClientSetup>,
     ) -> Result<WebsocketStreamOutcome> {
         let auth_manager = self.client.state.provider.auth_manager();
-
-        let mut auth_recovery = auth_manager
-            .as_ref()
-            .map(AuthManager::unauthorized_recovery);
+        let mut auth_recovery = None;
+        let mut auth_recovery_key = None;
         let mut pending_retry = PendingUnauthorizedRetry::default();
+        let explicit_setup = request_setup.is_some();
         loop {
-            let client_setup = self.client.current_client_setup().await?;
+            let client_setup = match request_setup.take() {
+                Some(setup) => setup,
+                None => {
+                    self.client
+                        .current_client_setup(
+                            Some(model_info.slug.as_str()),
+                            Some(responses_metadata.session_id.as_str()),
+                        )
+                        .await?
+                }
+            };
+            self.observe_managed_selection(
+                &client_setup,
+                Some(model_info.slug.as_str()),
+                Some(responses_metadata.session_id.as_str()),
+            );
+            self.ensure_transport_binding(&client_setup.transport_auth_binding);
+            self.update_managed_rate_limit_binding(&client_setup);
+            self.managed_attempt = self.client.managed_attempt_context(
+                &client_setup,
+                Some(model_info.slug.as_str()),
+                Some(responses_metadata.session_id.as_str()),
+            );
+            let recovery_key = UnauthorizedRecoveryKey::for_setup(&client_setup);
+            if auth_recovery_key.as_ref() != Some(&recovery_key) {
+                auth_recovery = auth_manager.as_ref().map(|manager| {
+                    client_setup.managed_snapshot.as_ref().map_or_else(
+                        || manager.unauthorized_recovery(),
+                        |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
+                    )
+                });
+                auth_recovery_key = Some(recovery_key);
+                pending_retry = PendingUnauthorizedRetry::default();
+            }
             let request_auth_context = AuthRequestTelemetryContext::new(
-                client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                client_setup
+                    .effective_auth
+                    .as_ref()
+                    .map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
                 pending_retry,
@@ -1578,11 +2433,19 @@ impl ModelClientSession {
             if let Some(turn_state) = self.turn_state.get() {
                 client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
             }
+            let mut rate_limit_recorder = ManagedRateLimitRecorder::for_setup_with_revision(
+                auth_manager.as_ref(),
+                &client_setup,
+                self.managed_rate_limit_binding
+                    .as_ref()
+                    .and_then(|binding| binding.shared_account_state_revision.clone()),
+            );
             match self
                 .websocket_connection(WebsocketConnectParams {
                     session_telemetry,
                     api_provider: client_setup.api_provider,
                     api_auth: client_setup.api_auth,
+                    binding: client_setup.transport_auth_binding,
                     responses_metadata,
                     auth_context: request_auth_context,
                     request_route_telemetry: RequestRouteTelemetry::for_endpoint(
@@ -1600,6 +2463,15 @@ impl ModelClientSession {
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
+                    if explicit_setup {
+                        return Err(self
+                            .refresh_request_scope_after_unauthorized(
+                                unauthorized_transport,
+                                &mut auth_recovery,
+                                session_telemetry,
+                            )
+                            .await);
+                    }
                     pending_retry = PendingUnauthorizedRetry::from_recovery(
                         handle_unauthorized(
                             unauthorized_transport,
@@ -1611,7 +2483,14 @@ impl ModelClientSession {
                     );
                     continue;
                 }
-                Err(err) => return Err(self.client.state.provider.map_api_error(err)),
+                Err(err) => {
+                    let err = self.client.state.provider.map_api_error(err);
+                    if let Some(recorder) = rate_limit_recorder.as_mut() {
+                        recorder.observe_error(&err);
+                        recorder.flush();
+                    }
+                    return Err(err);
+                }
             }
 
             let (incremental_request, previous_response_id_from_untraced_warmup) =
@@ -1670,7 +2549,7 @@ impl ModelClientSession {
                         "websocket connection is unavailable".to_string(),
                     ))
                 })?;
-            let stream_result = websocket_connection
+            let raw_stream_result = websocket_connection
                 .stream_request(
                     ws_request,
                     self.websocket_session.connection_reused(),
@@ -1684,21 +2563,98 @@ impl ModelClientSession {
             }
             self.websocket_session.last_request = Some(request);
             self.websocket_session.last_response_from_untraced_warmup = warmup;
-            let stream_result = stream_result.map_err(|err| {
-                let response_debug_context = extract_response_debug_context_from_api_error(&err);
-                let err = self.client.state.provider.map_api_error(err);
-                inference_trace_attempt.record_failed(
-                    &err,
-                    response_debug_context.request_id.as_deref(),
-                    /*output_items*/ &[],
-                );
-                err
-            })?;
-            let (stream, last_request_rx) = map_response_stream(
-                stream_result,
+            let stream_result = match raw_stream_result {
+                Ok(stream) => stream,
+                Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                )) if status == StatusCode::UNAUTHORIZED => {
+                    if explicit_setup {
+                        return Err(self
+                            .refresh_request_scope_after_unauthorized(
+                                unauthorized_transport,
+                                &mut auth_recovery,
+                                session_telemetry,
+                            )
+                            .await);
+                    }
+                    self.reset_websocket_session();
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.client.state.provider,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    let response_debug_context =
+                        extract_response_debug_context_from_api_error(&err);
+                    let err = self.client.state.provider.map_api_error(err);
+                    if let Some(recorder) = rate_limit_recorder.as_mut() {
+                        recorder.observe_error(&err);
+                        recorder.flush();
+                    }
+                    inference_trace_attempt.record_failed(
+                        &err,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    return Err(err);
+                }
+            };
+            let codex_api::ResponseStream {
+                rx_event,
+                upstream_request_id,
+            } = stream_result;
+            let mut api_stream = codex_api::ResponseStream {
+                rx_event,
+                upstream_request_id: None,
+            };
+            let first_event = match api_stream.next().await {
+                Some(Err(ApiError::Transport(
+                    unauthorized_transport @ TransportError::Http { status, .. },
+                ))) if status == StatusCode::UNAUTHORIZED => {
+                    let response_debug_context =
+                        extract_response_debug_context(&unauthorized_transport);
+                    inference_trace_attempt.record_failed(
+                        &unauthorized_transport,
+                        response_debug_context.request_id.as_deref(),
+                        /*output_items*/ &[],
+                    );
+                    if explicit_setup {
+                        return Err(self
+                            .refresh_request_scope_after_unauthorized(
+                                unauthorized_transport,
+                                &mut auth_recovery,
+                                session_telemetry,
+                            )
+                            .await);
+                    }
+                    self.reset_websocket_session();
+                    pending_retry = PendingUnauthorizedRetry::from_recovery(
+                        handle_unauthorized(
+                            unauthorized_transport,
+                            &mut auth_recovery,
+                            session_telemetry,
+                            &self.client.state.provider,
+                        )
+                        .await?,
+                    );
+                    continue;
+                }
+                first_event => first_event,
+            };
+            let api_stream = futures::stream::iter(first_event).chain(api_stream);
+            let (stream, last_request_rx) = map_response_events_with_rate_recorder(
+                upstream_request_id,
+                api_stream,
                 request_session_telemetry,
                 inference_trace_attempt,
                 Arc::clone(&self.client.state.provider),
+                rate_limit_recorder,
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -1750,6 +2706,7 @@ impl ModelClientSession {
         summary: ReasoningSummaryConfig,
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
+        request_setup: CurrentClientSetup,
     ) -> Result<()> {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
@@ -1759,6 +2716,7 @@ impl ModelClientSession {
         }
 
         let disabled_trace = InferenceTraceContext::disabled();
+
         match self
             .stream_responses_websocket(
                 prompt,
@@ -1771,24 +2729,38 @@ impl ModelClientSession {
                 /*warmup*/ true,
                 current_span_w3c_trace_context(),
                 &disabled_trace,
+                Some(request_setup),
             )
             .await
         {
             Ok(WebsocketStreamOutcome::Stream(mut stream)) => {
-                // Wait for the v2 warmup request to complete before sending the first turn request.
+                let mut result = Err(CodexErr::Stream(
+                    "websocket prewarm closed before response.completed".to_string(),
+                ));
                 while let Some(event) = stream.next().await {
                     match event {
-                        Ok(ResponseEvent::Completed { .. }) => break,
-                        Err(err) => return Err(err),
+                        Ok(ResponseEvent::Completed { .. }) => {
+                            result = Ok(());
+                            break;
+                        }
+                        Err(err) => {
+                            result = Err(err);
+                            break;
+                        }
                         _ => {}
                     }
                 }
-                Ok(())
+                result
             }
-            Ok(WebsocketStreamOutcome::FallbackToHttp) => {
+            Ok(WebsocketStreamOutcome::FallbackToHttp)
+                if self.websocket_http_fallback_allowed() =>
+            {
                 self.try_switch_fallback_transport(session_telemetry, model_info);
                 Ok(())
             }
+            Ok(WebsocketStreamOutcome::FallbackToHttp) => Err(CodexErr::Stream(
+                "websocket unavailable and HTTPS fallback is disabled".to_string(),
+            )),
             Err(err) => Err(err),
         }
     }
@@ -1813,6 +2785,62 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        self.stream_inner(
+            prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            summary,
+            service_tier,
+            responses_metadata,
+            inference_trace,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_attempt_with_setup(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+        request_setup: CurrentClientSetup,
+    ) -> Result<ResponseStream> {
+        self.stream_inner(
+            prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            summary,
+            service_tier,
+            responses_metadata,
+            inference_trace,
+            Some(request_setup),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_inner(
+        &mut self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+        request_setup: Option<CurrentClientSetup>,
+    ) -> Result<ResponseStream> {
+        self.managed_attempt = None;
+        self.managed_rate_limit_binding = None;
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -1830,12 +2858,20 @@ impl ModelClientSession {
                             /*warmup*/ false,
                             request_trace,
                             inference_trace,
+                            request_setup.clone(),
                         )
                         .await?
                     {
                         WebsocketStreamOutcome::Stream(stream) => return Ok(stream),
-                        WebsocketStreamOutcome::FallbackToHttp => {
+                        WebsocketStreamOutcome::FallbackToHttp
+                            if self.websocket_http_fallback_allowed() =>
+                        {
                             self.try_switch_fallback_transport(session_telemetry, model_info);
+                        }
+                        WebsocketStreamOutcome::FallbackToHttp => {
+                            return Err(CodexErr::Stream(
+                                "websocket unavailable and HTTPS fallback is disabled".to_string(),
+                            ));
                         }
                     }
                 }
@@ -1849,6 +2885,7 @@ impl ModelClientSession {
                     service_tier,
                     responses_metadata,
                     inference_trace,
+                    request_setup,
                 )
                 .await
             }
@@ -1932,6 +2969,7 @@ fn map_response_stream(
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
+    rate_limit_recorder: Option<ManagedRateLimitRecorder>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -1941,21 +2979,23 @@ fn map_response_stream(
         rx_event,
         upstream_request_id: None,
     };
-    map_response_events(
+    map_response_events_with_rate_recorder(
         upstream_request_id,
         api_stream,
         session_telemetry,
         inference_trace_attempt,
         provider,
+        rate_limit_recorder,
     )
 }
 
-fn map_response_events<S>(
+fn map_response_events_with_rate_recorder<S>(
     upstream_request_id: Option<String>,
     api_stream: S,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
+    mut rate_limit_recorder: Option<ManagedRateLimitRecorder>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -1987,6 +3027,9 @@ where
                         upstream_request_id,
                         &items_added,
                     );
+                    if let Some(recorder) = rate_limit_recorder.as_mut() {
+                        recorder.flush();
+                    }
                     return;
                 }
                 event = api_stream.next() => event,
@@ -2007,6 +3050,29 @@ where
                             upstream_request_id,
                             &items_added,
                         );
+                        if let Some(recorder) = rate_limit_recorder.as_mut() {
+                            recorder.flush();
+                        }
+                        return;
+                    }
+                }
+                Ok(ResponseEvent::RateLimits(snapshot)) => {
+                    if let Some(recorder) = rate_limit_recorder.as_mut() {
+                        recorder.observe(&snapshot);
+                    }
+                    if tx_event
+                        .send(Ok(ResponseEvent::RateLimits(snapshot)))
+                        .await
+                        .is_err()
+                    {
+                        inference_trace_attempt.record_cancelled(
+                            STREAM_DROPPED_REASON,
+                            upstream_request_id,
+                            &items_added,
+                        );
+                        if let Some(recorder) = rate_limit_recorder.as_mut() {
+                            recorder.flush();
+                        }
                         return;
                     }
                 }
@@ -2025,6 +3091,9 @@ where
                         &token_usage,
                         &items_added,
                     );
+                    if let Some(recorder) = rate_limit_recorder.as_mut() {
+                        recorder.flush();
+                    }
                     if let Some(sender) = tx_last_response.take() {
                         let _ = sender.send(LastResponse {
                             response_id: response_id.clone(),
@@ -2055,6 +3124,9 @@ where
                             upstream_request_id,
                             &items_added,
                         );
+                        if let Some(recorder) = rate_limit_recorder.as_mut() {
+                            recorder.flush();
+                        }
                         return;
                     }
                 }
@@ -2067,6 +3139,15 @@ where
                         feedback_tags!(last_model_request_id = upstream_request_id);
                     }
                     let mapped = provider.map_api_error(err);
+                    if let CodexErrorDetails::UsageLimitReached(error) = mapped.details()
+                        && let Some(snapshot) = error.rate_limits.as_deref()
+                        && let Some(recorder) = rate_limit_recorder.as_mut()
+                    {
+                        recorder.observe(snapshot);
+                    }
+                    if let Some(recorder) = rate_limit_recorder.as_mut() {
+                        recorder.flush();
+                    }
                     inference_trace_attempt.record_failed(
                         &mapped,
                         upstream_request_id,
@@ -2082,6 +3163,9 @@ where
                 }
             }
         }
+        if let Some(recorder) = rate_limit_recorder.as_mut() {
+            recorder.flush();
+        }
         inference_trace_attempt.record_failed(
             "stream closed before response.completed",
             upstream_request_id,
@@ -2095,6 +3179,30 @@ where
             consumer_dropped: consumer_dropped_for_stream,
         },
         rx_last_response,
+    )
+}
+
+#[cfg(test)]
+fn map_response_events<S>(
+    upstream_request_id: Option<String>,
+    api_stream: S,
+    session_telemetry: SessionTelemetry,
+    inference_trace_attempt: InferenceTraceAttempt,
+    provider: SharedModelProvider,
+) -> (ResponseStream, oneshot::Receiver<LastResponse>)
+where
+    S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
+        + Unpin
+        + Send
+        + 'static,
+{
+    map_response_events_with_rate_recorder(
+        upstream_request_id,
+        api_stream,
+        session_telemetry,
+        inference_trace_attempt,
+        provider,
+        None,
     )
 }
 
@@ -2171,6 +3279,7 @@ struct WebsocketConnectParams<'a> {
     session_telemetry: &'a SessionTelemetry,
     api_provider: codex_api::Provider,
     api_auth: SharedAuthProvider,
+    binding: TransportAuthBinding,
     responses_metadata: &'a CodexResponsesMetadata,
     auth_context: AuthRequestTelemetryContext,
     request_route_telemetry: RequestRouteTelemetry,
@@ -2443,6 +3552,462 @@ impl WebsocketTelemetry for ApiTelemetry {
     ) {
         self.session_telemetry
             .record_websocket_event(result, duration);
+    }
+}
+
+#[cfg(test)]
+mod binding_and_rate_tests {
+    use super::*;
+    use base64::Engine;
+    use codex_login::AuthCredentialsStoreMode;
+    use codex_login::AuthKeyringBackendKind;
+    use codex_login::ManagedChatgptOauthCredentials;
+    use codex_login::TokenData;
+    use codex_login::token_data::IdTokenInfo;
+    use codex_protocol::protocol::RateLimitWindow;
+    use tempfile::tempdir;
+
+    fn binding(
+        raw_account_id: Option<&str>,
+        fedramp: bool,
+        auth_mode: AuthMode,
+        route_generation: u64,
+    ) -> TransportAuthBinding {
+        TransportAuthBinding {
+            identity_key: "managed:user".to_string(),
+            raw_account_id: raw_account_id.map(str::to_string),
+            fedramp,
+            auth_mode,
+            route_generation,
+        }
+    }
+
+    #[test]
+    fn websocket_binding_change_invalidates_connection_and_previous_response_state() {
+        let initial = binding(Some("workspace-a"), false, AuthMode::Chatgpt, 4);
+        let mut session = WebsocketSession::default();
+        assert!(session.ensure_binding(&initial));
+
+        let (_last_response_tx, last_response_rx) = oneshot::channel();
+        session.last_response_rx = Some(last_response_rx);
+        session.last_response_from_untraced_warmup = true;
+        assert!(!session.ensure_binding(&initial));
+        assert!(session.last_response_rx.is_some());
+
+        let changed = binding(Some("workspace-a"), false, AuthMode::Chatgpt, 5);
+        assert!(session.ensure_binding(&changed));
+        assert!(session.connection.is_none());
+        assert!(session.last_request.is_none());
+        assert!(session.last_response_rx.is_none());
+        assert!(!session.last_response_from_untraced_warmup);
+        assert!(!session.connection_reused());
+
+        assert!(
+            session.ensure_binding(&binding(Some("workspace-b"), false, AuthMode::Chatgpt, 5,))
+        );
+        assert!(session.ensure_binding(&binding(Some("workspace-b"), true, AuthMode::Chatgpt, 5,)));
+        assert!(session.ensure_binding(&binding(Some("workspace-b"), true, AuthMode::ApiKey, 5,)));
+    }
+
+    fn managed_id_token(email: &str, account_id: &str) -> String {
+        let header = serde_json::json!({"alg": "none", "typ": "JWT"});
+        let payload = serde_json::json!({
+            "email": email,
+            "email_verified": true,
+            "https://api.openai.com/auth": {
+                "chatgpt_user_id": format!("user-{account_id}"),
+                "user_id": format!("user-{account_id}"),
+                "chatgpt_account_id": account_id,
+            },
+        });
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        format!(
+            "{}.{}.{}",
+            encode(&serde_json::to_vec(&header).expect("serialize JWT header")),
+            encode(&serde_json::to_vec(&payload).expect("serialize JWT payload")),
+            encode(b"sig"),
+        )
+    }
+
+    fn credentials(email: &str, account_id: &str) -> ManagedChatgptOauthCredentials {
+        ManagedChatgptOauthCredentials {
+            tokens: TokenData {
+                id_token: IdTokenInfo {
+                    email: Some(email.to_string()),
+                    chatgpt_account_id: Some(account_id.to_string()),
+                    raw_jwt: managed_id_token(email, account_id),
+                    ..Default::default()
+                },
+                access_token: format!("access-{account_id}"),
+                refresh_token: format!("refresh-{account_id}"),
+                account_id: Some(account_id.to_string()),
+            },
+            last_refresh: chrono::Utc::now(),
+            oauth_api_key: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
+        let codex_home = tempdir().expect("tempdir");
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        let first_id = auth_manager
+            .upsert_managed_chatgpt_oauth(credentials("a@example.com", "workspace-a"))
+            .await
+            .expect("insert first account");
+        let second_id = auth_manager
+            .upsert_managed_chatgpt_oauth(credentials("b@example.com", "workspace-b"))
+            .await
+            .expect("insert second account");
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(Arc::clone(&auth_manager)),
+        );
+        let setup = provider
+            .request_setup(ProviderAuthScope {
+                agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
+                session_source: SessionSource::Cli,
+                agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                thread_id: Some("thread-rate-observation".to_string()),
+                session_id: Some("session-rate-observation".to_string()),
+                model: Some("gpt-test".to_string()),
+            })
+            .await
+            .expect("selected setup");
+        let selected_id = setup.managed_id.clone().expect("managed selection");
+        assert!(selected_id == first_id || selected_id == second_id);
+
+        let snapshot = RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: Some("Codex".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 25.0,
+                window_minutes: Some(60),
+                resets_at: Some(1_800_000_000),
+            }),
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        };
+        let mut recorder =
+            ManagedRateLimitRecorder::for_setup(Some(&auth_manager), &setup).expect("recorder");
+        recorder.flush();
+        assert!(
+            auth_manager
+                .managed_chatgpt_accounts()
+                .expect("managed accounts")
+                .iter()
+                .all(|account| account.usage.is_none())
+        );
+        recorder.observe(&snapshot);
+        recorder.observe(&RateLimitSnapshot {
+            primary: Some(RateLimitWindow {
+                used_percent: 15.0,
+                window_minutes: Some(60),
+                resets_at: Some(1_800_000_010),
+            }),
+            secondary: Some(RateLimitWindow {
+                used_percent: 45.0,
+                window_minutes: Some(300),
+                resets_at: Some(1_800_000_020),
+            }),
+            ..snapshot.clone()
+        });
+        recorder.observe(&RateLimitSnapshot {
+            limit_id: Some("codex_other".to_string()),
+            limit_name: Some("Other".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 40.0,
+                window_minutes: Some(120),
+                resets_at: Some(1_800_000_100),
+            }),
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        });
+        recorder.observe(&RateLimitSnapshot {
+            limit_id: Some("codex_other".to_string()),
+            limit_name: Some("Other".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 30.0,
+                window_minutes: Some(120),
+                resets_at: Some(1_800_000_200),
+            }),
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        });
+        recorder.flush();
+
+        let accounts = auth_manager
+            .managed_chatgpt_accounts()
+            .expect("managed accounts");
+        let selected = accounts
+            .iter()
+            .find(|account| account.identity_key == selected_id)
+            .expect("selected account");
+        let usage = selected.usage.as_ref().expect("recorded selected usage");
+        assert_eq!(usage.rate_windows.len(), 3);
+        assert_eq!(usage.rate_windows[0].remaining_percent, Some(85.0));
+        assert_eq!(usage.rate_windows[1].limit_id, "codex");
+        assert_eq!(
+            usage.rate_windows[1].kind,
+            ManagedChatgptLimitKind::Secondary
+        );
+        assert_eq!(usage.rate_windows[1].remaining_percent, Some(55.0));
+        assert_eq!(usage.rate_windows[2].limit_id, "codex_other:primary");
+        assert_eq!(usage.rate_windows[2].remaining_percent, Some(70.0));
+        assert!(
+            accounts
+                .iter()
+                .filter(|account| account.identity_key != selected_id)
+                .all(|account| account.usage.is_none())
+        );
+        let empty = RateLimitSnapshot {
+            limit_id: None,
+            limit_name: None,
+            primary: None,
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        };
+        recorder.observe(&empty);
+        recorder.flush();
+        let accounts = auth_manager
+            .managed_chatgpt_accounts()
+            .expect("managed accounts after empty snapshot");
+        let selected = accounts
+            .iter()
+            .find(|account| account.identity_key == selected_id)
+            .expect("selected account after empty snapshot");
+        assert_eq!(
+            selected
+                .usage
+                .as_ref()
+                .expect("retained selected usage")
+                .rate_windows
+                .len(),
+            3
+        );
+        assert_eq!(
+            selected.usage_unavailable_reason.as_deref(),
+            Some("rate limit usage was absent from the response")
+        );
+        drop(recorder);
+        let setup = provider
+            .request_setup(ProviderAuthScope {
+                agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
+                session_source: SessionSource::Cli,
+                agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                thread_id: Some("thread-rate-observation".to_string()),
+                session_id: Some("session-rate-observation".to_string()),
+                model: Some("gpt-test".to_string()),
+            })
+            .await
+            .expect("selected setup after unavailable observation");
+        assert_eq!(setup.managed_id.as_deref(), Some(selected_id.as_str()));
+        let mut recorder =
+            ManagedRateLimitRecorder::for_setup(Some(&auth_manager), &setup).expect("recorder");
+        recorder.observe(&RateLimitSnapshot {
+            limit_id: Some("codex_other".to_string()),
+            limit_name: Some("Other".to_string()),
+            primary: Some(RateLimitWindow {
+                used_percent: 5.0,
+                window_minutes: Some(120),
+                resets_at: Some(1_800_000_300),
+            }),
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        });
+        recorder.flush();
+        let selected = auth_manager
+            .managed_chatgpt_accounts()
+            .expect("managed accounts after sparse observation")
+            .into_iter()
+            .find(|account| account.identity_key == selected_id)
+            .expect("selected account after sparse observation");
+        let windows = &selected
+            .usage
+            .as_ref()
+            .expect("usage after sparse observation")
+            .rate_windows;
+        assert_eq!(windows.len(), 3);
+        assert_eq!(windows[0].remaining_percent, Some(85.0));
+        assert_eq!(windows[1].remaining_percent, Some(55.0));
+        assert_eq!(windows[2].remaining_percent, Some(95.0));
+        assert!(selected.usage_unavailable_reason.is_none());
+        let unavailable_observed_at = selected.usage_unavailable_observed_at;
+        recorder.flush();
+        let selected = auth_manager
+            .managed_chatgpt_accounts()
+            .expect("managed accounts after unobserved flush")
+            .into_iter()
+            .find(|account| account.identity_key == selected_id)
+            .expect("selected account after unobserved flush");
+        assert_eq!(
+            selected.usage_unavailable_observed_at,
+            unavailable_observed_at
+        );
+    }
+    #[tokio::test]
+    async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard() {
+        let codex_home = tempdir().expect("tempdir");
+        let auth_manager = AuthManager::shared(
+            codex_home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            AuthKeyringBackendKind::default(),
+            /*auth_route_config*/ None,
+        )
+        .await;
+        auth_manager
+            .upsert_managed_chatgpt_oauth(credentials("a@example.com", "workspace-a"))
+            .await
+            .expect("insert account");
+        let provider = create_model_provider(
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+            Some(Arc::clone(&auth_manager)),
+        );
+        let scope = || ProviderAuthScope {
+            agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
+            session_source: SessionSource::Cli,
+            agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+            thread_id: Some("thread-revision-observation".to_string()),
+            session_id: Some("session-revision-observation".to_string()),
+            model: Some("gpt-test".to_string()),
+        };
+        let setup = provider
+            .request_setup(scope())
+            .await
+            .expect("selected setup");
+        let initial_revision = setup
+            .account_state_revision
+            .expect("account state revision");
+        let shared_revision = Arc::new(AtomicU64::new(initial_revision));
+        let binding = ManagedRateLimitBinding {
+            managed_account_id: setup.managed_id.clone().expect("managed id"),
+            account_state_revision: initial_revision,
+            transport_binding: setup.transport_auth_binding.clone(),
+            shared_account_state_revision: Some(Arc::clone(&shared_revision)),
+        };
+        let mut recorder = ManagedRateLimitRecorder::for_setup_with_revision(
+            Some(&auth_manager),
+            &setup,
+            Some(Arc::clone(&shared_revision)),
+        )
+        .expect("recorder");
+        recorder.observe(&RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: None,
+            primary: Some(RateLimitWindow {
+                used_percent: 20.0,
+                window_minutes: Some(60),
+                resets_at: Some(1_800_000_000),
+            }),
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        });
+        recorder.flush();
+        let persisted_revision = auth_manager
+            .managed_chatgpt_accounts()
+            .expect("managed accounts")
+            .into_iter()
+            .find(|account| account.identity_key == binding.managed_account_id)
+            .expect("selected account")
+            .revision;
+        assert!(persisted_revision > initial_revision);
+        assert_eq!(shared_revision.load(Ordering::Acquire), persisted_revision);
+        assert_eq!(
+            binding.refreshed().account_state_revision,
+            persisted_revision
+        );
+
+        let stale_setup = provider
+            .request_setup(scope())
+            .await
+            .expect("selected setup for stale observation");
+        let stale_revision = stale_setup
+            .account_state_revision
+            .expect("stale setup revision");
+        let stale_shared_revision = Arc::new(AtomicU64::new(stale_revision));
+        let mut stale_recorder = ManagedRateLimitRecorder::for_setup_with_revision(
+            Some(&auth_manager),
+            &stale_setup,
+            Some(Arc::clone(&stale_shared_revision)),
+        )
+        .expect("stale recorder");
+        let concurrent = auth_manager
+            .record_managed_chatgpt_status_observation(
+                stale_setup.managed_id.as_deref().expect("managed id"),
+                stale_setup
+                    .credential_revision
+                    .expect("credential revision"),
+                stale_revision,
+                ManagedChatgptStatusObservation {
+                    observed_at: chrono::Utc::now(),
+                    rate: ManagedChatgptRateObservation::Unavailable {
+                        reason: "concurrent observation".to_string(),
+                    },
+                    token: ManagedChatgptTokenObservation::NotObserved,
+                },
+            )
+            .expect("record concurrent observation")
+            .expect("current observation");
+        assert!(concurrent.revision > stale_revision);
+        stale_recorder.observe(&RateLimitSnapshot {
+            limit_id: Some("codex".to_string()),
+            limit_name: None,
+            primary: Some(RateLimitWindow {
+                used_percent: 10.0,
+                window_minutes: Some(60),
+                resets_at: Some(1_800_000_100),
+            }),
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        });
+        stale_recorder.flush();
+        assert_eq!(
+            stale_shared_revision.load(Ordering::Acquire),
+            stale_revision
+        );
+        assert_eq!(
+            auth_manager
+                .managed_chatgpt_accounts()
+                .expect("managed accounts after stale discard")
+                .into_iter()
+                .find(|account| account.identity_key == binding.managed_account_id)
+                .expect("selected account after stale discard")
+                .revision,
+            concurrent.revision
+        );
     }
 }
 

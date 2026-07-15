@@ -1602,6 +1602,36 @@
     "LegacyAppPathString": {
       "type": "string"
     },
+    "ListAccountsParams": {
+      "description": "Parameters for the canonical managed ChatGPT account-pool listing.",
+      "properties": {
+        "model": {
+          "default": null,
+          "description": "Model used when computing a scoped account selection.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "refreshTokens": {
+          "description": "Refresh due managed OAuth tokens before returning the list.",
+          "type": "boolean"
+        },
+        "refreshUsage": {
+          "description": "Refresh account usage before returning the list.",
+          "type": "boolean"
+        },
+        "threadId": {
+          "default": null,
+          "description": "Selects the account pinned to this thread when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "ListMcpServerStatusParams": {
       "properties": {
         "cursor": {
@@ -1842,6 +1872,21 @@
         "chatgpt"
       ],
       "type": "string"
+    },
+    "LogoutAccountParams": {
+      "properties": {
+        "accountId": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "all": {
+          "type": "boolean"
+        }
+      },
+      "type": "object"
     },
     "MarketplaceAddParams": {
       "properties": {
@@ -7113,13 +7158,45 @@
         },
         "method": {
           "enum": [
+            "account/list"
+          ],
+          "title": "Account/listRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ListAccountsParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Account/listRequest",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
             "account/logout"
           ],
           "title": "Account/logoutRequestMethod",
           "type": "string"
         },
         "params": {
-          "type": "null"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LogoutAccountParams"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [

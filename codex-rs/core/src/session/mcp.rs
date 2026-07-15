@@ -1,4 +1,5 @@
 use super::mcp_refresh::McpRefreshInvalidationGuard;
+use super::mcp_runtime::McpDesiredState;
 use super::*;
 use codex_exec_server::ExecutorCapabilityDiscoveryCache;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
@@ -38,6 +39,40 @@ const TOOL_SUGGESTION_ACTION_INSTALL: &str = "install";
 const TOOL_SUGGESTION_ACTION_KEY: &str = "suggest_type";
 const TOOL_SUGGESTION_TOOL_ID_KEY: &str = "tool_id";
 const TOOL_SUGGESTION_TOOL_TYPE_KEY: &str = "tool_type";
+
+pub(super) fn codex_apps_tools_cache_key_for_setup(
+    turn_context: &TurnContext,
+    setup: &CurrentClientSetup,
+) -> codex_mcp::CodexAppsToolsCacheKey {
+    match setup.credential_revision {
+        Some(revision) => codex_mcp::CodexAppsToolsCacheKey::from_transport_binding(
+            setup.transport_auth_binding.clone(),
+            revision,
+            turn_context.config.chatgpt_base_url.clone(),
+        ),
+        None => codex_mcp::codex_apps_tools_cache_key(setup.effective_auth.as_ref()),
+    }
+}
+
+pub(super) fn connector_directory_cache_key_for_setup(
+    turn_context: &TurnContext,
+    setup: &CurrentClientSetup,
+) -> Option<codex_connectors::ConnectorDirectoryCacheKey> {
+    if setup.credential_revision.is_none() && setup.effective_auth.is_none() {
+        return None;
+    }
+    Some(
+        codex_connectors::ConnectorDirectoryCacheKey::from_runtime_binding(
+            turn_context.config.chatgpt_base_url.clone(),
+            setup.transport_auth_binding.clone(),
+            setup.credential_revision,
+            setup
+                .effective_auth
+                .as_ref()
+                .is_some_and(CodexAuth::is_workspace_account),
+        ),
+    )
+}
 
 #[derive(Debug, PartialEq)]
 enum GuardianElicitationReview {
@@ -268,13 +303,14 @@ impl Session {
                 executor_capability_discovery.as_deref(),
             )
             .await;
-        let input = self.build_mcp_runtime_input(
-            &desired,
-            mcp_projection,
-            &ready_selected_capability_roots,
-            Some(self.mcp_elicitation_reviewer()),
-        )
-        .await;
+        let input = self
+            .build_mcp_runtime_input(
+                &desired,
+                mcp_projection,
+                &ready_selected_capability_roots,
+                Some(self.mcp_elicitation_reviewer()),
+            )
+            .await;
         anyhow::ensure!(
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
@@ -290,30 +326,128 @@ impl Session {
     pub(crate) async fn mcp_runtime_for_step(
         self: &Arc<Self>,
         turn_context: &TurnContext,
+        environments: &TurnEnvironmentSnapshot,
         selected_capability_roots: &[ResolvedSelectedCapabilityRoot],
+        executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
+        request_setup: Option<&CurrentClientSetup>,
         required_servers: &[String],
     ) -> Arc<codex_mcp::McpBinding> {
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(selected_capability_roots);
-        if self
-            .services
-            .mcp_runtime
-            .current_ready_selected_capability_roots()
-            != ready_selected_capability_roots
-        {
-            self.mark_mcp_runtime_dirty();
-        }
-        self.refresh_mcp_if_dirty().await;
-        if let Some(binding) = self
-            .services
-            .mcp_runtime
-            .current_binding_with_required_servers(required_servers)
-            .await
+        let Some(request_setup) = request_setup else {
+            if self
+                .services
+                .mcp_runtime
+                .current_ready_selected_capability_roots()
+                != ready_selected_capability_roots
+            {
+                self.mark_mcp_runtime_dirty();
+            }
+            self.refresh_mcp_if_dirty().await;
+            if let Some(binding) = self
+                .services
+                .mcp_runtime
+                .current_binding_with_required_servers(required_servers)
+                .await
+            {
+                return binding;
+            }
+            let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
+            return Arc::new(codex_mcp::McpBinding::empty(config));
+        };
+
+        let auth = request_setup.effective_auth.clone();
+        let cache_key = codex_apps_tools_cache_key_for_setup(turn_context, request_setup);
+        let runtime_matches = || {
+            !self.mcp_refresh.is_pending()
+                && self
+                    .services
+                    .mcp_runtime
+                    .current_auth_matches(auth.as_ref())
+                && self
+                    .services
+                    .mcp_runtime
+                    .current_codex_apps_tools_cache_key()
+                    .as_ref()
+                    == Some(&cache_key)
+                && self
+                    .services
+                    .mcp_runtime
+                    .current_ready_selected_capability_roots()
+                    == ready_selected_capability_roots
+                && self
+                    .services
+                    .mcp_runtime
+                    .current_config()
+                    .is_some_and(|config| {
+                        config.chatgpt_base_url == turn_context.config.chatgpt_base_url
+                    })
+        };
+        if runtime_matches()
+            && let Some(binding) = self
+                .services
+                .mcp_runtime
+                .current_binding_with_required_servers(required_servers)
+                .await
         {
             return binding;
         }
-        let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
-        Arc::new(codex_mcp::McpBinding::empty(config))
+
+        let Ok(_refresh) = self.mcp_refresh.acquire().await else {
+            let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
+            return Arc::new(codex_mcp::McpBinding::empty(config));
+        };
+        if runtime_matches()
+            && let Some(binding) = self
+                .services
+                .mcp_runtime
+                .current_binding_with_required_servers(required_servers)
+                .await
+        {
+            return binding;
+        }
+        let _ = self.mcp_refresh.claim();
+        self.services
+            .plugins_manager
+            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
+        let desired = McpDesiredState {
+            config: Arc::clone(&turn_context.config),
+            auth,
+            codex_apps_tools_cache_key: cache_key,
+            submit_id: self.next_internal_sub_id(),
+            originator: turn_context.originator.clone(),
+            session_source: turn_context.session_source.clone(),
+            environments: environments.clone(),
+            windows_sandbox_level: turn_context.windows_sandbox_level,
+        };
+        let mcp_projection = self
+            .services
+            .mcp_manager
+            .runtime_config_for_step(
+                &desired.config,
+                &self.services.mcp_thread_init,
+                &self.services.thread_extension_data,
+                McpThreadIdentity {
+                    session_source: &desired.session_source,
+                    originator: &desired.originator,
+                },
+                &ready_selected_capability_roots,
+                executor_capability_discovery,
+            )
+            .await;
+        let fallback_config = Arc::new(mcp_projection.config.clone());
+        self.publish_mcp_runtime(
+            &desired,
+            mcp_projection,
+            &ready_selected_capability_roots,
+            Some(self.mcp_elicitation_reviewer()),
+        )
+        .await;
+        self.services
+            .mcp_runtime
+            .current_binding_with_required_servers(required_servers)
+            .await
+            .unwrap_or_else(|| Arc::new(codex_mcp::McpBinding::empty(fallback_config)))
     }
 
     #[tracing::instrument(

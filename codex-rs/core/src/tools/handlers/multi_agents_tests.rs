@@ -4614,25 +4614,25 @@ async fn tool_handlers_cascade_close_and_resume() {
     let parent_thread_id = parent.thread_id;
     let parent_session = parent.thread.session.clone();
 
-                    let child_spawn_output = SpawnAgentHandler::default()
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "spawn_agent",
-                            function_payload(json!({"message": "hello child"})),
-                        ))
-                        .await
-                        .expect("child spawn should succeed");
-                    let (child_content, child_success) = expect_text_output(child_spawn_output);
-                    let child_result: serde_json::Value = serde_json::from_str(&child_content)
-                        .expect("child spawn result should be json");
-                    let child_thread_id = parse_agent_id(
-                        child_result
-                            .get("agent_id")
-                            .and_then(serde_json::Value::as_str)
-                            .expect("child spawn result should include agent_id"),
-                    );
-                    assert_eq!(child_success, Some(true));
+    let child_spawn_output = SpawnAgentHandler::default()
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({"message": "hello child"})),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let (child_content, child_success) = expect_text_output(child_spawn_output);
+    let child_result: serde_json::Value =
+        serde_json::from_str(&child_content).expect("child spawn result should be json");
+    let child_thread_id = parse_agent_id(
+        child_result
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("child spawn result should include agent_id"),
+    );
+    assert_eq!(child_success, Some(true));
 
     let child_thread = manager
         .get_thread(child_thread_id)
@@ -4659,88 +4659,84 @@ async fn tool_handlers_cascade_close_and_resume() {
     );
     assert_eq!(grandchild_success, Some(true));
 
-                    let close_output = CloseAgentHandler
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "close_agent",
-                            function_payload(json!({"target": child_thread_id.to_string()})),
-                        ))
-                        .await
-                        .expect("close_agent should close the child subtree");
-                    let (close_content, close_success) = expect_text_output(close_output);
-                    let close_result: close_agent::CloseAgentResult =
-                        serde_json::from_str(&close_content)
-                            .expect("close_agent result should be json");
-                    assert_ne!(close_result.previous_status, AgentStatus::NotFound);
-                    assert_eq!(close_success, Some(true));
-                    assert_eq!(
-                        manager.agent_control().get_status(child_thread_id).await,
-                        AgentStatus::NotFound
-                    );
-                    assert_eq!(
-                        manager
-                            .agent_control()
-                            .get_status(grandchild_thread_id)
-                            .await,
-                        AgentStatus::NotFound
-                    );
+    let close_output = CloseAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should close the child subtree");
+    let (close_content, close_success) = expect_text_output(close_output);
+    let close_result: close_agent::CloseAgentResult =
+        serde_json::from_str(&close_content).expect("close_agent result should be json");
+    assert_ne!(close_result.previous_status, AgentStatus::NotFound);
+    assert_eq!(close_success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
 
-                    let child_resume_output = ResumeAgentHandler
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "resume_agent",
-                            function_payload(json!({"id": child_thread_id.to_string()})),
-                        ))
-                        .await
-                        .expect("resume_agent should reopen the child subtree");
-                    let (child_resume_content, child_resume_success) =
-                        expect_text_output(child_resume_output);
-                    let child_resume_result: resume_agent::ResumeAgentResult =
-                        serde_json::from_str(&child_resume_content)
-                            .expect("resume result should be json");
-                    assert_ne!(child_resume_result.status, AgentStatus::NotFound);
-                    assert_eq!(child_resume_success, Some(true));
-                    assert_ne!(
-                        manager.agent_control().get_status(child_thread_id).await,
-                        AgentStatus::NotFound
-                    );
-                    assert_ne!(
-                        manager
-                            .agent_control()
-                            .get_status(grandchild_thread_id)
-                            .await,
-                        AgentStatus::NotFound
-                    );
+    let child_resume_output = ResumeAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({"id": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("resume_agent should reopen the child subtree");
+    let (child_resume_content, child_resume_success) = expect_text_output(child_resume_output);
+    let child_resume_result: resume_agent::ResumeAgentResult =
+        serde_json::from_str(&child_resume_content).expect("resume result should be json");
+    assert_ne!(child_resume_result.status, AgentStatus::NotFound);
+    assert_eq!(child_resume_success, Some(true));
+    assert_ne!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_ne!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
 
-                    let close_again_output = CloseAgentHandler
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "close_agent",
-                            function_payload(json!({"target": child_thread_id.to_string()})),
-                        ))
-                        .await
-                        .expect("close_agent should be repeatable for the child subtree");
-                    let (close_again_content, close_again_success) =
-                        expect_text_output(close_again_output);
-                    let close_again_result: close_agent::CloseAgentResult =
-                        serde_json::from_str(&close_again_content)
-                            .expect("second close_agent result should be json");
-                    assert_ne!(close_again_result.previous_status, AgentStatus::NotFound);
-                    assert_eq!(close_again_success, Some(true));
-                    assert_eq!(
-                        manager.agent_control().get_status(child_thread_id).await,
-                        AgentStatus::NotFound
-                    );
-                    assert_eq!(
-                        manager
-                            .agent_control()
-                            .get_status(grandchild_thread_id)
-                            .await,
-                        AgentStatus::NotFound
-                    );
+    let close_again_output = CloseAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should be repeatable for the child subtree");
+    let (close_again_content, close_again_success) = expect_text_output(close_again_output);
+    let close_again_result: close_agent::CloseAgentResult =
+        serde_json::from_str(&close_again_content)
+            .expect("second close_agent result should be json");
+    assert_ne!(close_again_result.previous_status, AgentStatus::NotFound);
+    assert_eq!(close_again_success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
 
     let operator = manager
         .start_thread(StartThreadOptions::new(config.clone()))

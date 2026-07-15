@@ -1311,6 +1311,9 @@ pub enum EventMsg {
     /// Model routing changed from the requested model to a different model.
     ModelReroute(ModelRerouteEvent),
 
+    /// Managed ChatGPT account selected for this thread's request scope.
+    ManagedAccountSelected(ManagedAccountSelectedEvent),
+
     /// Backend recommends additional account verification for this turn.
     ModelVerification(ModelVerificationEvent),
 
@@ -1962,6 +1965,16 @@ pub struct ModelRerouteEvent {
     pub reason: ModelRerouteReason,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ManagedAccountSelectedEvent {
+    pub selected_account_id: String,
+    pub selection_revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
@@ -2150,10 +2163,29 @@ impl TokenUsageInfo {
     }
 }
 
+/// Secretless transport identity retained with managed rate-limit rollout state.
+///
+/// All fields participate in restore matching so a snapshot from one credential
+/// route can never be installed for another request binding.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ManagedTransportAuthBinding {
+    pub identity_key: String,
+    pub raw_account_id: Option<String>,
+    pub fedramp: bool,
+    pub auth_mode: crate::auth::AuthMode,
+    pub route_generation: u64,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct TokenCountEvent {
     pub info: Option<TokenUsageInfo>,
     pub rate_limits: Option<RateLimitSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_state_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_transport_binding: Option<ManagedTransportAuthBinding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
@@ -3205,6 +3237,68 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
     }
 }
 
+/// Recovery action selected after a Responses WebSocket closed before completion.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ResponsesWebsocketCloseRecovery {
+    ReconnectWebsocket,
+    RefreshRequestAuth,
+    RotateAccount,
+    FallbackToHttp,
+    NoReplayAfterOutput,
+    NoRetry,
+    RetryExhausted,
+}
+
+/// Bounded, secret-free failure record persisted only when a Responses WebSocket closes early.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+pub struct ResponsesWebsocketCloseDiagnostic {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub close_code: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub close_reason: Option<String>,
+    pub close_reason_redacted: bool,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub session_id: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub credential_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_state_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pool_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub selection_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub route_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub handshake_binding_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub request_binding_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub binding_matched: Option<bool>,
+    pub connection_reused: bool,
+    pub output_committed: bool,
+    pub attempt_number: u64,
+    pub max_retries: u64,
+    pub recovery_decision: ResponsesWebsocketCloseRecovery,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
@@ -3677,11 +3771,39 @@ pub struct StreamErrorEvent {
     pub message: String,
     #[serde(default)]
     pub codex_error_info: Option<CodexErrorInfo>,
-    /// Optional details about the underlying stream failure (often the same
-    /// human-readable message that is surfaced as the terminal error if retries
-    /// are exhausted).
+    /// Optional details about the underlying stream failure. This is usually the human-readable
+    /// terminal error, but failure-only diagnostics may store a typed JSON envelope here to avoid
+    /// increasing the size of this high-traffic event type.
     #[serde(default)]
     pub additional_details: Option<String>,
+}
+
+impl StreamErrorEvent {
+    const WEBSOCKET_CLOSE_DIAGNOSTIC_TYPE: &'static str = "responses_websocket_close_diagnostic";
+
+    /// Store a bounded close diagnostic in the existing details field.
+    pub fn with_websocket_close_diagnostic(
+        mut self,
+        diagnostic: ResponsesWebsocketCloseDiagnostic,
+    ) -> Self {
+        self.additional_details = Some(
+            serde_json::json!({
+                "type": Self::WEBSOCKET_CLOSE_DIAGNOSTIC_TYPE,
+                "payload": diagnostic,
+            })
+            .to_string(),
+        );
+        self
+    }
+
+    /// Parse a close diagnostic envelope, leaving ordinary detail strings untouched.
+    pub fn websocket_close_diagnostic(&self) -> Option<ResponsesWebsocketCloseDiagnostic> {
+        let value = serde_json::from_str::<Value>(self.additional_details.as_deref()?).ok()?;
+        if value.get("type")?.as_str()? != Self::WEBSOCKET_CLOSE_DIAGNOSTIC_TYPE {
+            return None;
+        }
+        serde_json::from_value(value.get("payload")?.clone()).ok()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

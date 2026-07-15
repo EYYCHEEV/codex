@@ -16,6 +16,45 @@ use tempfile::tempdir;
 
 const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
 
+fn managed_test_key(
+    account_id: Option<String>,
+    chatgpt_user_id: Option<String>,
+) -> ConnectorRuntimeContextKey {
+    managed_test_key_with_route(
+        account_id,
+        chatgpt_user_id,
+        false,
+        1,
+        1,
+        "https://chatgpt.com",
+    )
+}
+
+fn managed_test_key_with_route(
+    account_id: Option<String>,
+    chatgpt_user_id: Option<String>,
+    fedramp: bool,
+    route_generation: u64,
+    account_revision: u64,
+    base_url: &str,
+) -> ConnectorRuntimeContextKey {
+    let identity_key = chatgpt_user_id
+        .clone()
+        .or_else(|| account_id.clone())
+        .unwrap_or_else(|| "test-account".to_string());
+    ConnectorRuntimeContextKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key,
+            raw_account_id: account_id,
+            fedramp,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation,
+        },
+        account_revision,
+        base_url,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TestTool {
     server_name: String,
@@ -52,11 +91,10 @@ fn create_codex_apps_tools_cache_context(
 ) -> ConnectorRuntimeContext<TestTool> {
     ConnectorRuntimeManager::<TestTool>::default().context(
         codex_home,
-        ConnectorRuntimeContextKey {
-            account_id: account_id.map(ToOwned::to_owned),
-            chatgpt_user_id: chatgpt_user_id.map(ToOwned::to_owned),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            account_id.map(ToOwned::to_owned),
+            chatgpt_user_id.map(ToOwned::to_owned),
+        ),
     )
 }
 
@@ -346,24 +384,177 @@ fn codex_apps_tools_cache_context_does_not_reread_disk_after_creation() {
 }
 
 #[test]
+fn codex_apps_tools_cache_reuses_only_the_exact_full_binding() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = ConnectorRuntimeManager::<TestTool>::default();
+    let production_key = managed_test_key_with_route(
+        Some("workspace-one".to_string()),
+        Some("stable-user".to_string()),
+        false,
+        7,
+        11,
+        "https://chatgpt.com",
+    );
+    let production = cache.context(codex_home.path().to_path_buf(), production_key.clone());
+    production.store_current_tools_for_test(vec![create_test_tool(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "production",
+    )]);
+
+    let exact = cache.context(codex_home.path().to_path_buf(), production_key.clone());
+    assert_eq!(
+        exact.current_tools().expect("exact binding cache hit")[0].callable_name,
+        "production"
+    );
+
+    let variants = [
+        ConnectorRuntimeContextKey::from_transport_binding(
+            TransportAuthBinding {
+                fedramp: true,
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        ConnectorRuntimeContextKey::from_transport_binding(
+            TransportAuthBinding {
+                route_generation: production_key.transport.route_generation + 1,
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        ConnectorRuntimeContextKey::from_transport_binding(
+            TransportAuthBinding {
+                identity_key: "different-stable-user".to_string(),
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        ConnectorRuntimeContextKey::from_transport_binding(
+            TransportAuthBinding {
+                raw_account_id: Some("workspace-two".to_string()),
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        ConnectorRuntimeContextKey::from_transport_binding(
+            TransportAuthBinding {
+                auth_mode: AuthMode::ChatgptAuthTokens,
+                ..production_key.transport.clone()
+            },
+            production_key.credential_revision,
+            production_key.base_url.clone(),
+        ),
+        ConnectorRuntimeContextKey::from_transport_binding(
+            production_key.transport.clone(),
+            production_key.credential_revision + 1,
+            production_key.base_url.clone(),
+        ),
+        ConnectorRuntimeContextKey::from_transport_binding(
+            production_key.transport.clone(),
+            production_key.credential_revision,
+            "https://chatgpt.example.test",
+        ),
+    ];
+
+    for variant in variants {
+        let context = cache.context(codex_home.path().to_path_buf(), variant);
+        assert!(
+            context.current_tools().is_none(),
+            "route-sensitive binding change must miss the catalog cache"
+        );
+    }
+}
+
+#[test]
+fn managed_codex_apps_cache_separates_email_identities_with_shared_raw_ids() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache = ConnectorRuntimeManager::<TestTool>::default();
+    let shared_raw_account_id = Some("shared-workspace".to_string());
+    let first_key = managed_test_key(
+        shared_raw_account_id.clone(),
+        Some("first@example.com".to_string()),
+    );
+    let second_key = managed_test_key(
+        shared_raw_account_id,
+        Some("second@example.com".to_string()),
+    );
+
+    let first = cache.context(codex_home.path().to_path_buf(), first_key.clone());
+    first.store_current_tools_for_test(vec![create_test_tool(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "first-account-tool",
+    )]);
+
+    let same_snapshot = cache.context(codex_home.path().to_path_buf(), first_key);
+    assert_eq!(
+        same_snapshot
+            .current_tools()
+            .expect("same managed snapshot should hit")[0]
+            .callable_name,
+        "first-account-tool"
+    );
+
+    let distinct_identity = cache.context(codex_home.path().to_path_buf(), second_key);
+    assert!(distinct_identity.current_tools().is_none());
+    assert_ne!(
+        first.tools_cache_path(),
+        distinct_identity.tools_cache_path()
+    );
+}
+
+#[test]
+#[should_panic(expected = "managed Codex Apps keys require a credential revision")]
+fn managed_codex_apps_key_rejects_zero_revision() {
+    let _ = ConnectorRuntimeContextKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key: "stable-user".to_string(),
+            raw_account_id: Some("workspace".to_string()),
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 1,
+        },
+        0,
+        "https://chatgpt.com",
+    );
+}
+
+#[test]
+#[should_panic(expected = "managed Codex Apps keys require a base URL")]
+fn managed_codex_apps_key_rejects_empty_base_url() {
+    let _ = ConnectorRuntimeContextKey::from_transport_binding(
+        TransportAuthBinding {
+            identity_key: "stable-user".to_string(),
+            raw_account_id: Some("workspace".to_string()),
+            fedramp: false,
+            auth_mode: AuthMode::Chatgpt,
+            route_generation: 1,
+        },
+        1,
+        " / ",
+    );
+}
+
+#[test]
 fn codex_apps_tools_cache_publishes_newest_shared_snapshot() {
     let codex_home = tempdir().expect("tempdir");
     let cache = ConnectorRuntimeManager::<TestTool>::default();
     let cache_context_1 = cache.context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let cache_context_2 = cache.context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let older_ticket = cache_context_1.begin_fetch(ConnectorRuntimeFetchSource::Startup);
     let newer_ticket = cache_context_2.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh);
@@ -396,11 +587,10 @@ fn codex_apps_tools_cache_keeps_live_publish_when_disk_persistence_fails() {
     std::fs::write(&codex_home_file, b"occupied").expect("create codex home file");
     let cache_context = ConnectorRuntimeManager::<TestTool>::default().context(
         codex_home_file,
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "live")];
     let published_tools = cache_context.publish_if_newest_accepted(
@@ -426,11 +616,10 @@ fn connector_runtime_without_cache_ignores_disk_state() {
     write_cached_codex_apps_tools_for_test(&writer, &server_info, &tools);
     let context = ConnectorRuntimeManager::<TestTool>::new_without_cache().context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
 
     assert_eq!(context.current_tools(), None);
@@ -443,11 +632,10 @@ fn connector_runtime_without_cache_publishes_without_writing() {
     let codex_home = temp_dir.path().join("codex-home");
     let context = ConnectorRuntimeManager::<TestTool>::new_without_cache().context(
         codex_home.clone(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "live")];
     let published_tools = context.publish_if_newest_accepted(
@@ -470,19 +658,17 @@ fn codex_apps_tools_cache_scopes_non_utf8_home_disk_paths() {
     let cache = ConnectorRuntimeManager::<TestTool>::default();
     let user_one_context = cache.context(
         codex_home.clone(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-one".to_string()),
-            chatgpt_user_id: Some("user-one".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-one".to_string()),
+            Some("user-one".to_string()),
+        ),
     );
     let user_two_context = cache.context(
         codex_home,
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-two".to_string()),
-            chatgpt_user_id: Some("user-two".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-two".to_string()),
+            Some("user-two".to_string()),
+        ),
     );
     let cache_paths = [
         user_one_context.tools_cache_path(),
@@ -498,11 +684,10 @@ fn contexts_for_different_identities_keep_isolated_snapshots() {
     let manager = ConnectorRuntimeManager::<TestTool>::default();
     let context_a = manager.context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-a".to_string()),
-            chatgpt_user_id: Some("user-a".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-a".to_string()),
+            Some("user-a".to_string()),
+        ),
     );
     let tools_a = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "tool-a")];
     let snapshot_a = context_a.publish_runtime_if_newest_accepted(
@@ -513,19 +698,17 @@ fn contexts_for_different_identities_keep_isolated_snapshots() {
     let older_ticket_a = context_a.begin_fetch(ConnectorRuntimeFetchSource::Startup);
     let context_b = manager.context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-b".to_string()),
-            chatgpt_user_id: Some("user-b".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-b".to_string()),
+            Some("user-b".to_string()),
+        ),
     );
     let same_context_a = manager.context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account-a".to_string()),
-            chatgpt_user_id: Some("user-a".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(
+            Some("account-a".to_string()),
+            Some("user-a".to_string()),
+        ),
     );
 
     assert!(Arc::ptr_eq(
@@ -684,11 +867,7 @@ fn personal_and_workspace_contexts_are_distinct_even_with_matching_ids() {
     let manager = ConnectorRuntimeManager::<TestTool>::default();
     let personal_context = manager.context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account".to_string()),
-            chatgpt_user_id: Some("user".to_string()),
-            is_workspace_account: false,
-        },
+        ConnectorRuntimeContextKey::personal(Some("account".to_string()), Some("user".to_string())),
     );
     let personal_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "personal")];
     let _ = personal_context.publish_runtime_if_newest_accepted(
@@ -699,11 +878,10 @@ fn personal_and_workspace_contexts_are_distinct_even_with_matching_ids() {
 
     let workspace_context = manager.context(
         codex_home.path().to_path_buf(),
-        ConnectorRuntimeContextKey {
-            account_id: Some("account".to_string()),
-            chatgpt_user_id: Some("user".to_string()),
-            is_workspace_account: true,
-        },
+        ConnectorRuntimeContextKey::workspace(
+            Some("account".to_string()),
+            Some("user".to_string()),
+        ),
     );
 
     let workspace_tools = vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "workspace")];

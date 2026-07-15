@@ -190,6 +190,22 @@
   },
   "description": "Sparse rolling rate-limit update.\n\nClients should merge available values into the most recent `account/rateLimits/read` response or refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does not clear a previously observed value.",
   "properties": {
+    "accountRevision": {
+      "description": "Managed account row revision, or `null` for every non-pooled auth mode.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "managedAccountId": {
+      "description": "Stable managed OAuth identity, or `null` for every non-pooled auth mode.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "rateLimits": {
       "$ref": "#/definitions/RateLimitSnapshot"
     }

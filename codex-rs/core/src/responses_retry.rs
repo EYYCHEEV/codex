@@ -17,8 +17,13 @@ pub(crate) enum ResponsesStreamRequest {
     RemoteCompactionV2,
 }
 
-/// Handles a retryable stream error and returns `Ok(())` when the caller should
-/// retry the request loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponsesRetryDecision {
+    Retry,
+    FallbackToHttp,
+}
+
+/// Handles a retryable stream error and reports how the caller should retry the request loop.
 pub(crate) async fn handle_retryable_response_stream_error(
     retries: &mut u64,
     max_retries: u64,
@@ -27,8 +32,9 @@ pub(crate) async fn handle_retryable_response_stream_error(
     sess: &Session,
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
-) -> Result<(), CodexErr> {
-    if *retries >= max_retries
+) -> Result<ResponsesRetryDecision, CodexErr> {
+    if client_session.websocket_http_fallback_allowed()
+        && *retries >= max_retries
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             &turn_context.model_info,
@@ -42,7 +48,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
         )
         .await;
         *retries = 0;
-        return Ok(());
+        return Ok(ResponsesRetryDecision::FallbackToHttp);
     }
 
     if *retries < max_retries {
@@ -67,7 +73,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
             .await;
         }
         tokio::time::sleep(delay).await;
-        return Ok(());
+        return Ok(ResponsesRetryDecision::Retry);
     }
 
     Err(err)

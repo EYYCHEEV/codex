@@ -3,8 +3,8 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_core::StartThreadOptions;
 use codex_config::CONFIG_TOML_FILE;
+use codex_core::StartThreadOptions;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ThreadStoreConfig;

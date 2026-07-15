@@ -1938,6 +1938,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
         assert!(resumed.blocks_direct_input);
         app.replace_chat_widget_with_app_server_thread(
             &mut tui,
+            &mut app_server,
             resumed,
             crate::app::session_lifecycle::ThreadAttachPresentation::SessionLineage,
             /*initial_user_message*/ None,
@@ -4797,6 +4798,10 @@ async fn make_test_app() -> App {
         pending_app_server_requests: PendingAppServerRequests::default(),
         pending_startup_thread_start: false,
         rate_limit_hard_stop_generation: 0,
+        managed_account_request_scope: None,
+        managed_account_scope_generation: 0,
+        managed_account_request_sequence: 0,
+        pending_managed_account_logout_refresh: None,
         pending_plugin_enabled_writes: HashMap::new(),
         pending_hook_enabled_writes: HashMap::new(),
     }
@@ -4867,6 +4872,10 @@ async fn make_test_app_with_channels() -> (
             pending_app_server_requests: PendingAppServerRequests::default(),
             pending_startup_thread_start: false,
             rate_limit_hard_stop_generation: 0,
+            managed_account_request_scope: None,
+            managed_account_scope_generation: 0,
+            managed_account_request_sequence: 0,
+            pending_managed_account_logout_refresh: None,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
         },
@@ -7830,6 +7839,239 @@ async fn side_backtrack_rejection_reports_unavailable_message_snapshot() {
         rendered
     );
 }
+#[tokio::test]
+async fn managed_account_request_origins_reject_late_cross_scope_results() {
+    let mut app = make_test_app().await;
+    let thread_a = ThreadId::new();
+    let thread_b = ThreadId::new();
+    app.chat_widget.set_thread_id_for_test(thread_a);
+    app.chat_widget.set_model("model-a");
+
+    let origin_a = app.managed_account_request_origin();
+    assert!(app.is_current_managed_account_request(&origin_a));
+
+    app.chat_widget.set_thread_id_for_test(thread_b);
+    assert!(!app.is_current_managed_account_request(&origin_a));
+    let origin_b = app.managed_account_request_origin();
+    assert!(origin_b.scope_generation > origin_a.scope_generation);
+
+    app.chat_widget.set_thread_id_for_test(thread_a);
+    let resumed_a = app.managed_account_request_origin();
+    assert!(resumed_a.scope_generation > origin_b.scope_generation);
+    assert!(!app.is_current_managed_account_request(&origin_a));
+    assert!(app.is_current_managed_account_request(&resumed_a));
+
+    app.chat_widget.set_model("model-b");
+    assert!(!app.is_current_managed_account_request(&resumed_a));
+    let model_b = app.managed_account_request_origin();
+    assert!(model_b.scope_generation > resumed_a.scope_generation);
+    assert!(app.is_current_managed_account_request(&model_b));
+
+    app.invalidate_managed_account_requests();
+    assert!(!app.is_current_managed_account_request(&model_b));
+    let after_invalidation = app.managed_account_request_origin();
+    assert!(after_invalidation.scope_generation > model_b.scope_generation);
+    assert!(app.is_current_managed_account_request(&after_invalidation));
+}
+
+#[tokio::test]
+async fn managed_account_request_origins_reject_superseded_same_scope_results() {
+    let mut app = make_test_app().await;
+    app.chat_widget.set_thread_id_for_test(ThreadId::new());
+    app.chat_widget.set_model("model-a");
+
+    let superseded = app.managed_account_request_origin();
+    let current = app.managed_account_request_origin();
+
+    assert_eq!(current.scope_generation, superseded.scope_generation);
+    assert!(current.request_id > superseded.request_id);
+    assert!(!app.is_current_managed_account_request(&superseded));
+    assert!(app.is_current_managed_account_request(&current));
+}
+
+fn managed_account_for_logout_refresh_test(
+    id: &str,
+    account_revision: u64,
+) -> codex_app_server_protocol::ManagedChatgptAccountView {
+    codex_app_server_protocol::ManagedChatgptAccountView {
+        managed_account_id: id.to_string(),
+        chatgpt_account_id: None,
+        email: Some(format!("{id}@example.com")),
+        plan_type: codex_protocol::account::PlanType::Plus,
+        eligible: true,
+        eligibility_reason: None,
+        account_revision,
+        credential_revision: 1,
+        refresh_status: codex_app_server_protocol::ManagedChatgptAccountRefreshStatus::Healthy,
+        block: None,
+        usage: codex_app_server_protocol::ManagedChatgptAccountUsage {
+            state: codex_app_server_protocol::ManagedChatgptAccountUsageState::Unknown,
+            rate_limits: Vec::new(),
+            token_usage: None,
+            observed_at: None,
+            unavailable_reason: None,
+            unavailable_observed_at: None,
+        },
+    }
+}
+
+fn install_logout_refresh_test_accounts(app: &mut App) {
+    app.chat_widget
+        .replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+            accounts: vec![
+                managed_account_for_logout_refresh_test("logged-out", 10),
+                managed_account_for_logout_refresh_test("kept", 10),
+            ],
+            selected_account_id: Some("logged-out".to_string()),
+            pool_revision: 10,
+            selection_revision: Some(10),
+        });
+}
+
+#[tokio::test]
+async fn superseded_same_scope_managed_response_cannot_replace_current_thread_selection() {
+    let mut app = make_test_app().await;
+    app.chat_widget.set_thread_id_for_test(ThreadId::new());
+    app.chat_widget.set_model("model-a");
+    app.chat_widget
+        .replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+            accounts: vec![
+                managed_account_for_logout_refresh_test("a", 1),
+                managed_account_for_logout_refresh_test("b", 1),
+            ],
+            selected_account_id: Some("b".to_string()),
+            pool_revision: 1,
+            selection_revision: Some(1),
+        });
+
+    let superseded = app.managed_account_request_origin();
+    let current = app.managed_account_request_origin();
+    assert!(app.is_current_managed_account_request(&current));
+    app.handle_managed_accounts_loaded_for_cache(
+        superseded,
+        Ok(codex_app_server_protocol::ListAccountsResponse {
+            accounts: vec![
+                managed_account_for_logout_refresh_test("a", 99),
+                managed_account_for_logout_refresh_test("b", 99),
+            ],
+            selected_account_id: Some("a".to_string()),
+            pool_revision: 99,
+            selection_revision: Some(99),
+        }),
+    );
+
+    assert_eq!(
+        app.chat_widget
+            .managed_accounts()
+            .and_then(|accounts| accounts.selected_account_id()),
+        Some("b")
+    );
+}
+
+fn assert_global_managed_updates_resume(app: &mut App) {
+    let mut kept = managed_account_for_logout_refresh_test("kept", 11);
+    kept.usage.state = codex_app_server_protocol::ManagedChatgptAccountUsageState::Fresh;
+    assert!(app.chat_widget.apply_account_pool_update(vec![kept], 11));
+
+    assert!(app.chat_widget.apply_managed_rate_limits_update(
+        &codex_app_server_protocol::AccountRateLimitsUpdatedNotification {
+            managed_account_id: Some("kept".to_string()),
+            account_revision: Some(12),
+            rate_limits: codex_app_server_protocol::RateLimitSnapshot {
+                limit_id: Some("codex".to_string()),
+                limit_name: None,
+                primary: Some(codex_app_server_protocol::RateLimitWindow {
+                    used_percent: 77,
+                    window_duration_mins: Some(60),
+                    resets_at: None,
+                }),
+                secondary: None,
+                credits: None,
+                individual_limit: None,
+                plan_type: None,
+                rate_limit_reached_type: None,
+            },
+        }
+    ));
+    let kept = app
+        .chat_widget
+        .managed_accounts()
+        .and_then(|accounts| {
+            accounts
+                .accounts()
+                .find(|account| account.managed_account_id == "kept")
+        })
+        .expect("kept account");
+    assert_eq!(kept.account_revision, 12);
+    assert_eq!(
+        kept.usage
+            .rate_limits
+            .first()
+            .and_then(|snapshot| snapshot.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(77)
+    );
+}
+
+#[tokio::test]
+async fn logout_refresh_stale_cache_response_reopens_managed_notification_gate() {
+    let mut app = make_test_app().await;
+    install_logout_refresh_test_accounts(&mut app);
+    let origin = app.managed_account_request_origin();
+    app.begin_managed_account_logout_refresh(origin.clone());
+    app.chat_widget.replace_managed_accounts_after_logout(
+        vec![managed_account_for_logout_refresh_test("kept", 10)],
+        Some("kept".to_string()),
+    );
+
+    let unrelated_origin = app.managed_account_request_origin();
+    app.handle_managed_accounts_loaded_for_cache(
+        unrelated_origin,
+        Err("unrelated refresh failed".to_string()),
+    );
+    assert!(!app.chat_widget.apply_account_pool_update(
+        vec![managed_account_for_logout_refresh_test("kept", 11)],
+        11,
+    ));
+
+    app.chat_widget.set_model("different-scope");
+    app.handle_managed_accounts_loaded_for_cache(
+        origin,
+        Ok(codex_app_server_protocol::ListAccountsResponse {
+            accounts: vec![managed_account_for_logout_refresh_test("logged-out", 1)],
+            selected_account_id: Some("logged-out".to_string()),
+            pool_revision: 99,
+            selection_revision: Some(99),
+        }),
+    );
+
+    assert!(app.chat_widget.managed_accounts().is_some_and(|accounts| {
+        accounts
+            .accounts()
+            .all(|account| account.managed_account_id != "logged-out")
+    }));
+    assert_global_managed_updates_resume(&mut app);
+}
+
+#[tokio::test]
+async fn logout_refresh_error_reopens_managed_notification_gate() {
+    let mut app = make_test_app().await;
+    install_logout_refresh_test_accounts(&mut app);
+    let origin = app.managed_account_request_origin();
+    app.begin_managed_account_logout_refresh(origin.clone());
+    app.chat_widget.replace_managed_accounts_after_logout(
+        vec![managed_account_for_logout_refresh_test("kept", 10)],
+        Some("kept".to_string()),
+    );
+
+    app.handle_managed_accounts_loaded_for_cache(
+        origin,
+        Err("account/list refresh failed".to_string()),
+    );
+
+    assert_global_managed_updates_resume(&mut app);
+}
+
 async fn start_config_write_test_app_server(app: &App) -> Result<AppServerSession> {
     Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await
 }

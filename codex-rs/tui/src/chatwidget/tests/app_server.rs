@@ -1521,3 +1521,650 @@ async fn live_app_server_thread_closed_requests_immediate_exit() {
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::Immediate)));
 }
+
+fn managed_account_for_notification_test(
+    id: &str,
+) -> codex_app_server_protocol::ManagedChatgptAccountView {
+    codex_app_server_protocol::ManagedChatgptAccountView {
+        managed_account_id: id.to_string(),
+        chatgpt_account_id: None,
+        email: Some(format!("{id}@example.com")),
+        plan_type: codex_protocol::account::PlanType::Plus,
+        eligible: true,
+        eligibility_reason: None,
+        account_revision: 1,
+        credential_revision: 1,
+        refresh_status: codex_app_server_protocol::ManagedChatgptAccountRefreshStatus::Healthy,
+        block: None,
+        usage: codex_app_server_protocol::ManagedChatgptAccountUsage {
+            state: codex_app_server_protocol::ManagedChatgptAccountUsageState::Unknown,
+            rate_limits: Vec::new(),
+            token_usage: None,
+            observed_at: None,
+            unavailable_reason: None,
+            unavailable_observed_at: None,
+        },
+    }
+}
+
+fn managed_account_with_binding_and_usage(
+    id: &str,
+    chatgpt_account_id: &str,
+    credential_revision: u64,
+    account_revision: u64,
+    plan_type: codex_protocol::account::PlanType,
+    used_percent: f64,
+) -> codex_app_server_protocol::ManagedChatgptAccountView {
+    let mut account = managed_account_for_notification_test(id);
+    account.chatgpt_account_id = Some(chatgpt_account_id.to_string());
+    account.credential_revision = credential_revision;
+    account.account_revision = account_revision;
+    account.plan_type = plan_type;
+    account.usage.rate_limits = vec![snapshot(used_percent)];
+    account
+}
+
+#[tokio::test]
+async fn managed_selection_updates_only_apply_to_the_visible_thread() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let visible_thread_id = ThreadId::new();
+    chat.thread_id = Some(visible_thread_id);
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![
+            managed_account_for_notification_test("a"),
+            managed_account_for_notification_test("b"),
+        ],
+        selected_account_id: Some("a".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(1),
+    });
+
+    assert!(!chat.apply_account_selection_update(
+        ThreadId::new().to_string().as_str(),
+        Some("b".to_string()),
+        4,
+    ));
+    assert_eq!(
+        chat.managed_accounts()
+            .and_then(|accounts| accounts.selected_account_id()),
+        Some("a")
+    );
+
+    assert!(chat.apply_account_selection_update(
+        visible_thread_id.to_string().as_str(),
+        Some("b".to_string()),
+        4,
+    ));
+    assert_eq!(
+        chat.managed_accounts()
+            .and_then(|accounts| accounts.selected_account_id()),
+        Some("b")
+    );
+}
+
+#[tokio::test]
+async fn managed_selection_change_replaces_singular_rate_state_with_selected_cache() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    let mut selected_account = managed_account_for_notification_test("b");
+    selected_account.usage.rate_limits = vec![snapshot(/*percent*/ 42.0)];
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_account_for_notification_test("a"), selected_account],
+        selected_account_id: Some("a".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(1),
+    });
+    chat.rate_limit_snapshots_by_limit_id.insert(
+        "codex".to_string(),
+        crate::status::RateLimitSnapshotDisplay {
+            limit_name: "codex".to_string(),
+            captured_at: chrono::Local::now(),
+            primary: None,
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+        },
+    );
+    chat.pending_rate_limit_reset_request_id = Some(7);
+    chat.pending_rate_limit_reset_hint_request_id = Some(8);
+    chat.pending_usage_menu_rate_limit_request_id = Some(9);
+    chat.available_rate_limit_reset_credits = Some(2);
+
+    assert!(chat.apply_account_selection_update(
+        thread_id.to_string().as_str(),
+        Some("b".to_string()),
+        2,
+    ));
+
+    assert_eq!(
+        chat.rate_limit_snapshots_by_limit_id
+            .get("codex")
+            .and_then(|display| display.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(42.0)
+    );
+    assert_eq!(chat.pending_rate_limit_reset_request_id, None);
+    assert_eq!(chat.pending_rate_limit_reset_hint_request_id, None);
+    assert_eq!(chat.pending_usage_menu_rate_limit_request_id, None);
+    assert_eq!(chat.available_rate_limit_reset_credits, None);
+
+    chat.rate_limit_snapshots_by_limit_id.insert(
+        "codex".to_string(),
+        crate::status::RateLimitSnapshotDisplay {
+            limit_name: "codex".to_string(),
+            captured_at: chrono::Local::now(),
+            primary: None,
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+        },
+    );
+    chat.available_rate_limit_reset_credits = Some(1);
+    chat.clear_managed_account_selection_scope();
+    assert!(chat.rate_limit_snapshots_by_limit_id.is_empty());
+    assert_eq!(chat.available_rate_limit_reset_credits, None);
+    assert_eq!(
+        chat.managed_accounts()
+            .and_then(|state| state.selected_account_id()),
+        None
+    );
+}
+
+#[tokio::test]
+async fn managed_selected_row_replaces_default_account_limits_plan_and_reset_results() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let mut default_a = snapshot(/*percent*/ 91.0);
+    default_a.plan_type = Some(codex_protocol::account::PlanType::Pro);
+    chat.on_rate_limit_snapshot(Some(default_a.clone()));
+    chat.pending_rate_limit_reset_request_id = Some(70);
+    chat.pending_usage_menu_rate_limit_request_id = Some(71);
+    chat.available_rate_limit_reset_credits = Some(3);
+
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![
+            managed_account_with_binding_and_usage(
+                "a",
+                "workspace-a",
+                1,
+                1,
+                codex_protocol::account::PlanType::Pro,
+                91.0,
+            ),
+            managed_account_with_binding_and_usage(
+                "b",
+                "workspace-b",
+                1,
+                1,
+                codex_protocol::account::PlanType::Free,
+                42.0,
+            ),
+        ],
+        selected_account_id: Some("b".to_string()),
+        pool_revision: 1,
+        selection_revision: Some(1),
+    });
+
+    assert_eq!(
+        chat.rate_limit_snapshots_by_limit_id
+            .get("codex")
+            .and_then(|display| display.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(42.0)
+    );
+    assert_eq!(
+        chat.current_plan_type(),
+        Some(codex_protocol::account::PlanType::Free)
+    );
+    assert_eq!(chat.pending_rate_limit_reset_request_id, None);
+    assert_eq!(chat.pending_usage_menu_rate_limit_request_id, None);
+    assert_eq!(chat.available_rate_limit_reset_credits, None);
+
+    chat.update_account_state(
+        Some(crate::status::StatusAccountDisplay::ChatGpt {
+            email: Some("a@example.com".to_string()),
+            plan: Some("Pro".to_string()),
+        }),
+        Some(codex_protocol::account::PlanType::Pro),
+        /*has_chatgpt_account*/ true,
+        /*has_codex_backend_auth*/ true,
+    );
+    assert_eq!(
+        chat.rate_limit_snapshots_by_limit_id
+            .get("codex")
+            .and_then(|display| display.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(42.0)
+    );
+    assert_eq!(
+        chat.current_plan_type(),
+        Some(codex_protocol::account::PlanType::Free)
+    );
+
+    chat.pending_rate_limit_reset_request_id = Some(70);
+    assert!(!chat.finish_rate_limit_reset_credits_refresh(
+        70,
+        vec![default_a],
+        Ok(codex_app_server_protocol::RateLimitResetCreditsSummary {
+            available_count: 9,
+            credits: None,
+        }),
+    ));
+    assert!(!chat.finish_rate_limit_reset_consume(
+        70,
+        "default-a-reset".to_string(),
+        /*credit_id*/ None,
+        Ok(
+            codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse {
+                outcome:
+                    codex_app_server_protocol::ConsumeAccountRateLimitResetCreditOutcome::Reset,
+            },
+        ),
+    ));
+    assert_eq!(
+        chat.rate_limit_snapshots_by_limit_id
+            .get("codex")
+            .and_then(|display| display.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(42.0)
+    );
+    assert_eq!(
+        chat.current_plan_type(),
+        Some(codex_protocol::account::PlanType::Free)
+    );
+    assert_eq!(chat.available_rate_limit_reset_credits, None);
+}
+
+#[tokio::test]
+async fn managed_same_id_credential_and_workspace_rebind_clears_all_account_bound_state() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_account_with_binding_and_usage(
+            "b",
+            "workspace-old",
+            1,
+            1,
+            codex_protocol::account::PlanType::Pro,
+            95.0,
+        )],
+        selected_account_id: Some("b".to_string()),
+        pool_revision: 1,
+        selection_revision: Some(1),
+    });
+    chat.pending_rate_limit_reset_request_id = Some(11);
+    chat.pending_rate_limit_reset_hint_request_id = Some(12);
+    chat.pending_usage_menu_rate_limit_request_id = Some(13);
+    chat.available_rate_limit_reset_credits = Some(4);
+    chat.pending_rate_limit_reset_hint = Some(history_cell::new_info_event(
+        "old account reset".to_string(),
+        /*hint*/ None,
+    ));
+    chat.codex_rate_limit_reached_type =
+        Some(codex_app_server_protocol::RateLimitReachedType::RateLimitReached);
+    chat.rate_limit_warnings.primary_index = 2;
+    chat.rate_limit_warnings.secondary_index = 1;
+    chat.rate_limit_switch_prompt = RateLimitSwitchPromptState::Pending;
+    chat.add_credits_nudge_email_in_flight =
+        Some(codex_app_server_protocol::AddCreditsNudgeCreditType::UsageLimit);
+    chat.status_line_workspace_headline = Some("old workspace headline".to_string());
+    chat.status_line_workspace_headline_pending_request_id = Some(14);
+    chat.status_line_workspace_headline_last_requested_at = Some(Instant::now());
+    chat.status_line_workspace_messages_disabled = true;
+    chat.add_token_activity_output(TokenActivityView::Daily);
+    chat.add_status_output(/*refreshing_rate_limits*/ true, Some(99));
+    while rx.try_recv().is_ok() {}
+
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_account_with_binding_and_usage(
+            "b",
+            "workspace-new",
+            2,
+            2,
+            codex_protocol::account::PlanType::Free,
+            42.0,
+        )],
+        selected_account_id: Some("b".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(1),
+    });
+
+    assert_eq!(chat.pending_rate_limit_reset_request_id, None);
+    assert_eq!(chat.pending_rate_limit_reset_hint_request_id, None);
+    assert_eq!(chat.pending_usage_menu_rate_limit_request_id, None);
+    assert_eq!(chat.available_rate_limit_reset_credits, None);
+    assert!(chat.pending_rate_limit_reset_hint.is_none());
+    assert_eq!(chat.codex_rate_limit_reached_type, None);
+    assert_eq!(chat.rate_limit_warnings.primary_index, 0);
+    assert_eq!(chat.rate_limit_warnings.secondary_index, 0);
+    assert!(matches!(
+        chat.rate_limit_switch_prompt,
+        RateLimitSwitchPromptState::Idle
+    ));
+    assert!(chat.refreshing_token_activity_output.is_none());
+    assert!(chat.completed_token_activity_output.is_none());
+    assert!(chat.refreshing_status_outputs.is_empty());
+    assert_eq!(chat.add_credits_nudge_email_in_flight, None);
+    assert_eq!(chat.status_line_workspace_headline, None);
+    assert_eq!(chat.status_line_workspace_headline_pending_request_id, None);
+    assert_eq!(chat.status_line_workspace_headline_last_requested_at, None);
+    assert!(!chat.status_line_workspace_messages_disabled);
+    assert_eq!(
+        chat.rate_limit_snapshots_by_limit_id
+            .get("codex")
+            .and_then(|display| display.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(42.0)
+    );
+    assert_eq!(
+        chat.current_plan_type(),
+        Some(codex_protocol::account::PlanType::Free)
+    );
+}
+
+#[tokio::test]
+async fn managed_list_same_selection_projects_newer_full_row_into_singular_rate_cache() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let mut initial = managed_account_for_notification_test("a");
+    initial.usage.rate_limits = vec![snapshot(/*percent*/ 10.0)];
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![initial],
+        selected_account_id: Some("a".to_string()),
+        pool_revision: 1,
+        selection_revision: Some(1),
+    });
+
+    let mut refreshed = managed_account_for_notification_test("a");
+    refreshed.account_revision = 2;
+    refreshed.usage.rate_limits = vec![snapshot(/*percent*/ 42.0)];
+    refreshed.usage.state = codex_app_server_protocol::ManagedChatgptAccountUsageState::Unavailable;
+    refreshed.usage.unavailable_reason = Some("refresh failed".to_string());
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![refreshed],
+        selected_account_id: Some("a".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(1),
+    });
+
+    assert_eq!(
+        chat.rate_limit_snapshots_by_limit_id
+            .get("codex")
+            .and_then(|display| display.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(42.0)
+    );
+    let selected = chat
+        .managed_accounts()
+        .and_then(|accounts| accounts.selected_account())
+        .expect("selected managed account");
+    assert_eq!(
+        selected.usage.state,
+        codex_app_server_protocol::ManagedChatgptAccountUsageState::Unavailable
+    );
+    assert_eq!(
+        selected.usage.unavailable_reason.as_deref(),
+        Some("refresh failed")
+    );
+}
+
+#[tokio::test]
+async fn managed_pool_full_row_converges_after_equal_revision_sparse_rate_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_account_for_notification_test("a")],
+        selected_account_id: Some("a".to_string()),
+        pool_revision: 1,
+        selection_revision: Some(1),
+    });
+    assert!(chat.apply_managed_rate_limits_update(
+        &codex_app_server_protocol::AccountRateLimitsUpdatedNotification {
+            managed_account_id: Some("a".to_string()),
+            account_revision: Some(2),
+            rate_limits: snapshot(/*percent*/ 21.0),
+        }
+    ));
+
+    let mut full = managed_account_for_notification_test("a");
+    full.account_revision = 2;
+    full.usage.rate_limits = vec![snapshot(/*percent*/ 73.0)];
+    full.usage.state = codex_app_server_protocol::ManagedChatgptAccountUsageState::Unavailable;
+    full.usage.unavailable_reason = Some("usage unavailable".to_string());
+    assert!(chat.apply_account_pool_update(vec![full], 2));
+
+    assert_eq!(
+        chat.rate_limit_snapshots_by_limit_id
+            .get("codex")
+            .and_then(|display| display.primary.as_ref())
+            .map(|window| window.used_percent),
+        Some(73.0)
+    );
+    let selected = chat
+        .managed_accounts()
+        .and_then(|accounts| accounts.selected_account())
+        .expect("selected managed account");
+    assert_eq!(
+        selected.usage.state,
+        codex_app_server_protocol::ManagedChatgptAccountUsageState::Unavailable
+    );
+    assert_eq!(
+        selected.usage.unavailable_reason.as_deref(),
+        Some("usage unavailable")
+    );
+}
+
+#[tokio::test]
+async fn selection_before_thread_and_pool_is_applied_at_its_exact_newest_revision() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+
+    assert!(!chat.apply_account_selection_update(
+        thread_id.to_string().as_str(),
+        Some("b".to_string()),
+        4,
+    ));
+    assert!(!chat.apply_account_selection_update(
+        thread_id.to_string().as_str(),
+        Some("a".to_string()),
+        3,
+    ));
+
+    chat.thread_id = Some(thread_id);
+    assert!(chat.apply_account_pool_update(
+        vec![
+            managed_account_for_notification_test("a"),
+            managed_account_for_notification_test("b"),
+        ],
+        2,
+    ));
+    let accounts = chat.managed_accounts().expect("managed pool established");
+    assert_eq!(accounts.selected_account_id(), Some("b"));
+    assert!(!chat.apply_account_selection_update(
+        thread_id.to_string().as_str(),
+        Some("a".to_string()),
+        4,
+    ));
+    assert_eq!(
+        chat.managed_accounts()
+            .and_then(|state| state.selected_account_id()),
+        Some("b")
+    );
+}
+
+#[tokio::test]
+async fn managed_pool_notification_can_clear_the_established_pool() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_account_for_notification_test("a")],
+        selected_account_id: Some("a".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(3),
+    });
+
+    assert!(chat.apply_account_pool_update(Vec::new(), 4));
+    let accounts = chat.managed_accounts().expect("established managed pool");
+    assert!(accounts.is_empty());
+    assert_eq!(accounts.selected_account_id(), None);
+}
+
+#[tokio::test]
+async fn nonempty_pool_notification_recovers_missing_bootstrap_managed_state() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    assert!(chat.status_account_display().is_none());
+
+    assert!(
+        chat.apply_account_pool_update(vec![managed_account_for_notification_test("blocked")], 4,)
+    );
+
+    let accounts = chat
+        .managed_accounts()
+        .expect("nonempty pool update should establish managed state");
+    assert_eq!(accounts.len(), 1);
+    assert!(chat.has_chatgpt_account());
+}
+
+#[tokio::test]
+async fn nonempty_pool_and_singular_chatgpt_updates_converge_in_either_order() {
+    let singular = || {
+        Some(crate::status::StatusAccountDisplay::ChatGpt {
+            email: Some("fallback@example.com".to_string()),
+            plan: Some("Plus".to_string()),
+        })
+    };
+
+    let (mut singular_first, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    singular_first.update_account_state(
+        singular(),
+        Some(codex_protocol::account::PlanType::Plus),
+        /*has_chatgpt_account*/ true,
+        /*has_codex_backend_auth*/ true,
+    );
+    assert!(
+        singular_first
+            .apply_account_pool_update(vec![managed_account_for_notification_test("managed")], 4,)
+    );
+    assert_eq!(
+        singular_first
+            .managed_accounts()
+            .expect("pool update after singular fallback should establish managed state")
+            .len(),
+        1
+    );
+
+    let (mut pool_first, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    assert!(
+        pool_first
+            .apply_account_pool_update(vec![managed_account_for_notification_test("managed")], 4,)
+    );
+    pool_first.update_account_state(
+        singular(),
+        Some(codex_protocol::account::PlanType::Plus),
+        /*has_chatgpt_account*/ true,
+        /*has_codex_backend_auth*/ true,
+    );
+    assert_eq!(
+        pool_first
+            .managed_accounts()
+            .expect("singular update after pool should preserve managed state")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn empty_pool_notification_preserves_singular_effective_chatgpt_bootstrap() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.update_account_state(
+        Some(crate::status::StatusAccountDisplay::ChatGpt {
+            email: Some("external@example.com".to_string()),
+            plan: Some("Plus".to_string()),
+        }),
+        Some(codex_protocol::account::PlanType::Plus),
+        /*has_chatgpt_account*/ true,
+        /*has_codex_backend_auth*/ true,
+    );
+
+    assert!(!chat.apply_account_pool_update(Vec::new(), 1));
+    assert!(matches!(
+        chat.status_account_display(),
+        Some(crate::status::StatusAccountDisplay::ChatGpt {
+            email: Some(email),
+            ..
+        }) if email == "external@example.com"
+    ));
+}
+
+#[tokio::test]
+async fn external_account_boundary_rejects_already_queued_managed_pool_update() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_account_for_notification_test("managed")],
+        selected_account_id: Some("managed".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(1),
+    });
+
+    chat.clear_managed_accounts_cache();
+    chat.update_account_state(
+        Some(crate::status::StatusAccountDisplay::ChatGpt {
+            email: Some("external@example.com".to_string()),
+            plan: Some("Plus".to_string()),
+        }),
+        Some(codex_protocol::account::PlanType::Plus),
+        /*has_chatgpt_account*/ true,
+        /*has_codex_backend_auth*/ true,
+    );
+
+    assert!(
+        !chat.apply_account_pool_update(vec![managed_account_for_notification_test("managed")], 3,)
+    );
+    assert!(matches!(
+        chat.status_account_display(),
+        Some(crate::status::StatusAccountDisplay::ChatGpt {
+            email: Some(email),
+            ..
+        }) if email == "external@example.com"
+    ));
+}
+
+#[tokio::test]
+async fn targeted_logout_suppresses_pre_logout_pool_notification_until_gate_reopens() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![
+            managed_account_for_notification_test("a"),
+            managed_account_for_notification_test("b"),
+        ],
+        selected_account_id: Some("a".to_string()),
+        pool_revision: 2,
+        selection_revision: Some(1),
+    });
+
+    chat.suspend_managed_account_updates();
+    chat.replace_managed_accounts_after_logout(
+        vec![managed_account_for_notification_test("b")],
+        Some("b".to_string()),
+    );
+    assert!(!chat.apply_account_pool_update(
+        vec![
+            managed_account_for_notification_test("a"),
+            managed_account_for_notification_test("b"),
+        ],
+        3,
+    ));
+    assert_eq!(
+        chat.managed_accounts()
+            .expect("managed state remains")
+            .accounts()
+            .map(|account| account.managed_account_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+
+    chat.replace_managed_accounts(codex_app_server_protocol::ListAccountsResponse {
+        accounts: vec![managed_account_for_notification_test("b")],
+        selected_account_id: Some("b".to_string()),
+        pool_revision: 4,
+        selection_revision: Some(2),
+    });
+    chat.enable_managed_account_updates();
+    assert!(chat.apply_account_pool_update(vec![managed_account_for_notification_test("b")], 5,));
+}
