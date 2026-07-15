@@ -22,6 +22,7 @@ use std::collections::HashSet;
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
     pub(super) auth: Option<CodexAuth>,
+    pub(super) codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
     pub(super) submit_id: String,
     pub(super) originator: String,
     pub(super) session_source: SessionSource,
@@ -29,7 +30,6 @@ pub(super) struct McpDesiredState {
     pub(super) local_process_cwd: PathBuf,
     pub(super) disabled_plugin_ids: Vec<String>,
 }
-
 impl Session {
     pub(super) fn mcp_inputs_differ(
         &self,
@@ -77,6 +77,29 @@ impl Session {
                 state.active_disabled_plugin_ids.clone(),
             )
         };
+        let cache_key = codex_mcp::CodexAppsToolsCacheKey::from_runtime_binding(
+            codex_login::TransportAuthBinding::for_nonmanaged_auth(auth.as_ref()),
+            /*credential_revision*/ None,
+            session_configuration
+                .original_config_do_not_use
+                .chatgpt_base_url
+                .clone(),
+            auth.as_ref().is_some_and(CodexAuth::is_workspace_account),
+        );
+        self.latest_mcp_desired_state_with_cache_key(auth, cache_key)
+            .await
+    }
+
+    pub(super) async fn latest_mcp_desired_state_with_cache_key(
+        &self,
+        auth: Option<CodexAuth>,
+        codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
+    ) -> McpDesiredState {
+        let session_configuration = {
+            let state = self.state.lock().await;
+            state.session_configuration.clone()
+        };
+        let environments = self.services.turn_environments.snapshot().await;
         let cwd = environments
             .primary()
             .and_then(|environment| environment.cwd().to_abs_path().ok())
@@ -94,6 +117,7 @@ impl Session {
         McpDesiredState {
             config: Arc::new(config),
             auth,
+            codex_apps_tools_cache_key,
             submit_id: self.next_internal_sub_id(),
             originator: session_configuration.originator,
             session_source: session_configuration.session_source,
@@ -122,9 +146,19 @@ impl Session {
             .local_environment_cwd()
             .unwrap_or_else(|| session_configuration.cwd().clone())
             .to_path_buf();
+        let codex_apps_tools_cache_key = codex_mcp::CodexAppsToolsCacheKey::from_runtime_binding(
+            codex_login::TransportAuthBinding::for_nonmanaged_auth(auth.as_ref()),
+            /*credential_revision*/ None,
+            session_configuration
+                .original_config_do_not_use
+                .chatgpt_base_url
+                .clone(),
+            auth.as_ref().is_some_and(CodexAuth::is_workspace_account),
+        );
         let desired = McpDesiredState {
             config: Arc::new(config),
             auth,
+            codex_apps_tools_cache_key,
             submit_id: INITIAL_SUBMIT_ID.to_owned(),
             originator: session_configuration.originator.clone(),
             session_source: session_configuration.session_source.clone(),
@@ -294,13 +328,14 @@ impl Session {
             )
             .await;
         let selected_plugins = mcp_projection.selected_plugins.clone();
-        let input = self.build_mcp_runtime_input(
-            desired,
-            mcp_projection,
-            ready_selected_capability_roots,
-            elicitation_reviewer,
-        )
-        .await;
+        let input = self
+            .build_mcp_runtime_input(
+                desired,
+                mcp_projection,
+                ready_selected_capability_roots,
+                elicitation_reviewer,
+            )
+            .await;
         self.services.mcp_runtime.replace(input).await;
         self.services.thread_extension_data.insert(selected_plugins);
     }
@@ -373,7 +408,7 @@ impl Session {
             runtime_context,
             codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
             tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
-            codex_apps_tools_cache_key: connector_runtime_context_key(auth.as_ref()),
+            codex_apps_tools_cache_key: desired.codex_apps_tools_cache_key.clone(),
             client_mcp_extensions: self.services.client_mcp_extensions.for_mcp_servers(),
             auth,
             auth_manager: Some(Arc::clone(&self.services.auth_manager)),

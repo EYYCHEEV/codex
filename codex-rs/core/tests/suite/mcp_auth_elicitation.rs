@@ -47,6 +47,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use test_case::test_case;
 use wiremock::Mock;
+use wiremock::MockServer;
 use wiremock::Request;
 use wiremock::Respond;
 use wiremock::ResponseTemplate;
@@ -143,6 +144,23 @@ impl ToolLifecycleContributor for RemoveAuthMetadata {
 #[test_case(Scenario::LegacySuccess; "legacy accepted ordinary")]
 #[test_case(Scenario::LegacyCancelled; "legacy cancelled")]
 #[test_case(Scenario::ModernDeclined; "modern declined")]
+async fn tools_list_request_count(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .expect("mock server should capture requests")
+        .iter()
+        .filter(|request| {
+            serde_json::from_slice::<Value>(&request.body)
+                .ok()
+                .and_then(|body| body.get("method").cloned())
+                .as_ref()
+                .and_then(Value::as_str)
+                == Some("tools/list")
+        })
+        .count()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_turn_elicitation_analytics(scenario: Scenario) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -743,5 +761,161 @@ approvals_reviewer = "user"
     }
     child.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_apps_auth_failure_requests_elicitation_by_default() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let apps_server = AppsTestServer::mount_searchable(&server).await?;
+    Mock::given(method("POST"))
+        .and(path_regex("^/api/codex/ps/mcp/?$"))
+        .and(body_partial_json(json!({
+            "method": "tools/call",
+            "params": {
+                "name": "calendar_create_event",
+            },
+        })))
+        .respond_with(AuthFailureResponder { scenario: Scenario::DefaultAuth, format: AuthFailureFormat::Text })
+        .with_priority(/*p*/ 1)
+        .mount(&server)
+        .await;
+
+    let call_id = "calendar-auth-call";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call_with_namespace(
+                    call_id,
+                    SEARCH_CALENDAR_NAMESPACE,
+                    SEARCH_CALENDAR_CREATE_TOOL,
+                    &json!({
+                        "title": "Lunch",
+                        "starts_at": "2026-06-18T12:00:00Z",
+                    })
+                    .to_string(),
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder =
+        search_capable_apps_builder(apps_server.chatgpt_base_url).with_config(|config| {
+            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+            let user_config_path = config.codex_home.join("config.toml").abs();
+            let user_config = toml::from_str(
+                r#"
+[apps.calendar]
+default_tools_approval_mode = "auto"
+"#,
+            )
+            .expect("apps config should parse");
+            config.config_layer_stack = config
+                .config_layer_stack
+                .with_user_config(&user_config_path, user_config)
+                .expect("apps user config should be valid");
+        });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Use [$calendar](app://calendar) to create a calendar event.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    let EventMsg::ElicitationRequest(request) = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ElicitationRequest(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await
+    else {
+        let follow_up_output = responses
+            .requests()
+            .get(1)
+            .and_then(|request| request.function_call_output_text(call_id));
+        panic!(
+            "default auth elicitation should prompt before completing the turn; follow-up output: {follow_up_output:?}"
+        );
+    };
+
+    assert_eq!(request.server_name, CODEX_APPS_MCP_SERVER_NAME);
+    assert_eq!(
+        request.id,
+        codex_protocol::mcp::RequestId::String(format!("codex_apps_auth_{call_id}"))
+    );
+    assert_eq!(
+        request.request,
+        ElicitationRequest::Url {
+            meta: Some(json!({
+                "_codex_apps": {
+                    "connector_auth_failure": {
+                        "is_auth_failure": true,
+                        "connector_id": "calendar",
+                        "connector_name": "Calendar",
+                        "install_url": "https://chatgpt.com/apps/calendar/calendar",
+                        "auth_reason": "reauthentication_required",
+                        "link_id": "link_123",
+                        "error_code": "UNAUTHORIZED",
+                        "error_http_status_code": 401,
+                        "error_action": "TRIGGER_REAUTHENTICATION",
+                    },
+                },
+            })),
+            message: "Reconnect Calendar on ChatGPT to restore access for this request."
+                .to_string(),
+            url: "https://chatgpt.com/apps/calendar/calendar".to_string(),
+            elicitation_id: format!("codex_apps_auth_{call_id}"),
+        }
+    );
+
+    let tools_list_requests_before_accept = tools_list_request_count(&server).await;
+    test.codex
+        .submit(Op::ResolveElicitation {
+            server_name: request.server_name,
+            request_id: request.id,
+            decision: ElicitationAction::Accept,
+            content: None,
+            meta: None,
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert_eq!(
+        tools_list_request_count(&server).await,
+        tools_list_requests_before_accept + 1,
+        "accepted authorization should force exactly one tools refresh",
+    );
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output = requests[1].function_call_output(call_id);
+    let items = output["output"]
+        .as_array()
+        .expect("auth elicitation result should contain content items");
+    assert_eq!(
+        &items[1..],
+        &[json!({
+            "type": "input_text",
+            "text": "Authentication for Calendar was requested and accepted. Retry this tool call now.",
+        })]
+    );
+
     Ok(())
 }

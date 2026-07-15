@@ -158,7 +158,14 @@ async fn device_code_login_integration_succeeds() -> anyhow::Result<()> {
     .context("auth.json should load after login succeeds")?
     .context("auth.json written")?;
     // assert_eq!(auth.openai_api_key.as_deref(), Some("api-key-321"));
-    let tokens = auth.tokens.expect("tokens persisted");
+    let tokens = auth
+        .managed_chatgpt
+        .expect("managed account pool persisted")
+        .accounts
+        .into_iter()
+        .next()
+        .expect("managed account persisted")
+        .tokens;
     assert_eq!(tokens.access_token, "access-token-123");
     assert_eq!(tokens.refresh_token, "refresh-token-123");
     assert_eq!(tokens.id_token.raw_jwt, jwt);
@@ -266,7 +273,7 @@ async fn device_code_login_integration_persists_without_api_key_on_exchange_fail
     )
     .await;
 
-    let jwt = make_jwt(json!({}));
+    let jwt = make_jwt(json!({ "email": "user@example.com" }));
 
     mock_oauth_token_single(&mock_server, jwt.clone()).await;
 
@@ -295,7 +302,14 @@ async fn device_code_login_integration_persists_without_api_key_on_exchange_fail
     .context("auth.json should load after login succeeds")?
     .context("auth.json written")?;
     assert!(auth.openai_api_key.is_none());
-    let tokens = auth.tokens.expect("tokens persisted");
+    let tokens = auth
+        .managed_chatgpt
+        .expect("managed account pool persisted")
+        .accounts
+        .into_iter()
+        .next()
+        .expect("managed account persisted")
+        .tokens;
     assert_eq!(tokens.access_token, "access-token-123");
     assert_eq!(tokens.refresh_token, "refresh-token-123");
     assert_eq!(tokens.id_token.raw_jwt, jwt);

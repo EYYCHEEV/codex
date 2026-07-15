@@ -11,6 +11,7 @@ use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
 use crate::app_event::FeedbackCategory;
 use crate::app_event::HistoryLookupResponse;
+use crate::app_event::ManagedAccountRequestOrigin;
 use crate::app_event::PermissionProfileSelection;
 use crate::app_event::PluginLocation;
 use crate::app_event::PluginRemoteSectionError;
@@ -653,6 +654,10 @@ pub(crate) struct App {
     /// Invalidates in-flight full rate-limit reads when a newer rolling hard stop arrives.
     rate_limit_hard_stop_generation: u64,
     rate_limit_refresh_state: rate_limit_refresh::RateLimitRefreshState,
+    managed_account_request_scope: Option<(Option<ThreadId>, String)>,
+    managed_account_scope_generation: u64,
+    managed_account_request_sequence: u64,
+    pending_managed_account_logout_refresh: Option<ManagedAccountRequestOrigin>,
     // Serialize plugin enablement writes per plugin so stale completions cannot
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.

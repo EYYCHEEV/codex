@@ -121,6 +121,7 @@ struct PublishedMcpRuntime {
     auth: Option<CodexAuth>,
     auth_token: Option<String>,
     auth_generation: Arc<()>,
+    codex_apps_tools_cache_key: Option<ConnectorRuntimeContextKey>,
     plugins_available: bool,
     ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
     environment_selections: Arc<[TurnEnvironmentSelection]>,
@@ -231,6 +232,7 @@ impl McpRuntime {
                 auth: None,
                 auth_token: None,
                 auth_generation: Arc::new(()),
+                codex_apps_tools_cache_key: None,
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
                 environment_selections: Arc::default(),
@@ -340,6 +342,7 @@ impl McpRuntime {
         } else {
             Arc::new(())
         };
+        let codex_apps_tools_cache_key = input.codex_apps_tools_cache_key.clone();
         let plugins_available = input.plugins_available;
         let ready_selected_capability_roots = input.ready_selected_capability_roots.clone();
         let environment_selections = Arc::clone(&input.runtime_context.environment_selections);
@@ -353,7 +356,7 @@ impl McpRuntime {
             )
             .await,
         );
-        let hosted_event_server_retained = connections.contains_server(CODEX_APPS_MCP_SERVER_NAME)
+        let hosted_event_server_available = connections.contains_server(CODEX_APPS_MCP_SERVER_NAME)
             && config
                 .mcp_server_catalog
                 .server(CODEX_APPS_MCP_SERVER_NAME)
@@ -362,6 +365,8 @@ impl McpRuntime {
                         .source()
                         .is_host_owned_apps(CODEX_APPS_MCP_SERVER_NAME, registration.config())
                 });
+        let event_stream_access_retained = hosted_event_server_available
+            && current.codex_apps_tools_cache_key.as_ref() == Some(&codex_apps_tools_cache_key);
         let mut cancellation = self
             .event_stream_cancellation
             .lock()
@@ -372,6 +377,7 @@ impl McpRuntime {
             auth,
             auth_token,
             auth_generation,
+            codex_apps_tools_cache_key: Some(codex_apps_tools_cache_key),
             plugins_available,
             ready_selected_capability_roots,
             environment_selections,
@@ -379,8 +385,8 @@ impl McpRuntime {
             cached_binding: Mutex::new(None),
         }));
         let _ = publish.send(true);
-        cancellation.event_server_available = hosted_event_server_retained;
-        if !hosted_event_server_retained {
+        cancellation.event_server_available = hosted_event_server_available;
+        if !event_stream_access_retained {
             cancellation
                 .cancel_event_streams_on_server_removal
                 .send_replace(());
@@ -561,6 +567,10 @@ impl McpRuntime {
             /*required_plugins*/ &HashSet::new(),
         )
         .await
+    }
+
+    pub fn current_codex_apps_tools_cache_key(&self) -> Option<ConnectorRuntimeContextKey> {
+        self.current.load().codex_apps_tools_cache_key.clone()
     }
 
     /// Returns the latest published configuration without waiting for clients.
@@ -1024,6 +1034,7 @@ mod tests {
             auth: None,
             auth_token: None,
             auth_generation: Arc::new(()),
+            codex_apps_tools_cache_key: None,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             environment_selections: Arc::default(),
@@ -1098,6 +1109,7 @@ mod tests {
             auth: None,
             auth_token: None,
             auth_generation: Arc::new(()),
+            codex_apps_tools_cache_key: None,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             environment_selections: Arc::default(),

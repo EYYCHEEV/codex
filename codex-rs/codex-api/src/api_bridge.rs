@@ -28,6 +28,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::Transport(_)
         | ApiError::Api { .. }
         | ApiError::Stream(_)
+        | ApiError::WebsocketClosed(_)
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded
         | ApiError::UsageNotIncluded
@@ -56,6 +57,7 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
             CodexErr::new(CodexErrorDetails::RateLimitExceeded(message))
         }
         ApiError::Stream(msg) => CodexErr::Stream(msg),
+        ApiError::WebsocketClosed(details) => CodexErr::WebsocketClosed(details),
         ApiError::ServerOverloaded { .. } => CodexErr::ServerOverloaded,
         ApiError::FlexUnavailable => CodexErr::new(CodexErrorDetails::FlexUnavailable),
         ApiError::Api { status, message } => {
@@ -268,6 +270,13 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
         },
         ApiError::RateLimit(msg) => CodexErr::Stream(msg),
     }
+}
+
+pub(crate) fn parse_rate_limit_headers(
+    headers: &HeaderMap,
+) -> Option<codex_protocol::protocol::RateLimitSnapshot> {
+    let limit_id = extract_header(Some(headers), ACTIVE_LIMIT_HEADER);
+    parse_rate_limit_for_limit(headers, limit_id.as_deref())
 }
 
 const ACTIVE_LIMIT_HEADER: &str = "x-codex-active-limit";

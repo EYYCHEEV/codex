@@ -337,7 +337,20 @@ async fn schedule_startup_prewarm_inner(
         prewarm_started_at.elapsed(),
         /*status*/ None,
     );
-    let startup_cancellation_token = CancellationToken::new();
+    if routes_approval_to_guardian(&startup_turn_context) {
+        let guardian_session = Arc::clone(&session);
+        let guardian_parent_turn = Arc::clone(&startup_turn_context);
+        drop(tokio::spawn(async move {
+            if let Err(err) = crate::guardian::prewarm_guardian_review_session(
+                guardian_session,
+                guardian_parent_turn,
+            )
+            .await
+            {
+                warn!("failed to initialize guardian review session: {err:#}");
+            }
+        }));
+    }
     let preconnect_model_info = Arc::clone(startup_turn_context.model_info());
     // Spawned subagents inherit the root's selection, with the same feature and model filtering
     // that capture applies to the actual request.
@@ -370,83 +383,113 @@ async fn schedule_startup_prewarm_inner(
         window_number,
         context_window_id,
     );
-    // Start the handshake with the expected route while capturing tools for generate=false.
-    let (step_context, ()) = tokio::try_join!(
-        async {
-            let built_tools_started_at = Instant::now();
-            let step_context = session
-                .capture_step_context(
-                    Arc::clone(&startup_turn_context),
-                    &startup_cancellation_token,
+    loop {
+        let request_setup = session
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&startup_turn_context.model_info().slug),
+                Some(handshake_metadata.session_id.as_str()),
+            )
+            .await?;
+        let warmup_result = async {
+            // Share one account snapshot between the eager handshake, tools, and warmup.
+            let (step_context, ()) = tokio::try_join!(
+                async {
+                    let built_tools_started_at = Instant::now();
+                    let step_context = session
+                        .capture_step_context_for_setup(
+                            Arc::clone(&startup_turn_context),
+                            &request_setup,
+                        )
+                        .await?;
+                    startup_turn_context.session_telemetry.record_startup_phase(
+                        "startup_prewarm_build_tools",
+                        built_tools_started_at.elapsed(),
+                        /*status*/ None,
+                    );
+                    Ok(step_context)
+                },
+                client_session.preconnect_websocket_with_setup(
+                    &preconnect_model_info,
+                    preconnect_service_tier.clone(),
+                    &startup_turn_context.session_telemetry,
+                    &handshake_metadata,
+                    &request_setup,
+                ),
+            )?;
+            let build_prompt_started_at = Instant::now();
+            let prompt_input = match input {
+                PrewarmInput::Base => Vec::new(),
+                PrewarmInput::History => {
+                    // Use the same history projection and tool metadata as a sampling request.
+                    // The real turn checks this prefix before reusing the prepared response.
+                    let mut history = session
+                        .clone_history()
+                        .await
+                        .for_prompt(&step_context.settings.model_info.input_modalities);
+                    session
+                        .services
+                        .executed_tool_calls
+                        .attach_to_prompt(&mut history, &mut HashMap::new());
+                    history
+                }
+            };
+            let startup_prompt = build_prompt(
+                prompt_input,
+                step_context.as_ref(),
+                BaseInstructions {
+                    text: base_instructions.clone(),
+                    provenance: None,
+                },
+            );
+            startup_turn_context.session_telemetry.record_startup_phase(
+                "startup_prewarm_build_prompt",
+                build_prompt_started_at.elapsed(),
+                /*status*/ None,
+            );
+            // Tool discovery may have updated Responses Lite metadata since the eager handshake.
+            let responses_metadata = session
+                .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Prewarm)
+                .await;
+            let websocket_warmup_started_at = Instant::now();
+            // Prewarm establishes the request baseline before the first turn can change effort.
+            client_session
+                .prewarm_websocket(
+                    &startup_prompt,
+                    &step_context.settings.model_info,
+                    &step_context.session_telemetry,
+                    session
+                        .reasoning_effort_for_request(
+                            &step_context.settings,
+                            RequestEffortUsage::Sampling,
+                        )
+                        .await,
+                    step_context.settings.reasoning_summary,
+                    step_context.settings.service_tier.clone(),
+                    &responses_metadata,
+                    request_setup,
                 )
                 .await?;
             startup_turn_context.session_telemetry.record_startup_phase(
-                "startup_prewarm_build_tools",
-                built_tools_started_at.elapsed(),
+                "startup_prewarm_websocket_warmup",
+                websocket_warmup_started_at.elapsed(),
                 /*status*/ None,
             );
-            Ok(step_context)
-        },
-        client_session.preconnect_websocket(
-            &preconnect_model_info,
-            preconnect_service_tier,
-            &startup_turn_context.session_telemetry,
-            &handshake_metadata,
-        ),
-    )?;
-    let build_prompt_started_at = Instant::now();
-    let prompt_input = match input {
-        PrewarmInput::Base => Vec::new(),
-        PrewarmInput::History => {
-            // Use the same history projection and tool metadata as a sampling request.
-            // The real turn still checks this prefix before reusing the prepared response.
-            let mut history = session
-                .clone_history()
-                .await
-                .for_prompt(&step_context.settings.model_info.input_modalities);
-            session
-                .services
-                .executed_tool_calls
-                .attach_to_prompt(&mut history, &mut HashMap::new());
-            history
+            Ok::<_, codex_protocol::error::CodexErr>(())
         }
-    };
-    let startup_prompt = build_prompt(
-        prompt_input,
-        step_context.as_ref(),
-        BaseInstructions {
-            text: base_instructions,
-            provenance: None,
-        },
-    );
-    startup_turn_context.session_telemetry.record_startup_phase(
-        "startup_prewarm_build_prompt",
-        build_prompt_started_at.elapsed(),
-        /*status*/ None,
-    );
-    // Tool discovery may have updated Responses Lite metadata since the eager handshake.
-    let responses_metadata = session
-        .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Prewarm)
         .await;
-    let websocket_warmup_started_at = Instant::now();
-    // Prewarm establishes the request baseline before the first turn can change effort.
-    client_session
-        .prewarm_websocket(
-            &startup_prompt,
-            &step_context.settings.model_info,
-            &step_context.session_telemetry,
-            session
-                .reasoning_effort_for_request(&step_context.settings, RequestEffortUsage::Sampling)
-                .await,
-            step_context.settings.reasoning_summary,
-            step_context.settings.service_tier.clone(),
-            &responses_metadata,
-        )
-        .await?;
-    startup_turn_context.session_telemetry.record_startup_phase(
-        "startup_prewarm_websocket_warmup",
-        websocket_warmup_started_at.elapsed(),
-        /*status*/ None,
-    );
+        match warmup_result {
+            Ok(()) => break,
+            Err(err)
+                if client_session
+                    .recover_last_managed_attempt(&err, /*committed*/ false)
+                    .await =>
+            {
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
     Ok(client_session)
 }

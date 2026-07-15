@@ -82,6 +82,7 @@ use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
 use codex_login::auth_env_telemetry::collect_auth_env_telemetry;
 use codex_mcp::McpResourceClient;
 use codex_mcp::McpRuntime;
@@ -202,6 +203,7 @@ use tracing::instrument;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::client::CurrentClientSetup;
 use crate::client::ModelClient;
 use crate::codex_thread::CodexThreadSettingsOverrides;
 use crate::codex_thread::ThreadConfigSnapshot;
@@ -215,6 +217,7 @@ use crate::config::StartedNetworkProxy;
 use crate::config::resolve_web_search_mode_for_turn;
 use crate::context_manager::ContextManager;
 use crate::context_manager::HistoryReplacement;
+use crate::state::ManagedRateLimitBinding;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::ConfigLayerSource;
@@ -362,6 +365,7 @@ use codex_protocol::protocol::DeprecationNoticeEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
+use codex_protocol::protocol::ManagedTransportAuthBinding;
 use codex_protocol::protocol::McpStartupSnapshot;
 use codex_protocol::protocol::ModelRerouteEvent;
 use codex_protocol::protocol::ModelRerouteReason;
@@ -1642,11 +1646,8 @@ impl Session {
                     .await;
                 }
 
-                // Seed usage info from the recorded rollout so UIs can show token counts
-                // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
+                if let Some(event) = Self::last_token_count_from_rollout(&rollout_items) {
+                    self.restore_token_count_from_rollout(event).await;
                 }
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
@@ -1670,11 +1671,8 @@ impl Session {
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
 
-                // Seed usage info from the recorded rollout so UIs can show token counts
-                // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
+                if let Some(event) = Self::last_token_count_from_rollout(&rollout_items) {
+                    self.restore_token_count_from_rollout(event).await;
                 }
                 self.state.lock().await.latest_token_usage_record =
                     Self::last_token_usage_record_from_rollout(&rollout_items);
@@ -1860,11 +1858,56 @@ impl Session {
         state.set_auto_compact_window_estimated_prefill(tokens);
     }
 
-    fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
-        rollout_items.iter().rev().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
-            _ => None,
-        })
+    fn last_token_count_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenCountEvent> {
+        let token_events = || {
+            rollout_items.iter().rev().filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TokenCount(event)) => Some(event),
+                _ => None,
+            })
+        };
+        let info = token_events().find_map(|event| event.info.clone());
+        let mut restored = token_events()
+            .find(|event| event.rate_limits.is_some())
+            .cloned()
+            .unwrap_or(TokenCountEvent {
+                info: None,
+                rate_limits: None,
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
+            });
+        restored.info = info;
+        (restored.info.is_some() || restored.rate_limits.is_some()).then_some(restored)
+    }
+
+    async fn restore_token_count_from_rollout(&self, event: TokenCountEvent) {
+        let mut state = self.state.lock().await;
+        state.set_token_info(event.info);
+        let Some(snapshot) = event.rate_limits else {
+            return;
+        };
+        let transport_binding =
+            event
+                .managed_transport_binding
+                .map(|binding| TransportAuthBinding {
+                    identity_key: binding.identity_key,
+                    raw_account_id: binding.raw_account_id,
+                    fedramp: binding.fedramp,
+                    auth_mode: binding.auth_mode,
+                    route_generation: binding.route_generation,
+                });
+        match (event.managed_account_id, event.account_state_revision) {
+            (Some(managed_account_id), Some(account_state_revision)) => {
+                state.restore_pending_managed_rate_limits(
+                    snapshot,
+                    managed_account_id,
+                    account_state_revision,
+                    transport_binding,
+                );
+            }
+            (None, None) => state.restore_rate_limits(snapshot, /*managed_binding*/ None),
+            _ => {}
+        }
     }
 
     fn last_token_usage_record_from_rollout(
@@ -3833,8 +3876,17 @@ impl Session {
         turn_context: Arc<TurnContext>,
         cancellation_token: &CancellationToken,
     ) -> CodexResult<Arc<StepContext>> {
-        self.capture_step_context_with_required_mcp_servers(
+        let setup = self
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info().slug),
+                Some(&self.session_id().to_string()),
+            )
+            .await?;
+        self.capture_step_context_for_setup_with_required_mcp_servers(
             turn_context,
+            &setup,
             cancellation_token,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
@@ -3850,9 +3902,18 @@ impl Session {
         required_servers: &[String],
         required_plugins: &HashSet<String>,
     ) -> CodexResult<Arc<StepContext>> {
+        let setup = self
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info().slug),
+                Some(&self.session_id().to_string()),
+            )
+            .await?;
         let step_context = self
             .capture_step_context_inner(
                 turn_context,
+                &setup,
                 cancellation_token,
                 required_servers,
                 required_plugins,
@@ -3869,8 +3930,17 @@ impl Session {
         turn_context: Arc<TurnContext>,
         cancellation_token: &CancellationToken,
     ) -> CodexResult<Arc<StepContext>> {
+        let setup = self
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info().slug),
+                Some(&self.session_id().to_string()),
+            )
+            .await?;
         self.capture_step_context_inner(
             turn_context,
+            &setup,
             cancellation_token,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
@@ -3878,10 +3948,47 @@ impl Session {
         .await
     }
 
+    pub(crate) async fn capture_step_context_for_setup(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        setup: &CurrentClientSetup,
+    ) -> CodexResult<Arc<StepContext>> {
+        self.capture_step_context_inner(
+            turn_context,
+            setup,
+            &CancellationToken::new(),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn capture_step_context_for_setup_with_required_mcp_servers(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        setup: &CurrentClientSetup,
+        cancellation_token: &CancellationToken,
+        required_servers: &[String],
+        required_plugins: &HashSet<String>,
+    ) -> CodexResult<Arc<StepContext>> {
+        let step_context = self
+            .capture_step_context_inner(
+                turn_context,
+                setup,
+                cancellation_token,
+                required_servers,
+                required_plugins,
+            )
+            .await?;
+        self.set_last_known_step_context(&step_context).await;
+        Ok(step_context)
+    }
+
     #[tracing::instrument(name = "step_context.capture", level = "info", skip_all)]
     async fn capture_step_context_inner(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
+        setup: &CurrentClientSetup,
         cancellation_token: &CancellationToken,
         required_servers: &[String],
         required_plugins: &HashSet<String>,
@@ -3924,6 +4031,10 @@ impl Session {
         );
         let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
         let environments = environments.or_cancel(cancellation_token).await?;
+        let connector_directory_cache_key =
+            mcp::connector_directory_cache_key_for_setup(&turn_context, setup);
+        let codex_apps_tools_cache_key =
+            mcp::codex_apps_tools_cache_key_for_setup(&turn_context, setup);
         // Keep both preparation futures off caller stacks while they are live together.
         let load_agents_md = Box::pin(async {
             let (loaded_agents_md, warnings) = self
@@ -3985,11 +4096,19 @@ impl Session {
                 // MCP refresh can be large; keep it off the sampling request's stack.
                 Box::pin(self.mcp_runtime_for_step(
                     turn_context.as_ref(),
+                    &environments,
                     &selected_capability_roots,
+                    executor_capability_discovery.as_deref(),
+                    Some(setup),
                     required_servers,
                     required_plugins,
                 )),
-                turn::prepare_tool_recommendations(self.as_ref(), turn_context.as_ref()),
+                turn::prepare_tool_recommendations(
+                    self.as_ref(),
+                    turn_context.as_ref(),
+                    setup.effective_auth.as_ref(),
+                    connector_directory_cache_key.as_ref(),
+                ),
             );
             let mut selected_plugins = self
                 .services
@@ -4051,6 +4170,9 @@ impl Session {
             selected_capability_roots,
             executor_capability_discovery,
             mcp,
+            effective_auth: setup.effective_auth.clone(),
+            connector_directory_cache_key,
+            codex_apps_tools_cache_key,
             tool_router,
             loaded_agents_md,
         }))
@@ -4525,19 +4647,14 @@ impl Session {
                 .token_budget
                 .as_ref()
                 .is_some_and(|config| config.use_history_notes_extension)
-                && let Some(mcp_result) = self
-                    .services
-                    .mcp_runtime
-                    .latest_call_tool(
-                        "notes",
-                        "thread_hint",
-                        /*environment_id*/ None,
+                && let Some(call) = step_context.mcp.prepare_call("notes", "thread_hint")
+                && let Some(mcp_result) = call
+                    .call(
                         /*arguments*/ None,
                         Some(serde_json::json!({
                             "threadId": self.thread_id().to_string(),
                         })),
-                        /*requested_timeout*/ None,
-                        /*wait_for_server*/ true,
+                        /*timeout*/ None,
                     )
                     .await
                     .ok()
@@ -5011,21 +5128,32 @@ impl Session {
         .await;
         self.send_token_count_event(turn_context).await;
     }
+    pub(crate) async fn observe_managed_rate_limit_binding(
+        &self,
+        binding: Option<ManagedRateLimitBinding>,
+    ) {
+        let mut state = self.state.lock().await;
+        state.observe_managed_rate_limit_binding(binding.as_ref());
+    }
 
     pub(crate) async fn update_rate_limits(
         &self,
         turn_context: &TurnContext,
         new_rate_limits: RateLimitSnapshot,
+        managed_binding: Option<ManagedRateLimitBinding>,
     ) {
-        self.record_rate_limits_info(new_rate_limits).await;
+        self.record_rate_limits_info(new_rate_limits, managed_binding)
+            .await;
         self.send_token_count_event(turn_context).await;
     }
 
-    pub(crate) async fn record_rate_limits_info(&self, new_rate_limits: RateLimitSnapshot) {
-        {
-            let mut state = self.state.lock().await;
-            state.set_rate_limits(new_rate_limits);
-        }
+    pub(crate) async fn record_rate_limits_info(
+        &self,
+        new_rate_limits: RateLimitSnapshot,
+        managed_binding: Option<ManagedRateLimitBinding>,
+    ) {
+        let mut state = self.state.lock().await;
+        state.set_rate_limits(new_rate_limits, managed_binding);
     }
 
     pub(crate) async fn mcp_dependency_prompted(&self) -> HashSet<String> {
@@ -5047,11 +5175,27 @@ impl Session {
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let (info, rate_limits, managed_binding) = {
             let state = self.state.lock().await;
             state.token_info_and_rate_limits()
         };
-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info,
+            rate_limits,
+            managed_account_id: managed_binding
+                .as_ref()
+                .map(|binding| binding.managed_account_id.clone()),
+            account_state_revision: managed_binding
+                .as_ref()
+                .map(|binding| binding.account_state_revision),
+            managed_transport_binding: managed_binding.map(|binding| ManagedTransportAuthBinding {
+                identity_key: binding.transport_binding.identity_key,
+                raw_account_id: binding.transport_binding.raw_account_id,
+                fedramp: binding.transport_binding.fedramp,
+                auth_mode: binding.transport_binding.auth_mode,
+                route_generation: binding.transport_binding.route_generation,
+            }),
+        });
         self.send_event(turn_context, event).await;
     }
 

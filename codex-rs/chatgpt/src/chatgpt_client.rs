@@ -69,32 +69,71 @@ pub(crate) async fn chatgpt_get_request_with_timeout<T: DeserializeOwned>(
         .clone()
         .for_current_account();
     let client = chatgpt_client(config.http_client_factory().with_network_policy(policy));
-    let chatgpt_base_url = &config.chatgpt_base_url;
     let auth_manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     let auth = auth_manager
         .auth()
         .await
         .ok_or_else(|| anyhow::anyhow!("ChatGPT auth not available"))?;
+    chatgpt_get_request_with_client_and_timeout(
+        &config.chatgpt_base_url,
+        client,
+        &auth,
+        path,
+        timeout,
+        CODEX_PRODUCT_SKU,
+    )
+    .await
+}
+
+/// Makes a GET request with one already-captured auth identity.
+///
+/// Callers must capture `auth` and `config.application_network_policy` together and preserve
+/// that snapshot rather than reacquiring either while the request is in flight.
+pub(crate) async fn chatgpt_get_request_with_auth_and_timeout<T: DeserializeOwned>(
+    config: &Config,
+    auth: &CodexAuth,
+    path: String,
+    timeout: Option<Duration>,
+    product_sku: &str,
+) -> anyhow::Result<T> {
+    chatgpt_get_request_with_client_and_timeout(
+        &config.chatgpt_base_url,
+        chatgpt_client(config.http_client_factory()),
+        auth,
+        path,
+        timeout,
+        product_sku,
+    )
+    .await
+}
+
+async fn chatgpt_get_request_with_client_and_timeout<T: DeserializeOwned>(
+    chatgpt_base_url: &str,
+    client: HttpClient,
+    auth: &CodexAuth,
+    path: String,
+    timeout: Option<Duration>,
+    product_sku: &str,
+) -> anyhow::Result<T> {
     anyhow::ensure!(
         auth.uses_codex_backend(),
         "ChatGPT backend requests require Codex backend auth"
     );
     anyhow::ensure!(
         auth.get_account_id().is_some(),
-        "ChatGPT account ID not available, please re-run `codex login`"
+        "ChatGPT account ID not available, please re-run codex login"
     );
     let url = format!(
         "{}/{}",
         chatgpt_base_url.trim_end_matches('/'),
         path.trim_start_matches('/')
     );
-
     let mut request = client
         .get(&url)
         .headers(default_headers())
-        .headers(codex_model_provider::auth_provider_from_auth(&auth).to_auth_headers())
-        .header(OAI_PRODUCT_SKU_HEADER, CODEX_PRODUCT_SKU)
+        .headers(codex_model_provider::auth_provider_from_auth(auth).to_auth_headers())
+        .header(OAI_PRODUCT_SKU_HEADER, product_sku)
         .header("Content-Type", "application/json");
     if let Some(timeout) = timeout {
         request = request.timeout(timeout);

@@ -1,11 +1,13 @@
+use super::ResponsesRetryDecision;
 use super::ResponsesStreamRequest;
 use super::ResponsesStreamRetryState;
-use super::handle_response_stream_error;
+use super::handle_retryable_response_stream_error;
 use super::log_retry;
 use crate::realtime_history::RealtimeHistoryState;
 use crate::session::tests::make_session_and_context;
 use codex_http_client::RetryAfter;
 use codex_protocol::error::CodexErr;
+use pretty_assertions::assert_eq;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -70,7 +72,7 @@ async fn stream_retry_preserves_deadline_across_delayed_notification() {
 
     // Hold the event-delivery lock so reporting the error consumes part of the deadline.
     let history_guard = session.realtime_history.as_ref().unwrap().lock().await;
-    let retry = handle_response_stream_error(
+    let retry = handle_retryable_response_stream_error(
         &mut retry_state,
         /*max_retries*/ 2,
         CodexErr::InternalServerError.with_retry_after(advice),
@@ -87,7 +89,10 @@ async fn stream_retry_preserves_deadline_across_delayed_notification() {
     assert!(futures::poll!(&mut retry).is_pending());
     tokio::time::advance(Duration::from_secs(1)).await;
     assert!(futures::poll!(&mut retry).is_pending());
-    retry.await.expect("retry should be allowed");
+    assert_eq!(
+        retry.await.expect("retry should be allowed"),
+        ResponsesRetryDecision::Retry
+    );
     // Tokio rounds timer deadlines up to the next millisecond.
     let resumed_at = Instant::now();
     assert!(

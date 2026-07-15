@@ -22,6 +22,7 @@ use serde_json::json;
 use tokio::runtime::Handle;
 use tokio::sync::watch;
 
+use crate::McpBinding;
 use crate::McpEventStreamOpener;
 use crate::McpRuntime;
 use crate::connection_manager::McpConnectionSet;
@@ -183,19 +184,49 @@ struct McpEventListResult {
     events: Vec<McpEventDefinition>,
 }
 
-/// Access to MCP resources and event subscriptions through the latest runtime.
+/// Access to MCP resources and event subscriptions.
+///
+/// Turn-scoped callers capture an exact binding for resources while retaining
+/// the owning runtime's event-stream lifecycle. Runtime-only construction is
+/// retained for event-only and compatibility callers.
 #[derive(Clone)]
 pub struct McpResourceClient {
-    runtime: Arc<McpRuntime>,
+    backend: McpResourceClientBackend,
 }
 
-/// Opaque identity for the connection set currently used by an MCP resource client.
 #[derive(Clone)]
-pub struct McpResourceClientCacheKey(Weak<McpConnectionSet>);
+enum McpResourceClientBackend {
+    Runtime(Arc<McpRuntime>),
+    Binding(Arc<McpBinding>),
+    RuntimeAndBinding {
+        runtime: Arc<McpRuntime>,
+        binding: Arc<McpBinding>,
+    },
+}
+
+/// Opaque identity for the exact resource generation used by a client.
+#[derive(Clone)]
+pub struct McpResourceClientCacheKey(McpResourceClientCacheKeyInner);
+
+#[derive(Clone)]
+enum McpResourceClientCacheKeyInner {
+    Binding(Weak<McpBinding>),
+    Connections(Weak<McpConnectionSet>),
+}
 
 impl PartialEq for McpResourceClientCacheKey {
     fn eq(&self, other: &Self) -> bool {
-        self.0.ptr_eq(&other.0)
+        match (&self.0, &other.0) {
+            (
+                McpResourceClientCacheKeyInner::Binding(left),
+                McpResourceClientCacheKeyInner::Binding(right),
+            ) => left.ptr_eq(right),
+            (
+                McpResourceClientCacheKeyInner::Connections(left),
+                McpResourceClientCacheKeyInner::Connections(right),
+            ) => left.ptr_eq(right),
+            _ => false,
+        }
     }
 }
 
@@ -247,14 +278,42 @@ impl std::fmt::Debug for McpResourceClient {
 }
 
 impl McpResourceClient {
-    /// Creates a resource client that follows the thread's latest published runtime.
+    /// Creates a compatibility client that follows the latest runtime.
     pub fn new(runtime: Arc<McpRuntime>) -> Self {
-        Self { runtime }
+        Self {
+            backend: McpResourceClientBackend::Runtime(runtime),
+        }
     }
 
-    /// Returns the identity of the connection set used by this client.
+    /// Creates a resource-only client backed by one exact request binding.
+    pub fn from_binding(binding: Arc<McpBinding>) -> Self {
+        Self {
+            backend: McpResourceClientBackend::Binding(binding),
+        }
+    }
+
+    /// Creates a turn client with exact resource authority and runtime-owned event streams.
+    pub fn from_runtime_and_binding(runtime: Arc<McpRuntime>, binding: Arc<McpBinding>) -> Self {
+        Self {
+            backend: McpResourceClientBackend::RuntimeAndBinding { runtime, binding },
+        }
+    }
+
+    /// Returns the identity of the exact resource generation.
     pub fn cache_key(&self) -> McpResourceClientCacheKey {
-        McpResourceClientCacheKey(Arc::downgrade(&self.runtime.latest_connections()))
+        match &self.backend {
+            McpResourceClientBackend::Runtime(runtime) => {
+                McpResourceClientCacheKey(McpResourceClientCacheKeyInner::Connections(
+                    Arc::downgrade(&runtime.latest_connections()),
+                ))
+            }
+            McpResourceClientBackend::Binding(binding)
+            | McpResourceClientBackend::RuntimeAndBinding { binding, .. } => {
+                McpResourceClientCacheKey(McpResourceClientCacheKeyInner::Binding(Arc::downgrade(
+                    binding,
+                )))
+            }
+        }
     }
 
     /// Returns a server's resource cache identity without starting its connection.
@@ -272,7 +331,8 @@ impl McpResourceClient {
     ///
     /// This does not wait for server startup.
     pub async fn has_server(&self, server: &str) -> bool {
-        self.runtime.latest_connections().contains_server(server)
+        self.binding()
+            .is_ok_and(|binding| binding.has_server(server))
     }
 
     /// Lists one resource page from the named server.
@@ -283,11 +343,7 @@ impl McpResourceClient {
     ) -> Result<McpResourcePage> {
         let params =
             cursor.map(|cursor| PaginatedRequestParams::default().with_cursor(Some(cursor)));
-        let result = self
-            .runtime
-            .latest_connections()
-            .list_resources(server, params)
-            .await?;
+        let result = self.binding()?.list_resources(server, params).await?;
         let resources = result
             .resources
             .into_iter()
@@ -336,11 +392,7 @@ impl McpResourceClient {
     /// Reads one resource from the named server.
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<McpResourceReadResult> {
         let params = ReadResourceRequestParams::new(uri.to_string());
-        let result = self
-            .runtime
-            .latest_connections()
-            .read_resource(server, params)
-            .await?;
+        let result = self.binding()?.read_resource(server, params).await?;
         let contents = result
             .contents
             .into_iter()
@@ -352,9 +404,11 @@ impl McpResourceClient {
     /// Lists the events advertised by the MCP event server.
     pub async fn list_events(&self) -> Result<McpEventCatalogSnapshot> {
         let (connections, _) = self
-            .runtime
+            .runtime()?
             .latest_connections_for_event_server(CODEX_APPS_MCP_SERVER_NAME)?;
-        let cache_key = McpResourceClientCacheKey(Arc::downgrade(&connections));
+        let cache_key = McpResourceClientCacheKey(McpResourceClientCacheKeyInner::Connections(
+            Arc::downgrade(&connections),
+        ));
         let (managed, request_timeout) = connections
             .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
             .await?;
@@ -384,7 +438,7 @@ impl McpResourceClient {
         request_meta: Option<&Map<String, Value>>,
     ) -> Result<McpEventStream> {
         let (connections, cancel_event_streams_on_server_removal) = self
-            .runtime
+            .runtime()?
             .latest_connections_for_event_server(CODEX_APPS_MCP_SERVER_NAME)?;
         let (managed, _) = connections
             .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
@@ -401,12 +455,36 @@ impl McpResourceClient {
 
     /// Creates an event stream opener using the task's event server settings.
     pub fn event_stream_opener(&self) -> Result<McpEventStreamOpener> {
-        self.runtime.event_stream_opener()
+        self.runtime()?.event_stream_opener()
     }
 
     /// Forwards event server removal to the owner of the task's subscriptions.
     pub fn forward_event_server_removals_to(&self, cancellation: watch::Sender<()>) {
-        self.runtime.forward_event_server_removals_to(cancellation);
+        if let Ok(runtime) = self.runtime() {
+            runtime.forward_event_server_removals_to(cancellation);
+        } else {
+            cancellation.send_replace(());
+        }
+    }
+
+    fn runtime(&self) -> Result<&Arc<McpRuntime>> {
+        match &self.backend {
+            McpResourceClientBackend::Runtime(runtime)
+            | McpResourceClientBackend::RuntimeAndBinding { runtime, .. } => Ok(runtime),
+            McpResourceClientBackend::Binding(_) => Err(anyhow!(
+                "MCP event subscriptions are unavailable for this client"
+            )),
+        }
+    }
+
+    fn binding(&self) -> Result<&Arc<McpBinding>> {
+        match &self.backend {
+            McpResourceClientBackend::Binding(binding)
+            | McpResourceClientBackend::RuntimeAndBinding { binding, .. } => Ok(binding),
+            McpResourceClientBackend::Runtime(_) => {
+                Err(anyhow!("MCP resource reads require a captured binding"))
+            }
+        }
     }
 }
 
@@ -419,4 +497,33 @@ fn resource_content_from_rmcp(content: rmcp::model::ResourceContents) -> Result<
     let value =
         serde_json::to_value(content).context("failed to serialize MCP resource content")?;
     serde_json::from_value(value).context("failed to convert MCP resource content")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_binding() -> Arc<McpBinding> {
+        Arc::new(McpBinding::empty(Arc::new(
+            crate::mcp::tests::test_mcp_config(std::env::temp_dir()),
+        )))
+    }
+
+    #[tokio::test]
+    async fn resource_client_retains_exact_binding_and_cache_identity() {
+        let first_binding = test_binding();
+        let first = McpResourceClient::from_binding(Arc::clone(&first_binding));
+        let first_clone = first.clone();
+        let replacement = McpResourceClient::from_binding(test_binding());
+
+        assert!(first.cache_key() == first_clone.cache_key());
+        assert!(first.cache_key() != replacement.cache_key());
+
+        drop(first_binding);
+        let McpResourceClientCacheKeyInner::Binding(binding) = first.cache_key().0 else {
+            panic!("binding-backed cache key");
+        };
+        assert!(binding.upgrade().is_some());
+        assert!(!first.has_server("replacement-only").await);
+    }
 }

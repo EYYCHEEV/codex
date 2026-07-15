@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_api::AgentIdentityTelemetry;
+use codex_api::ApiError;
 use codex_api::ModelsClient;
 use codex_api::RequestTelemetry;
 use codex_api::ReqwestTransport;
@@ -19,6 +20,7 @@ use codex_login::AuthEnvTelemetry;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::GatewayAuthManager;
+use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_login::collect_auth_env_telemetry;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::create_client_for_route_async;
@@ -30,15 +32,19 @@ use codex_models_manager::manager::ModelsEndpointResponse;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CoreResult;
+use codex_protocol::protocol::SessionSource;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::telemetry_transport_error_message;
 use http::HeaderMap;
+use http::StatusCode;
 use tokio::time::timeout;
 
+use crate::auth::AgentIdentitySessionFallback;
+use crate::auth::ProviderAuthScope;
 use crate::auth::ResolvedProviderAuth;
-use crate::auth::agent_identity_telemetry;
-use crate::auth::resolve_provider_auth;
 use crate::combined_auth::compose_auth;
+use crate::provider::provider_uses_first_party_auth_path;
+use crate::provider::resolve_provider_request_setup;
 
 const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 const MODELS_ENDPOINT: &str = "/models";
@@ -73,18 +79,47 @@ impl OpenAiModelsEndpoint {
         }
     }
 
-    async fn auth(&self) -> Option<CodexAuth> {
-        match self.auth_manager.as_ref() {
-            Some(auth_manager) => auth_manager.auth().await,
-            None => None,
-        }
+    async fn request_setup(&self) -> CoreResult<crate::provider::ProviderRequestSetup> {
+        resolve_provider_request_setup(
+            self.auth_manager.clone(),
+            &self.provider_info,
+            ProviderAuthScope {
+                agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
+                session_source: SessionSource::Unknown,
+                agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                thread_id: None,
+                session_id: None,
+                model: None,
+            },
+        )
+        .await
     }
 
     async fn uses_codex_backend(&self) -> bool {
-        self.auth()
-            .await
-            .as_ref()
-            .is_some_and(CodexAuth::uses_codex_backend)
+        if self.provider_info.experimental_bearer_token.is_some() {
+            // This predicate also gates provider-owned `/models` refreshes. A static
+            // provider bearer authorizes that endpoint without manager-backed auth.
+            return true;
+        }
+
+        if provider_uses_first_party_auth_path(&self.provider_info) {
+            return self
+                .request_setup()
+                .await
+                .ok()
+                .and_then(|setup| setup.effective_auth)
+                .as_ref()
+                .is_some_and(CodexAuth::uses_codex_backend);
+        }
+
+        match self.auth_manager.as_ref() {
+            Some(auth_manager) => auth_manager
+                .auth()
+                .await
+                .as_ref()
+                .is_some_and(CodexAuth::uses_codex_backend),
+            None => false,
+        }
     }
 
     async fn list_models(
@@ -92,12 +127,12 @@ impl OpenAiModelsEndpoint {
         client_version: &str,
         http_client_factory: HttpClientFactory,
     ) -> CoreResult<ModelsEndpointResponse> {
-        let auth = self.auth().await;
+        let mut setup = self.request_setup().await?;
         let metric_auth_mode = if self.has_provider_api_key()
-            || auth.as_ref().is_some_and(CodexAuth::is_api_key_auth)
+            || setup.effective_auth.as_ref().is_some_and(CodexAuth::is_api_key_auth)
         {
             "api_key"
-        } else if auth.is_some() {
+        } else if setup.effective_auth.is_some() {
             "chatgpt"
         } else {
             "none"
@@ -106,86 +141,109 @@ impl OpenAiModelsEndpoint {
             "codex.remote_models.fetch_update.duration_ms",
             &[("auth_mode", metric_auth_mode)],
         );
-        let identity = crate::models_identity::identity(&self.provider_info, auth.as_ref())?;
-        let auth_mode = auth.as_ref().map(CodexAuth::auth_mode);
-        let mut api_provider = self.provider_info.to_api_provider(auth_mode)?;
-        if (auth.as_ref().is_some_and(CodexAuth::is_api_key_auth) || self.has_provider_api_key())
-            && self.supports_api_key_models()
-            && self.provider_info.base_url.is_none()
-            && self.provider_info.model_catalog_url.is_none()
-        {
-            // Codex metadata is served by the Codex backend, not the public /v1/models API.
-            api_provider.base_url = CHATGPT_CODEX_BASE_URL.to_string();
-        }
-        let resolved = compose_auth(
-            &self.provider_info,
-            self.gateway_auth_manager.as_ref(),
-            ResolvedProviderAuth::new(resolve_provider_auth(auth.as_ref(), &self.provider_info)?),
-        )
-        .await?;
-        let api_auth = resolved.auth;
-        let request_url = match self.provider_info.model_catalog_url.as_deref() {
-            Some(catalog_url) => ModelsClient::<ReqwestTransport>::catalog_request_url(
-                &api_provider,
-                catalog_url,
-                client_version,
+        let mut auth_recovery = self.auth_manager.as_ref().map(|manager| {
+            setup.managed_snapshot.as_ref().map_or_else(
+                || manager.unauthorized_recovery(),
+                |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
             )
-            .map_err(map_api_error)?,
-            None => ModelsClient::<ReqwestTransport>::request_url(&api_provider, client_version),
-        };
-        let auth_telemetry = auth_header_telemetry(api_auth.as_ref());
-        let agent_identity_telemetry = if let Some(CodexAuth::AgentIdentity(auth)) = auth.as_ref() {
-            Some(agent_identity_telemetry(auth))
-        } else {
-            None
-        };
-        let request_telemetry: Arc<dyn RequestTelemetry> = Arc::new(ModelsRequestTelemetry {
-            include_response_debug: self.provider_info.model_catalog_url.is_none(),
-            auth_mode: auth_mode.map(|mode| TelemetryAuthMode::from(mode).to_string()),
-            auth_header_attached: auth_telemetry.attached,
-            auth_header_name: auth_telemetry.name,
-            agent_identity_telemetry,
-            auth_env: self.auth_env(),
         });
-        let (models, etag) = timeout(MODELS_REFRESH_TIMEOUT, async {
-            let transport = self
-                .transport_builder
-                .build(http_client_factory, request_url.clone())
+        let (models, etag, identity) = timeout(MODELS_REFRESH_TIMEOUT, async {
+            loop {
+                let identity = crate::models_identity::identity(
+                    &self.provider_info,
+                    setup.effective_auth.as_ref(),
+                )?;
+                let auth_mode = setup.effective_auth.as_ref().map(CodexAuth::auth_mode);
+                let mut api_provider = setup.api_provider.clone();
+                if (setup.effective_auth.as_ref().is_some_and(CodexAuth::is_api_key_auth)
+                    || self.has_provider_api_key())
+                    && self.supports_api_key_models()
+                    && self.provider_info.base_url.is_none()
+                    && self.provider_info.model_catalog_url.is_none()
+                {
+                    api_provider.base_url = CHATGPT_CODEX_BASE_URL.to_string();
+                }
+                let resolved = compose_auth(
+                    &self.provider_info,
+                    self.gateway_auth_manager.as_ref(),
+                    ResolvedProviderAuth {
+                        auth: setup.api_auth.clone(),
+                        effective_auth: setup.effective_auth.clone(),
+                        agent_identity_telemetry: setup.agent_identity_telemetry.clone(),
+                    },
+                )
                 .await?;
-            let client = ModelsClient::new(transport, api_provider, api_auth)
-                .with_telemetry(Some(request_telemetry));
-            let response_body_limit_bytes = self
-                .provider_info
-                .model_catalog_url
-                .as_ref()
-                .map(|_| MAX_MODEL_CATALOG_BYTES);
-            client
-                .list_models(request_url, HeaderMap::new(), response_body_limit_bytes)
-                .await
-                .map_err(|mut error| {
-                    if self.provider_info.model_catalog_url.is_some()
-                        && let codex_api::ApiError::Transport(TransportError::Http {
-                            url,
-                            headers,
-                            body,
-                            ..
-                        }) = &mut error
-                    {
-                        // Provider diagnostics may echo URL credentials or other secrets.
-                        *url = None;
-                        *headers = None;
-                        *body = None;
+                let request_url = match self.provider_info.model_catalog_url.as_deref() {
+                    Some(catalog_url) => ModelsClient::<ReqwestTransport>::catalog_request_url(
+                        &api_provider,
+                        catalog_url,
+                        client_version,
+                    )
+                    .map_err(map_api_error)?,
+                    None => ModelsClient::<ReqwestTransport>::request_url(
+                        &api_provider,
+                        client_version,
+                    ),
+                };
+                let auth_telemetry = auth_header_telemetry(resolved.auth.as_ref());
+                let request_telemetry: Arc<dyn RequestTelemetry> = Arc::new(ModelsRequestTelemetry {
+                    include_response_debug: self.provider_info.model_catalog_url.is_none(),
+                    auth_mode: auth_mode.map(|mode| TelemetryAuthMode::from(mode).to_string()),
+                    auth_header_attached: auth_telemetry.attached,
+                    auth_header_name: auth_telemetry.name,
+                    agent_identity_telemetry: resolved.agent_identity_telemetry,
+                    auth_env: self.auth_env(),
+                });
+                let transport = self
+                    .transport_builder
+                    .build(http_client_factory.clone(), request_url.clone())
+                    .await?;
+                let client = ModelsClient::new(transport, api_provider, resolved.auth)
+                    .with_telemetry(Some(request_telemetry));
+                let response_body_limit_bytes = self
+                    .provider_info
+                    .model_catalog_url
+                    .as_ref()
+                    .map(|_| MAX_MODEL_CATALOG_BYTES);
+                match client
+                    .list_models(request_url, HeaderMap::new(), response_body_limit_bytes)
+                    .await
+                {
+                    Err(ApiError::Transport(
+                        unauthorized @ TransportError::Http { status, .. },
+                    )) if status == StatusCode::UNAUTHORIZED && auth_recovery.is_some() => {
+                        let recovery = auth_recovery.as_mut().expect("checked above");
+                        if !recovery.has_next() {
+                            return Err(map_api_error(ApiError::Transport(unauthorized)));
+                        }
+                        recovery
+                            .next()
+                            .await
+                            .map_err(|err| CodexErr::Io(err.into()))?;
+                        setup = self.request_setup().await?;
                     }
-                    map_api_error(error)
-                })
+                    result => {
+                        return result
+                            .map(|(models, etag)| (models, etag, identity))
+                            .map_err(|mut error| {
+                                if self.provider_info.model_catalog_url.is_some()
+                                    && let ApiError::Transport(TransportError::Http {
+                                        url, headers, body, ..
+                                    }) = &mut error
+                                {
+                                    *url = None;
+                                    *headers = None;
+                                    *body = None;
+                                }
+                                map_api_error(error)
+                            });
+                    }
+                }
+            }
         })
         .await
         .map_err(|_| CodexErr::RequestTimeout)??;
-        Ok(ModelsEndpointResponse {
-            models,
-            etag,
-            identity,
-        })
+        Ok(ModelsEndpointResponse { models, etag, identity })
     }
 
     fn auth_env(&self) -> AuthEnvTelemetry {
@@ -576,6 +634,15 @@ mod tests {
         );
 
         assert!(!endpoint.has_command_auth());
+    }
+
+    #[tokio::test]
+    async fn static_provider_token_authorizes_models_refresh_without_auth_manager() {
+        let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+        provider_info.experimental_bearer_token = Some("provider-token".to_string());
+        let endpoint = OpenAiModelsEndpoint::new(provider_info, /*auth_manager*/ None);
+
+        assert!(endpoint.uses_codex_backend().await);
     }
 
     #[tokio::test]

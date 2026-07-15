@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Prompt;
+use crate::ResponseStream;
+use crate::client::CurrentClientSetup;
 use crate::client::ModelClientSession;
 use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
@@ -16,6 +18,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::RequestEffortUsage;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::session::turn::AttemptOutcome;
 use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
 use crate::state::AutoCompactWindowIds;
@@ -53,6 +56,17 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+
+pub(crate) async fn emit_managed_selection_updates(
+    sess: &Session,
+    turn_context: &TurnContext,
+    client_session: &mut ModelClientSession,
+) {
+    while let Some(selection) = client_session.take_managed_selection_update() {
+        sess.send_event(turn_context, EventMsg::ManagedAccountSelected(selection))
+            .await;
+    }
+}
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -266,6 +280,21 @@ async fn run_compact_task_inner_impl(
     // request tracking) survives retries within this compact turn.
     let mut client_session = sess.services.model_client.new_session();
     let compaction_response = loop {
+        let responses_metadata = sess
+            .compaction_responses_metadata(turn_context.as_ref(), compaction_metadata)
+            .await;
+        let request_setup = sess
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info().slug),
+                Some(responses_metadata.session_id.as_str()),
+            )
+            .await?;
+        // Ensure every retry refreshes account-bound MCP/runtime state before model transport.
+        let _attempt_step_context = sess
+            .capture_step_context_for_setup(Arc::clone(&turn_context), &request_setup)
+            .await?;
         // Clone is required because of the loop
         let mut turn_input = history
             .clone()
@@ -280,18 +309,28 @@ async fn run_compact_task_inner_impl(
             cyber_access_program: turn_context.cyber_access_program,
             ..Default::default()
         };
-        let responses_metadata = sess
-            .compaction_responses_metadata(turn_context.as_ref(), compaction_metadata)
-            .await;
-        let attempt_result = drain_to_completed(
+        let AttemptOutcome {
+            result: attempt_result,
+            committed,
+        } = drain_to_completed(
             &sess,
             turn_context.as_ref(),
             &mut client_session,
             &responses_metadata,
             &prompt,
             compaction_metadata.phase(),
+            request_setup,
         )
         .await;
+
+        if let Err(error) = &attempt_result
+            && !committed
+            && client_session
+                .recover_last_managed_attempt(error, committed)
+                .await
+        {
+            continue;
+        }
 
         match attempt_result {
             Ok(response) => {
@@ -308,6 +347,12 @@ async fn run_compact_task_inner_impl(
             Err(e) if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded) => {
                 return Err(e);
             }
+            Err(e)
+                if committed && matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) =>
+            {
+                sess.set_total_tokens_full(turn_context.as_ref()).await;
+                return Err(e);
+            }
             Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
                 if turn_input_len > 1 {
                     // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
@@ -319,6 +364,9 @@ async fn run_compact_task_inner_impl(
                     continue;
                 }
                 sess.set_total_tokens_full(turn_context.as_ref()).await;
+                return Err(e);
+            }
+            Err(e) if committed => {
                 return Err(e);
             }
             Err(e) => {
@@ -751,9 +799,10 @@ async fn drain_to_completed(
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
     phase: CompactionPhase,
-) -> CodexResult<CompactionResponse> {
-    let mut stream = client_session
-        .stream(
+    request_setup: CurrentClientSetup,
+) -> AttemptOutcome<CompactionResponse> {
+    let stream_result = client_session
+        .stream_attempt_with_setup(
             prompt,
             turn_context.model_info(),
             &turn_context.session_telemetry,
@@ -768,66 +817,238 @@ async fn drain_to_completed(
             // Rollout tracing currently models remote compaction only; local compaction streams
             // are left untraced until the reducer has a first-class local compaction lifecycle.
             &InferenceTraceContext::disabled(),
+            request_setup,
         )
-        .await?;
+        .await;
+    emit_managed_selection_updates(sess, turn_context, client_session).await;
+    let managed_rate_limit_binding = client_session.managed_rate_limit_binding();
+    sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.clone())
+        .await;
+    if let Err(error) = &stream_result
+        && let CodexErrorDetails::UsageLimitReached(error) = error.details()
+        && let Some(rate_limits) = error.rate_limits.as_ref()
+    {
+        sess.update_rate_limits(
+            turn_context,
+            (**rate_limits).clone(),
+            managed_rate_limit_binding.clone(),
+        )
+        .await;
+    }
+    let stream = match stream_result {
+        Ok(stream) => stream,
+        Err(err) => return AttemptOutcome::uncommitted(Err(err)),
+    };
+    drain_compaction_stream(sess, turn_context, stream, phase, managed_rate_limit_binding).await
+}
+
+async fn drain_compaction_stream(
+    sess: &Session,
+    turn_context: &TurnContext,
+    mut stream: ResponseStream,
+    phase: CompactionPhase,
+    managed_rate_limit_binding: Option<crate::state::ManagedRateLimitBinding>,
+) -> AttemptOutcome<CompactionResponse> {
+    let mut committed = false;
     let mut output = Vec::new();
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
-            return Err(CodexErr::Stream(
-                "stream closed before response.completed".into(),
-            ));
+            return AttemptOutcome::new(
+                Err(CodexErr::Stream(
+                    "stream closed before response.completed".into(),
+                )),
+                committed,
+            );
         };
         match event {
-            Ok(ResponseEvent::OutputItemDone(item)) => {
-                if matches!(phase, CompactionPhase::PostTurn) {
-                    // Commit post-turn summaries only after success; failures must leave both
-                    // the live history and persisted rollout intact.
-                    output.push(item);
-                } else {
-                    sess.record_annotated_conversation_items(
-                        turn_context,
-                        turn_context.model_info(),
-                        vec![ResponseItemEnvelope {
-                            item,
-                            metadata: Some(CodexHarnessMetadata {
-                                compaction_output: true,
-                                ..Default::default()
-                            }),
-                        }],
-                    )
-                    .await;
+            Ok(event) => {
+                committed |= crate::session::turn::response_event_commits_attempt(&event);
+                match event {
+                    ResponseEvent::OutputItemDone(item) => {
+                        if matches!(phase, CompactionPhase::PostTurn) {
+                            // Only replace history after a successful post-turn summary.
+                            output.push(item);
+                        } else {
+                            sess.record_annotated_conversation_items(
+                                turn_context,
+                                turn_context.model_info(),
+                                vec![ResponseItemEnvelope {
+                                    item,
+                                    metadata: Some(CodexHarnessMetadata {
+                                        compaction_output: true,
+                                        ..Default::default()
+                                    }),
+                                }],
+                            )
+                            .await;
+                        }
+                    }
+                    ResponseEvent::ServerReasoningIncluded(included) => {
+                        sess.set_server_reasoning_included(included).await;
+                    }
+                    ResponseEvent::RateLimits(snapshot) => {
+                        sess.update_rate_limits(
+                            turn_context,
+                            snapshot,
+                            managed_rate_limit_binding.clone(),
+                        )
+                        .await;
+                    }
+                    ResponseEvent::Completed {
+                        response_id,
+                        token_usage,
+                        usage_metadata,
+                        ..
+                    } => {
+                        sess.record_observed_response_completed(
+                            turn_context,
+                            &response_id,
+                            token_usage.as_ref(),
+                            usage_metadata.as_ref(),
+                        )
+                        .await;
+                        let result = sess
+                            .update_token_usage_info(turn_context, token_usage.as_ref())
+                            .await
+                            .map(|()| CompactionResponse { response_id, output });
+                        return AttemptOutcome::new(result, committed);
+                    }
+                    _ => continue,
                 }
             }
-            Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
-                sess.set_server_reasoning_included(included).await;
-            }
-            Ok(ResponseEvent::RateLimits(snapshot)) => {
-                sess.update_rate_limits(turn_context, snapshot).await;
-            }
-            Ok(ResponseEvent::Completed {
-                response_id,
-                token_usage,
-                usage_metadata,
-                ..
-            }) => {
-                sess.record_observed_response_completed(
-                    turn_context,
-                    &response_id,
-                    token_usage.as_ref(),
-                    usage_metadata.as_ref(),
-                )
-                .await;
-                sess.update_token_usage_info(turn_context, token_usage.as_ref())
-                    .await?;
-                return Ok(CompactionResponse {
-                    response_id,
-                    output,
-                });
-            }
-            Ok(_) => continue,
-            Err(e) => return Err(e),
+            Err(e) => return AttemptOutcome::new(Err(e), committed),
         }
+    }
+}
+
+#[cfg(test)]
+mod replay_safety_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    fn response_stream(events: Vec<CodexResult<ResponseEvent>>) -> ResponseStream {
+        let (tx_event, rx_event) = mpsc::channel(events.len().max(1));
+        for event in events {
+            tx_event
+                .try_send(event)
+                .expect("event should fit in compact test stream");
+        }
+        drop(tx_event);
+        ResponseStream {
+            rx_event,
+            consumer_dropped: CancellationToken::new(),
+            interrupt: None,
+        }
+    }
+
+    fn compact_output(id: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: Some(id.to_string()),
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: "partial summary".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    }
+
+    fn completed() -> ResponseEvent {
+        ResponseEvent::Completed {
+            response_id: "completed".to_string(),
+            token_usage: None,
+            usage_metadata: None,
+            end_turn: Some(true),
+        }
+    }
+
+    async fn run_retryable_streams(
+        session: &Session,
+        turn_context: &TurnContext,
+        streams: Vec<ResponseStream>,
+    ) -> (CodexResult<String>, usize) {
+        let mut streams = VecDeque::from(streams);
+        let mut attempts = 0;
+        loop {
+            let stream = streams
+                .pop_front()
+                .expect("test retry loop exhausted its response streams");
+            attempts += 1;
+            let outcome = drain_compaction_stream(
+                session,
+                turn_context,
+                stream,
+                CompactionPhase::MidTurn,
+                /*managed_rate_limit_binding*/ None,
+            )
+            .await;
+            match outcome.result {
+                Ok(response) => return (Ok(response.response_id), attempts),
+                Err(err) if outcome.committed || !err.is_retryable() => {
+                    return (Err(err), attempts);
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+
+    async fn history_item_count(session: &Session, expected_id: &str) -> usize {
+        let history = session.clone_history().await;
+        history
+            .raw_items()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ResponseItem::Message { id: Some(id), .. } if id == expected_id
+                )
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn compact_partial_history_failure_does_not_start_second_attempt() {
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let first = response_stream(vec![
+            Ok(ResponseEvent::OutputItemDone(compact_output(
+                "partial-compaction",
+            ))),
+            Err(CodexErr::Stream("retryable committed failure".to_string())),
+        ]);
+        let should_not_run = response_stream(vec![Ok(completed())]);
+
+        let (result, attempts) =
+            run_retryable_streams(&session, &turn_context, vec![first, should_not_run]).await;
+
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+        assert_eq!(history_item_count(&session, "partial-compaction").await, 1);
+    }
+
+    #[tokio::test]
+    async fn compact_pre_output_failure_retries_and_succeeds_once() {
+        let (session, turn_context) = crate::session::tests::make_session_and_context().await;
+        let first = response_stream(vec![Err(CodexErr::Stream(
+            "retryable uncommitted failure".to_string(),
+        ))]);
+        let second = response_stream(vec![
+            Ok(ResponseEvent::OutputItemDone(compact_output(
+                "successful-compaction",
+            ))),
+            Ok(completed()),
+        ]);
+
+        let (result, attempts) =
+            run_retryable_streams(&session, &turn_context, vec![first, second]).await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            history_item_count(&session, "successful-compaction").await,
+            1
+        );
     }
 }
 

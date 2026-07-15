@@ -1181,6 +1181,9 @@ mod tests {
                     codex_protocol::protocol::TokenCountEvent {
                         info: None,
                         rate_limits: None,
+                        managed_account_id: None,
+                        account_state_revision: None,
+                        managed_transport_binding: None,
                     },
                 )),
                 RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
@@ -1307,6 +1310,9 @@ mod tests {
                 codex_protocol::protocol::TokenCountEvent {
                     info: None,
                     rate_limits: None,
+                    managed_account_id: None,
+                    account_state_revision: None,
+                    managed_transport_binding: None,
                 },
             ))])
             .await
