@@ -1,6 +1,10 @@
+use sha1::Digest;
+use sha1::Sha1;
 use std::fmt;
 use std::sync::Arc;
 
+use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
 use codex_mcp::McpConfig;
 use codex_mcp::McpConnectionManager;
 use codex_mcp::McpRuntimeContext;
@@ -13,6 +17,23 @@ pub struct McpRuntimeSnapshot {
     manager: Arc<McpConnectionManager>,
     runtime_context: McpRuntimeContext,
     ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
+    transport_auth_binding: Option<TransportAuthBinding>,
+    credential_revision: Option<u64>,
+    effective_auth_fingerprint: Option<EffectiveAuthFingerprint>,
+    effective_auth: Option<CodexAuth>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EffectiveAuthFingerprint([u8; 20]);
+
+impl EffectiveAuthFingerprint {
+    pub(crate) fn for_auth(auth: Option<&CodexAuth>) -> Option<Self> {
+        let CodexAuth::AgentIdentity(auth) = auth? else {
+            return None;
+        };
+        let encoded = serde_json::to_vec(auth.record()).ok()?;
+        Some(Self(Sha1::digest(encoded).into()))
+    }
 }
 
 impl McpRuntimeSnapshot {
@@ -22,13 +43,22 @@ impl McpRuntimeSnapshot {
         manager: Arc<McpConnectionManager>,
         runtime_context: McpRuntimeContext,
         ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
+        transport_auth_binding: Option<TransportAuthBinding>,
+        credential_revision: Option<u64>,
+        effective_auth: Option<CodexAuth>,
     ) -> Self {
+        let effective_auth_fingerprint =
+            EffectiveAuthFingerprint::for_auth(effective_auth.as_ref());
         Self {
             config,
             plugins_available,
             manager,
             runtime_context,
             ready_selected_capability_roots,
+            transport_auth_binding,
+            credential_revision,
+            effective_auth_fingerprint,
+            effective_auth,
         }
     }
 
@@ -44,7 +74,7 @@ impl McpRuntimeSnapshot {
         self.manager.as_ref()
     }
 
-    pub(crate) fn manager_arc(&self) -> Arc<McpConnectionManager> {
+    pub fn manager_arc(&self) -> Arc<McpConnectionManager> {
         Arc::clone(&self.manager)
     }
 
@@ -54,6 +84,43 @@ impl McpRuntimeSnapshot {
 
     pub(crate) fn ready_selected_capability_roots(&self) -> &[SelectedCapabilityRoot] {
         &self.ready_selected_capability_roots
+    }
+    pub(crate) fn transport_auth_binding(&self) -> Option<&TransportAuthBinding> {
+        self.transport_auth_binding.as_ref()
+    }
+    pub(crate) fn credential_revision(&self) -> Option<u64> {
+        self.credential_revision
+    }
+    pub(crate) fn effective_auth_fingerprint(&self) -> Option<EffectiveAuthFingerprint> {
+        self.effective_auth_fingerprint
+    }
+    pub fn effective_auth(&self) -> Option<&CodexAuth> {
+        self.effective_auth.as_ref()
+    }
+    pub fn connector_directory_cache_key(
+        &self,
+        chatgpt_base_url: impl Into<String>,
+        auth: Option<&codex_login::CodexAuth>,
+    ) -> Option<codex_connectors::ConnectorDirectoryCacheKey> {
+        let transport_auth_binding = self.transport_auth_binding.clone()?;
+        if self.credential_revision.is_none() && auth.is_none() {
+            return None;
+        }
+        Some(
+            codex_connectors::ConnectorDirectoryCacheKey::from_runtime_binding(
+                chatgpt_base_url.into(),
+                transport_auth_binding,
+                self.credential_revision,
+                auth.is_some_and(codex_login::CodexAuth::is_workspace_account),
+            ),
+        )
+    }
+    pub fn codex_apps_tools_cache_key(&self) -> Option<codex_mcp::CodexAppsToolsCacheKey> {
+        Some(codex_mcp::CodexAppsToolsCacheKey::from_transport_binding(
+            self.transport_auth_binding.clone()?,
+            self.credential_revision?,
+            self.config.chatgpt_base_url.clone(),
+        ))
     }
 
     #[cfg(test)]
@@ -98,6 +165,9 @@ impl McpRuntimeSnapshot {
             Arc::new(manager),
             runtime_context,
             Vec::new(),
+            /*transport_auth_binding*/ None,
+            /*credential_revision*/ None,
+            /*effective_auth*/ None,
         ))
     }
 }

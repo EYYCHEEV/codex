@@ -30,6 +30,8 @@ use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ExtensionRegistry;
 use codex_hooks::Hooks;
 use codex_login::AuthManager;
+use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
 use codex_mcp::McpConfig;
 use codex_mcp::McpConnectionManager;
 use codex_mcp::McpRuntime;
@@ -111,6 +113,9 @@ impl SessionServices {
         runtime_context: McpRuntimeContext,
         ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
         connections: McpConnectionManager,
+        transport_auth_binding: Option<TransportAuthBinding>,
+        credential_revision: Option<u64>,
+        effective_auth: Option<CodexAuth>,
     ) -> Result<()> {
         let runtime = self.publish_mcp_runtime(
             config,
@@ -118,6 +123,9 @@ impl SessionServices {
             runtime_context,
             ready_selected_capability_roots,
             connections,
+            transport_auth_binding,
+            credential_revision,
+            effective_auth,
         );
         runtime.manager().validate_required_servers().await
     }
@@ -129,6 +137,9 @@ impl SessionServices {
         runtime_context: McpRuntimeContext,
         ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
         connections: McpConnectionManager,
+        transport_auth_binding: Option<TransportAuthBinding>,
+        credential_revision: Option<u64>,
+        effective_auth: Option<CodexAuth>,
     ) -> Arc<McpRuntimeSnapshot> {
         let connections = self.mcp_runtime.replace(connections);
         let runtime = Arc::new(McpRuntimeSnapshot::new(
@@ -137,9 +148,16 @@ impl SessionServices {
             connections,
             runtime_context,
             ready_selected_capability_roots,
+            transport_auth_binding,
+            credential_revision,
+            effective_auth,
         ));
         self.mcp_runtime_snapshot.store(Some(Arc::clone(&runtime)));
         runtime
+    }
+
+    pub(crate) fn try_latest_mcp_runtime(&self) -> Option<Arc<McpRuntimeSnapshot>> {
+        self.mcp_runtime_snapshot.load_full()
     }
 
     pub(crate) fn latest_mcp_runtime(&self) -> Arc<McpRuntimeSnapshot> {

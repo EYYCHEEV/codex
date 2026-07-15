@@ -191,9 +191,12 @@ impl ChatWidget {
                     self.on_shutdown_complete();
                 }
             }
+            ServerNotification::AccountUpdated(_) => {}
+            ServerNotification::AccountRateLimitsUpdated(_) => {}
+            ServerNotification::AccountPoolUpdated(_) => {}
+            ServerNotification::AccountSelectionUpdated(_) => {}
+            ServerNotification::AccountUsageUpdated(_) => {}
             ServerNotification::ServerRequestResolved(_)
-            | ServerNotification::AccountUpdated(_)
-            | ServerNotification::AccountRateLimitsUpdated(_)
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)

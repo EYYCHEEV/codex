@@ -118,6 +118,9 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::ImageGenerationEnd(_)
         | EventMsg::SubAgentActivity(_) => matches!(history_mode, ThreadHistoryMode::Legacy),
 
+        // Persist only the bounded close diagnostic; ordinary reconnect notices stay transient.
+        EventMsg::StreamError(event) => event.websocket_close_diagnostic().is_some(),
+
         // Transient, non-durable events.
         EventMsg::Error(_)
         | EventMsg::GuardianAssessment(_)
@@ -138,6 +141,7 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::RealtimeConversationClosed(_)
         | EventMsg::SafetyBuffering(_)
         | EventMsg::ModelReroute(_)
+        | EventMsg::ManagedAccountSelected(_)
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::AgentReasoningSectionBreak(_)
@@ -155,7 +159,6 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::RequestUserInput(_)
         | EventMsg::ElicitationRequest(_)
         | EventMsg::ApplyPatchApprovalRequest(_)
-        | EventMsg::StreamError(_)
         | EventMsg::PatchApplyBegin(_)
         | EventMsg::PatchApplyUpdated(_)
         | EventMsg::TurnDiff(_)
@@ -179,5 +182,70 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::CollabWaitingBegin(_)
         | EventMsg::CollabCloseBegin(_)
         | EventMsg::CollabResumeBegin(_) => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::protocol::ResponsesWebsocketCloseDiagnostic;
+    use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
+    use codex_protocol::protocol::StreamErrorEvent;
+
+    fn stream_error(
+        websocket_close_diagnostic: Option<ResponsesWebsocketCloseDiagnostic>,
+    ) -> EventMsg {
+        let event = StreamErrorEvent {
+            message: "stream error".to_string(),
+            codex_error_info: None,
+            additional_details: None,
+        };
+        EventMsg::StreamError(match websocket_close_diagnostic {
+            Some(diagnostic) => event.with_websocket_close_diagnostic(diagnostic),
+            None => event,
+        })
+    }
+
+    #[test]
+    fn stream_error_persists_only_with_websocket_close_diagnostic() {
+        assert!(!should_persist_event_msg(
+            &stream_error(None),
+            ThreadHistoryMode::Legacy,
+        ));
+        let mut ordinary_event = stream_error(None);
+        let EventMsg::StreamError(ordinary_details) = &mut ordinary_event else {
+            unreachable!();
+        };
+        ordinary_details.additional_details = Some("retrying ordinary stream failure".to_string());
+        assert!(!should_persist_event_msg(
+            &ordinary_event,
+            ThreadHistoryMode::Legacy,
+        ));
+        assert!(should_persist_event_msg(
+            &stream_error(Some(ResponsesWebsocketCloseDiagnostic {
+                close_code: Some(4001),
+                close_reason: Some("maintenance".to_string()),
+                close_reason_redacted: false,
+                thread_id: "thread".to_string(),
+                turn_id: "turn".to_string(),
+                session_id: "session".to_string(),
+                model: "model".to_string(),
+                account_fingerprint: Some("acct-deadbeef".to_string()),
+                credential_revision: Some(1),
+                account_state_revision: Some(2),
+                pool_revision: Some(3),
+                selection_revision: Some(4),
+                route_generation: Some(5),
+                handshake_binding_fingerprint: Some("bind-deadbeef".to_string()),
+                request_binding_fingerprint: Some("bind-deadbeef".to_string()),
+                binding_matched: Some(true),
+                connection_reused: false,
+                output_committed: true,
+                attempt_number: 1,
+                max_retries: 1,
+                recovery_decision: ResponsesWebsocketCloseRecovery::NoReplayAfterOutput,
+            })),
+            ThreadHistoryMode::Legacy,
+        ));
     }
 }

@@ -1,4 +1,5 @@
 mod access_token;
+mod account_pool;
 mod agent_identity;
 mod auth_headers;
 mod bedrock_api_key;

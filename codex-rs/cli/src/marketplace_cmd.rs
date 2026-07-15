@@ -212,7 +212,7 @@ async fn run_list(overrides: Vec<(String, toml::Value)>, args: ListMarketplaceAr
         .await
         .context("failed to load configuration")?;
     let manager = PluginsManager::new(config.codex_home.to_path_buf());
-    manager.set_auth_mode(load_cli_auth_mode(&config).await);
+    manager.set_auth_mode(load_cli_auth_mode(&config).await?);
     let plugins_input = config.plugins_config_input();
     let marketplace_listing = manager
         .discover_marketplaces_for_config(&plugins_input, &[])

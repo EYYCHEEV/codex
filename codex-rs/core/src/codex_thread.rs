@@ -191,6 +191,10 @@ pub struct CodexThread {
     rollout_path: Option<PathBuf>,
     out_of_band_elicitations: Mutex<OutOfBandElicitations>,
 }
+pub struct ThreadRuntimeSnapshot {
+    pub effective_auth: Option<codex_login::CodexAuth>,
+    pub mcp: Arc<crate::session::McpRuntimeSnapshot>,
+}
 
 #[derive(Default)]
 struct OutOfBandElicitations {
@@ -638,14 +642,35 @@ impl CodexThread {
         self.session.runtime_mcp_config(config).await
     }
 
-    /// Returns the exact MCP config, environment bindings, and manager most recently published.
-    pub async fn current_mcp_runtime(&self) -> Arc<crate::session::McpRuntimeSnapshot> {
+    /// Returns one atomic provider/auth/MCP snapshot for this thread's default turn.
+    pub async fn current_runtime_snapshot(
+        &self,
+    ) -> codex_protocol::error::Result<ThreadRuntimeSnapshot> {
         let turn_context = self.session.new_default_turn().await;
-        self.session
-            .capture_step_context(turn_context)
-            .await
-            .mcp
-            .clone()
+        let setup = self
+            .session
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info.slug),
+                Some(&self.session.session_id().to_string()),
+            )
+            .await?;
+        let step = self
+            .session
+            .capture_step_context_for_setup(turn_context, &setup)
+            .await;
+        Ok(ThreadRuntimeSnapshot {
+            effective_auth: setup.effective_auth,
+            mcp: Arc::clone(&step.mcp),
+        })
+    }
+
+    /// Returns the exact MCP config, environment bindings, and manager selected for this thread.
+    pub async fn current_mcp_runtime(
+        &self,
+    ) -> codex_protocol::error::Result<Arc<crate::session::McpRuntimeSnapshot>> {
+        Ok(self.current_runtime_snapshot().await?.mcp)
     }
 
     pub fn multi_agent_version(&self) -> Option<MultiAgentVersion> {
@@ -679,7 +704,7 @@ impl CodexThread {
     ) -> anyhow::Result<serde_json::Value> {
         let result = self
             .current_mcp_runtime()
-            .await
+            .await?
             .manager_arc()
             .read_resource(server, ReadResourceRequestParams::new(uri))
             .await?;
@@ -695,7 +720,7 @@ impl CodexThread {
         meta: Option<serde_json::Value>,
     ) -> anyhow::Result<CallToolResult> {
         self.current_mcp_runtime()
-            .await
+            .await?
             .manager_arc()
             .call_tool(server, tool, arguments, meta)
             .await

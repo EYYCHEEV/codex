@@ -487,6 +487,23 @@ pub(super) async fn spawn_websocket_server_with_args(
     listen_url: &str,
     extra_args: &[String],
 ) -> Result<(Child, SocketAddr)> {
+    spawn_websocket_server_with_args_and_env(codex_home, listen_url, extra_args, &[]).await
+}
+
+pub(super) async fn spawn_websocket_server_with_env(
+    codex_home: &Path,
+    env_overrides: &[(&str, &str)],
+) -> Result<(Child, SocketAddr)> {
+    spawn_websocket_server_with_args_and_env(codex_home, "ws://127.0.0.1:0", &[], env_overrides)
+        .await
+}
+
+async fn spawn_websocket_server_with_args_and_env(
+    codex_home: &Path,
+    listen_url: &str,
+    extra_args: &[String],
+    env_overrides: &[(&str, &str)],
+) -> Result<(Child, SocketAddr)> {
     let program = codex_utils_cargo_bin::cargo_bin("codex-app-server")
         .context("should find app-server binary")?;
     let mut cmd = Command::new(program);
@@ -499,6 +516,7 @@ pub(super) async fn spawn_websocket_server_with_args(
         .stderr(Stdio::piped())
         .env("CODEX_HOME", codex_home)
         .env("RUST_LOG", "warn");
+    cmd.envs(env_overrides.iter().copied());
     let mut process = cmd
         .kill_on_drop(true)
         .spawn()

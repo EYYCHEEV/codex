@@ -6,6 +6,7 @@ use crate::session::McpRuntimeSnapshot;
 use crate::session::turn_context::TurnContext;
 use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
 use codex_exec_server::ResolvedSelectedCapabilityRoot;
+use codex_login::CodexAuth;
 use codex_mcp::ToolInfo;
 use tokio::sync::OnceCell;
 
@@ -20,6 +21,8 @@ pub(crate) struct StepContext {
     pub(crate) executor_capability_discovery: Option<Arc<ExecutorCapabilityDiscoverySnapshot>>,
     /// The exact MCP config and manager used to advertise and execute tools for this step.
     pub(crate) mcp: Arc<McpRuntimeSnapshot>,
+    /// Effective authentication selected atomically with this request step.
+    pub(crate) effective_auth: Option<CodexAuth>,
     /// The fixed MCP tool list used for this exact sampling request.
     mcp_tool_snapshot: OnceCell<Vec<ToolInfo>>,
     /// The canonical AGENTS.md value observed with this environment snapshot.
@@ -33,6 +36,7 @@ impl StepContext {
         selected_capability_roots: Vec<ResolvedSelectedCapabilityRoot>,
         executor_capability_discovery: Option<Arc<ExecutorCapabilityDiscoverySnapshot>>,
         mcp: Arc<McpRuntimeSnapshot>,
+        effective_auth: Option<CodexAuth>,
         loaded_agents_md: Option<Arc<LoadedAgentsMd>>,
     ) -> Self {
         Self {
@@ -41,6 +45,7 @@ impl StepContext {
             selected_capability_roots,
             executor_capability_discovery,
             mcp,
+            effective_auth,
             mcp_tool_snapshot: OnceCell::new(),
             loaded_agents_md,
         }

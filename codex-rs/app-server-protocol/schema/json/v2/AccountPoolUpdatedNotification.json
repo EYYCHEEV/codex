@@ -1,0 +1,486 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "AccountTokenUsageSummary": {
+      "properties": {
+        "currentStreakDays": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lifetimeTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "longestRunningTurnSec": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "longestStreakDays": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "peakDailyTokens": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CreditsSnapshot": {
+      "properties": {
+        "balance": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hasCredits": {
+          "type": "boolean"
+        },
+        "unlimited": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hasCredits",
+        "unlimited"
+      ],
+      "type": "object"
+    },
+    "ManagedChatgptAccountBlock": {
+      "description": "An active account block or cooldown.",
+      "properties": {
+        "blockedUntil": {
+          "description": "Unix timestamp in seconds when the cooldown expires. `null` means the block has no known automatic expiry.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Stable machine-readable classification supplied by the account-pool owner.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "type": "object"
+    },
+    "ManagedChatgptAccountRefreshStatus": {
+      "description": "Outcome of the most recent managed OAuth token refresh.\n\nThis is intentionally separate from selection eligibility, account blocks, and usage freshness. Failure variants contain only stable, non-secret metadata and never carry backend error text.",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "healthy"
+              ],
+              "title": "HealthyManagedChatgptAccountRefreshStatusType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "HealthyManagedChatgptAccountRefreshStatus",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "observedAt": {
+              "description": "Unix timestamp in seconds when the refresh outcome was observed.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "transientUnavailable"
+              ],
+              "title": "TransientUnavailableManagedChatgptAccountRefreshStatusType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "observedAt",
+            "type"
+          ],
+          "title": "TransientUnavailableManagedChatgptAccountRefreshStatus",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "observedAt": {
+              "description": "Unix timestamp in seconds when the refresh outcome was observed.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "reasonCode": {
+              "description": "Stable machine-readable classification; never raw backend text.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "reloginRequired"
+              ],
+              "title": "ReloginRequiredManagedChatgptAccountRefreshStatusType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "observedAt",
+            "reasonCode",
+            "type"
+          ],
+          "title": "ReloginRequiredManagedChatgptAccountRefreshStatus",
+          "type": "object"
+        }
+      ]
+    },
+    "ManagedChatgptAccountUsage": {
+      "description": "Account-keyed usage data. Rate-limit entries carry their own `limitId`, so additional metered limits cannot be mistaken for the singular compatibility projection returned by `account/rateLimits/read`.",
+      "properties": {
+        "observedAt": {
+          "description": "Unix timestamp in seconds for the retained observation.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rateLimits": {
+          "items": {
+            "$ref": "#/definitions/RateLimitSnapshot"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/definitions/ManagedChatgptAccountUsageState"
+        },
+        "tokenUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccountTokenUsageSummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unavailableObservedAt": {
+          "description": "Unix timestamp in seconds for the failed refresh represented by `unavailable_reason`. This is independent from the retained successful observation timestamp.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unavailableReason": {
+          "description": "Diagnostic text for `unavailable`, or `null` for other states.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "rateLimits",
+        "state"
+      ],
+      "type": "object"
+    },
+    "ManagedChatgptAccountUsageState": {
+      "description": "Freshness and availability of a managed account's usage observation.",
+      "oneOf": [
+        {
+          "description": "No usage observation has been recorded.",
+          "enum": [
+            "unknown"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The observation is current.",
+          "enum": [
+            "fresh"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The last known observation is older than the freshness window.",
+          "enum": [
+            "stale"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A refresh was attempted but usage could not be obtained.",
+          "enum": [
+            "unavailable"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ManagedChatgptAccountView": {
+      "description": "Public managed-OAuth account view.\n\n`managed_account_id` is the stable identity used to key every other field in this row. Consumers must not join account data by array position, email, or the optional raw ChatGPT account ID.",
+      "properties": {
+        "accountRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "block": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ManagedChatgptAccountBlock"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "chatgptAccountId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialRevision": {
+          "description": "Monotonic revision of the credential generation backing this account.\n\nUnlike `account_revision`, status and usage observations do not change it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "eligibilityReason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "email": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "managedAccountId": {
+          "type": "string"
+        },
+        "planType": {
+          "$ref": "#/definitions/PlanType"
+        },
+        "refreshStatus": {
+          "$ref": "#/definitions/ManagedChatgptAccountRefreshStatus"
+        },
+        "usage": {
+          "$ref": "#/definitions/ManagedChatgptAccountUsage"
+        }
+      },
+      "required": [
+        "accountRevision",
+        "credentialRevision",
+        "eligible",
+        "managedAccountId",
+        "planType",
+        "refreshStatus",
+        "usage"
+      ],
+      "type": "object"
+    },
+    "PlanType": {
+      "enum": [
+        "free",
+        "go",
+        "plus",
+        "pro",
+        "prolite",
+        "team",
+        "self_serve_business_usage_based",
+        "business",
+        "enterprise_cbp_usage_based",
+        "enterprise",
+        "edu",
+        "unknown"
+      ],
+      "type": "string"
+    },
+    "RateLimitReachedType": {
+      "enum": [
+        "rate_limit_reached",
+        "workspace_owner_credits_depleted",
+        "workspace_member_credits_depleted",
+        "workspace_owner_usage_limit_reached",
+        "workspace_member_usage_limit_reached"
+      ],
+      "type": "string"
+    },
+    "RateLimitSnapshot": {
+      "properties": {
+        "credits": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CreditsSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "individualLimit": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SpendControlLimitSnapshot"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "limitId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limitName": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "planType": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PlanType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "primary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rateLimitReachedType": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitReachedType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "secondary": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RateLimitWindow"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RateLimitWindow": {
+      "properties": {
+        "resetsAt": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usedPercent": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "windowDurationMins": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "usedPercent"
+      ],
+      "type": "object"
+    },
+    "SpendControlLimitSnapshot": {
+      "properties": {
+        "limit": {
+          "type": "string"
+        },
+        "remainingPercent": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "resetsAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "used": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "limit",
+        "remainingPercent",
+        "resetsAt",
+        "used"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "accounts": {
+      "items": {
+        "$ref": "#/definitions/ManagedChatgptAccountView"
+      },
+      "type": "array"
+    },
+    "poolRevision": {
+      "description": "Monotonic revision of global account-pool membership and account data.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "accounts",
+    "poolRevision"
+  ],
+  "title": "AccountPoolUpdatedNotification",
+  "type": "object"
+}

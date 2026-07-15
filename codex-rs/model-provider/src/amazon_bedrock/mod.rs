@@ -24,11 +24,14 @@ use codex_protocol::openai_models::ModelsResponse;
 
 use crate::auth::auth_manager_for_provider;
 use crate::auth::resolve_provider_auth as resolve_configured_provider_auth;
+use crate::ProviderAuthScope;
 use crate::provider::ModelProvider;
 use crate::provider::ModelProviderFuture;
 use crate::provider::ProviderAccountResult;
 use crate::provider::ProviderAccountState;
 use crate::provider::ProviderCapabilities;
+use crate::provider::ProviderRequestSetup;
+use crate::provider::transport_binding_for_auth;
 use auth::resolve_provider_auth as resolve_bedrock_provider_auth;
 pub(crate) use catalog::static_model_catalog;
 use catalog::with_default_only_service_tier;
@@ -175,6 +178,33 @@ impl ModelProvider for AmazonBedrockModelProvider {
 
     fn api_auth(&self) -> ModelProviderFuture<'_, Result<SharedAuthProvider>> {
         Box::pin(AmazonBedrockModelProvider::api_auth(self))
+    }
+
+    fn request_setup(
+        &self,
+        _scope: ProviderAuthScope,
+    ) -> ModelProviderFuture<'_, Result<ProviderRequestSetup>> {
+        Box::pin(async move {
+            let managed_auth = self.managed_auth();
+            let effective_auth = managed_auth.clone().map(CodexAuth::BedrockApiKey);
+            let mut api_provider_info = self.info.clone();
+            api_provider_info.base_url = self.runtime_base_url().await?;
+            let api_provider = api_provider_info.to_api_provider(/*auth_mode*/ None)?;
+            let api_auth = resolve_bedrock_provider_auth(managed_auth.as_ref(), &self.aws).await?;
+            let transport_auth_binding = transport_binding_for_auth(effective_auth.as_ref());
+            Ok(ProviderRequestSetup {
+                effective_auth,
+                api_provider,
+                api_auth,
+                agent_identity_telemetry: None,
+                managed_snapshot: None,
+                managed_id: None,
+                credential_revision: None,
+                account_state_revision: None,
+                selection_revision: None,
+                transport_auth_binding,
+            })
+        })
     }
 
     fn models_manager(

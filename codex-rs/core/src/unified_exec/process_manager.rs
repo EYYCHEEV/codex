@@ -811,7 +811,7 @@ impl UnifiedExecProcessManager {
                         entry.cwd,
                         Some(entry.process_id.to_string()),
                         entry.transcript,
-                        text.clone(),
+                        String::new(),
                         exit_code.unwrap_or(-1),
                         Instant::now().saturating_duration_since(entry.started_at),
                     )

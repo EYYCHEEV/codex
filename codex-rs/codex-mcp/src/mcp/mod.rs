@@ -26,9 +26,7 @@ use codex_config::McpServerTransportConfig;
 use codex_config::types::AppToolApproval;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
-use codex_connectors::ConnectorRuntimeManager;
 use codex_connectors::ConnectorSnapshot;
-use codex_connectors::connector_runtime_context_key;
 use codex_login::CodexAuth;
 use codex_model_provider::CHATGPT_CODEX_BASE_URL;
 use codex_protocol::mcp::McpServerInfo;
@@ -45,10 +43,11 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::ResolvedMcpCatalog;
+use crate::CodexAppsToolsCache;
+use crate::CodexAppsToolsCacheKey;
 use crate::connection_manager::McpConnectionManager;
 use crate::runtime::McpRuntimeContext;
 use crate::server::EffectiveMcpServer;
-use crate::tools::ToolInfo;
 
 pub const CODEX_APPS_MCP_SERVER_NAME: &str = "codex_apps";
 const DEFAULT_CODEX_APPS_MCP_PRODUCT_SKU: &str = "codex";
@@ -304,8 +303,9 @@ pub async fn read_mcp_resource(
     config: &McpConfig,
     auth: Option<&CodexAuth>,
     runtime_context: McpRuntimeContext,
-    codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
+    codex_apps_tools_cache: CodexAppsToolsCache,
     tool_catalog_cache: crate::McpToolCatalogCache,
+    codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
     server: &str,
     uri: &str,
 ) -> anyhow::Result<ReadResourceResult> {
@@ -325,7 +325,7 @@ pub async fn read_mcp_resource(
         config.codex_home.clone(),
         codex_apps_tools_cache,
         tool_catalog_cache,
-        connector_runtime_context_key(auth),
+        codex_apps_tools_cache_key,
         host_owned_codex_apps_enabled(config, auth),
         config.prefix_mcp_tool_names,
         config.client_elicitation_capability.clone(),
@@ -361,8 +361,9 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     auth: Option<&CodexAuth>,
     submit_id: String,
     runtime_context: McpRuntimeContext,
-    codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
+    codex_apps_tools_cache: CodexAppsToolsCache,
     tool_catalog_cache: crate::McpToolCatalogCache,
+    codex_apps_tools_cache_key: CodexAppsToolsCacheKey,
     detail: McpSnapshotDetail,
 ) -> McpServerStatusSnapshot {
     let mcp_servers = effective_mcp_servers(config, auth);
@@ -403,7 +404,7 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
         config.codex_home.clone(),
         codex_apps_tools_cache,
         tool_catalog_cache,
-        connector_runtime_context_key(auth),
+        codex_apps_tools_cache_key,
         host_owned_codex_apps_enabled(config, auth),
         config.prefix_mcp_tool_names,
         config.client_elicitation_capability.clone(),
@@ -644,9 +645,39 @@ fn convert_mcp_resource_templates(
         .collect::<HashMap<_, _>>()
 }
 
+/// Collects status from an already-selected MCP manager snapshot.
+///
+/// Server selection and auth status projection are derived from the supplied
+/// config and auth, while all live MCP data is read from `mcp_connection_manager`.
+pub async fn collect_mcp_server_status_snapshot_from_existing_manager(
+    mcp_connection_manager: &McpConnectionManager,
+    config: &McpConfig,
+    auth: Option<&CodexAuth>,
+    runtime_context: &McpRuntimeContext,
+    detail: McpSnapshotDetail,
+) -> McpServerStatusSnapshot {
+    let mcp_servers = effective_mcp_servers(config, auth);
+    let auth_status_entries = compute_auth_statuses(
+        mcp_servers.iter(),
+        config.mcp_oauth_credentials_store_mode,
+        config.auth_keyring_backend_kind,
+        auth,
+        runtime_context,
+    )
+    .await;
+    let server_names = mcp_servers.keys().cloned().collect();
+    collect_mcp_server_status_snapshot_from_manager(
+        mcp_connection_manager,
+        auth_status_entries,
+        server_names,
+        detail,
+    )
+    .await
+}
+
 async fn collect_mcp_server_status_snapshot_from_manager(
     mcp_connection_manager: &McpConnectionManager,
-    auth_status_entries: HashMap<String, crate::mcp::auth::McpAuthStatusEntry>,
+    auth_status_entries: HashMap<String, McpAuthStatusEntry>,
     server_names: Vec<String>,
     detail: McpSnapshotDetail,
 ) -> McpServerStatusSnapshot {

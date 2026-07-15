@@ -1,3 +1,4 @@
+use super::mcp_runtime::EffectiveAuthFingerprint;
 use super::*;
 use crate::mcp::McpRuntimeProjection;
 use codex_exec_server::ExecutorCapabilityDiscoveryCache;
@@ -7,6 +8,7 @@ use codex_exec_server::ResolvedSelectedCapabilityRoot;
 use codex_mcp::ElicitationReviewRequest;
 use codex_mcp::ElicitationReviewer;
 use codex_mcp::ElicitationReviewerHandle;
+use codex_mcp::codex_apps_tools_cache_key;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -39,6 +41,13 @@ enum GuardianElicitationReview {
     NotRequested,
     Decline(&'static str),
     ApprovalRequest(Box<crate::guardian::GuardianApprovalRequest>),
+}
+
+#[derive(Clone)]
+pub(super) struct McpAuthSnapshot {
+    pub(super) auth: Option<CodexAuth>,
+    pub(super) transport_auth_binding: Option<TransportAuthBinding>,
+    pub(super) credential_revision: Option<u64>,
 }
 
 struct GuardianMcpElicitationReviewer {
@@ -113,6 +122,74 @@ impl Session {
         codex_mcp::configured_mcp_servers(&self.runtime_mcp_config(config).await)
     }
 
+    fn bind_external_auth_revision(
+        &self,
+        auth: &CodexAuth,
+        mut binding: TransportAuthBinding,
+    ) -> TransportAuthBinding {
+        if auth.is_external_chatgpt_tokens() {
+            let revision = self.services.auth_manager.auth_change_receiver();
+            binding.route_generation = revision.borrow().saturating_add(1);
+        }
+        binding
+    }
+
+    pub(super) async fn capture_mcp_auth_snapshot(
+        &self,
+        turn_context: &TurnContext,
+        request_setup: Option<&CurrentClientSetup>,
+    ) -> McpAuthSnapshot {
+        if let Some(setup) = request_setup {
+            let auth = setup.effective_auth.clone();
+            let transport_auth_binding = match auth.as_ref() {
+                Some(auth) => {
+                    self.bind_external_auth_revision(auth, setup.transport_auth_binding.clone())
+                }
+                None => setup.transport_auth_binding.clone(),
+            };
+            return McpAuthSnapshot {
+                auth,
+                transport_auth_binding: Some(transport_auth_binding),
+                credential_revision: setup.credential_revision,
+            };
+        }
+
+        let selection_scope = codex_login::ManagedChatgptSelectionScope {
+            thread_id: Some(self.thread_id().to_string()),
+            session_id: Some(self.session_id().to_string()),
+            model: Some(turn_context.model_info.slug.clone()),
+        };
+        match self
+            .services
+            .auth_manager
+            .managed_chatgpt_auth_snapshot(&selection_scope)
+            .await
+        {
+            Ok(Some(snapshot)) => {
+                return McpAuthSnapshot {
+                    auth: Some(snapshot.auth),
+                    transport_auth_binding: Some(snapshot.transport),
+                    credential_revision: Some(snapshot.account_revision),
+                };
+            }
+            Ok(None) => {}
+            Err(err) => warn!("failed to resolve managed MCP auth snapshot: {err}"),
+        }
+
+        let auth = self.services.auth_manager.auth().await;
+        let transport_auth_binding = auth.as_ref().map(|auth| {
+            self.bind_external_auth_revision(
+                auth,
+                TransportAuthBinding::for_nonmanaged_auth(Some(auth)),
+            )
+        });
+        McpAuthSnapshot {
+            transport_auth_binding,
+            credential_revision: None,
+            auth,
+        }
+    }
+
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "MCP runtime comparison and publication must remain serialized"
@@ -124,20 +201,64 @@ impl Session {
         environments: &TurnEnvironmentSnapshot,
         selected_capability_roots: &[ResolvedSelectedCapabilityRoot],
         executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
+        request_setup: Option<&CurrentClientSetup>,
     ) -> Arc<McpRuntimeSnapshot> {
         let ready_selected_capability_roots =
             Self::ready_selected_capability_roots(selected_capability_roots);
         let available_environment_ids =
             Self::available_selected_environment_ids(selected_capability_roots);
-        let current = self.services.latest_mcp_runtime();
-        if current.ready_selected_capability_roots() == ready_selected_capability_roots {
-            return current;
+        let auth_snapshot = self
+            .capture_mcp_auth_snapshot(turn_context, request_setup)
+            .await;
+        let current_transport_auth_binding = auth_snapshot.transport_auth_binding.clone();
+        let current_credential_revision = auth_snapshot.credential_revision;
+        let current_effective_auth_fingerprint =
+            EffectiveAuthFingerprint::for_auth(auth_snapshot.auth.as_ref());
+        if let Some(current) = self.services.try_latest_mcp_runtime()
+            && current.ready_selected_capability_roots() == ready_selected_capability_roots
+            && current.transport_auth_binding() == current_transport_auth_binding.as_ref()
+            && current.credential_revision() == current_credential_revision
+            && current.effective_auth_fingerprint() == current_effective_auth_fingerprint
+            && current.config().chatgpt_base_url == turn_context.config.chatgpt_base_url
+        {
+            let runtime = Arc::new(McpRuntimeSnapshot::new(
+                Arc::new(current.config().clone()),
+                current.plugins_available(),
+                current.manager_arc(),
+                current.runtime_context().clone(),
+                ready_selected_capability_roots,
+                current_transport_auth_binding,
+                current_credential_revision,
+                auth_snapshot.auth,
+            ));
+            self.services
+                .mcp_runtime_snapshot
+                .store(Some(Arc::clone(&runtime)));
+            return runtime;
         }
 
         let _guard = self.services.mcp_projection_lock.lock().await;
-        let current = self.services.latest_mcp_runtime();
-        if current.ready_selected_capability_roots() == ready_selected_capability_roots {
-            return current;
+        if let Some(current) = self.services.try_latest_mcp_runtime()
+            && current.ready_selected_capability_roots() == ready_selected_capability_roots
+            && current.transport_auth_binding() == current_transport_auth_binding.as_ref()
+            && current.credential_revision() == current_credential_revision
+            && current.effective_auth_fingerprint() == current_effective_auth_fingerprint
+            && current.config().chatgpt_base_url == turn_context.config.chatgpt_base_url
+        {
+            let runtime = Arc::new(McpRuntimeSnapshot::new(
+                Arc::new(current.config().clone()),
+                current.plugins_available(),
+                current.manager_arc(),
+                current.runtime_context().clone(),
+                ready_selected_capability_roots,
+                current_transport_auth_binding,
+                current_credential_revision,
+                auth_snapshot.auth,
+            ));
+            self.services
+                .mcp_runtime_snapshot
+                .store(Some(Arc::clone(&runtime)));
+            return runtime;
         }
         let mcp_projection = self
             .services
@@ -152,28 +273,36 @@ impl Session {
             )
             .await;
         let mcp_config = &mcp_projection.config;
-        let changed_environment_is_used_by_mcp = mcp_config
-            .mcp_server_catalog
-            .configured_servers()
-            .values()
-            .any(|server| {
-                let was_available = current
-                    .ready_selected_capability_roots()
-                    .iter()
-                    .any(|root| {
-                        let CapabilityRootLocation::Environment { environment_id, .. } =
-                            &root.location;
-                        environment_id == &server.environment_id
-                    });
-                let is_available = available_environment_ids.contains(&server.environment_id);
-                server.enabled && was_available != is_available
-            });
-        if !changed_environment_is_used_by_mcp
+        let current = self.services.try_latest_mcp_runtime();
+        let changed_environment_is_used_by_mcp = current.as_ref().is_some_and(|current| {
+            mcp_config
+                .mcp_server_catalog
+                .configured_servers()
+                .values()
+                .any(|server| {
+                    let was_available = current
+                        .ready_selected_capability_roots()
+                        .iter()
+                        .any(|root| {
+                            let CapabilityRootLocation::Environment { environment_id, .. } =
+                                &root.location;
+                            environment_id == &server.environment_id
+                        });
+                    let is_available = available_environment_ids.contains(&server.environment_id);
+                    server.enabled && was_available != is_available
+                })
+        });
+        if let Some(current) = current
+            && !changed_environment_is_used_by_mcp
             && current
                 .config()
                 .mcp_server_catalog
                 .has_same_servers(&mcp_config.mcp_server_catalog)
             && current.config().connector_snapshot == mcp_config.connector_snapshot
+            && current.config().chatgpt_base_url == mcp_config.chatgpt_base_url
+            && current.transport_auth_binding() == current_transport_auth_binding.as_ref()
+            && current.credential_revision() == current_credential_revision
+            && current.effective_auth_fingerprint() == current_effective_auth_fingerprint
         {
             // Selected roots are only an input to the MCP projection. When they change but the
             // projected servers and connectors do not, advance the input key without
@@ -184,6 +313,9 @@ impl Session {
                 current.manager_arc(),
                 current.runtime_context().clone(),
                 ready_selected_capability_roots,
+                current_transport_auth_binding,
+                current_credential_revision,
+                auth_snapshot.auth.clone(),
             ));
             self.services
                 .mcp_runtime_snapshot
@@ -196,6 +328,7 @@ impl Session {
             environments,
             &ready_selected_capability_roots,
             Some(self.mcp_elicitation_reviewer()),
+            Some(auth_snapshot),
         )
         .await
     }
@@ -412,8 +545,19 @@ impl Session {
         environments: &TurnEnvironmentSnapshot,
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
+        auth_snapshot: Option<McpAuthSnapshot>,
     ) -> Arc<McpRuntimeSnapshot> {
-        let auth = self.services.auth_manager.auth().await;
+        let current_runtime = self.services.latest_mcp_runtime();
+        let auth_snapshot = match auth_snapshot {
+            Some(auth_snapshot) => auth_snapshot,
+            None => {
+                self.capture_mcp_auth_snapshot(turn_context, /*request_setup*/ None)
+                    .await
+            }
+        };
+        let auth = auth_snapshot.auth;
+        let transport_auth_binding = auth_snapshot.transport_auth_binding;
+        let credential_revision = auth_snapshot.credential_revision;
         let McpRuntimeProjection {
             config: mcp_config,
             plugins_available,
@@ -441,7 +585,16 @@ impl Session {
             *guard = cancellation_token.clone();
             cancellation_token
         };
-        let current_runtime = self.services.latest_mcp_runtime();
+        let codex_apps_cache_key = match (transport_auth_binding.clone(), credential_revision) {
+            (Some(binding), Some(revision)) => {
+                codex_mcp::CodexAppsToolsCacheKey::from_transport_binding(
+                    binding,
+                    revision,
+                    mcp_config.chatgpt_base_url.clone(),
+                )
+            }
+            _ => codex_apps_tools_cache_key(auth.as_ref()),
+        };
         let codex_apps_auth_manager =
             codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref())
                 .then(|| Arc::clone(&self.services.auth_manager));
@@ -461,7 +614,7 @@ impl Session {
             mcp_config.codex_home.clone(),
             self.services.mcp_manager.codex_apps_tools_cache(),
             self.services.mcp_manager.tool_catalog_cache(),
-            connector_runtime_context_key(auth.as_ref()),
+            codex_apps_cache_key,
             codex_mcp::host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()),
             mcp_config.prefix_mcp_tool_names,
             mcp_config.client_elicitation_capability.clone(),
@@ -484,6 +637,9 @@ impl Session {
             mcp_runtime_context,
             ready_selected_capability_roots.to_vec(),
             refreshed_manager,
+            transport_auth_binding,
+            credential_revision,
+            auth,
         )
     }
 
@@ -579,6 +735,7 @@ impl Session {
             &turn_context.environments,
             &ready_selected_capability_roots,
             elicitation_reviewer,
+            None,
         )
         .await;
     }
@@ -649,6 +806,7 @@ impl Session {
             &turn_context.environments,
             &ready_selected_capability_roots,
             elicitation_reviewer,
+            None,
         )
         .await;
     }

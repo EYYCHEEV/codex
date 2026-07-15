@@ -6,6 +6,8 @@
 //! owned by the connector metadata store, not by this module.
 
 use std::collections::HashMap;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +20,8 @@ use std::time::SystemTime;
 
 use arc_swap::ArcSwapOption;
 use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::mcp::McpServerInfo;
 use serde::Deserialize;
 use serde::Serialize;
@@ -39,40 +43,125 @@ pub trait ConnectorRuntimePayload: Clone + Serialize + DeserializeOwned {}
 
 impl<T> ConnectorRuntimePayload for T where T: Clone + Serialize + DeserializeOwned {}
 
-/// The account and workspace identity of a connector runtime catalog.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The complete account and route identity of a connector runtime catalog.
+///
+/// This contains no bearer or refresh token material. Managed callers should
+/// use [`ConnectorRuntimeContextKey::from_transport_binding`] so catalog reuse
+/// follows the exact transport selected for the runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectorRuntimeContextKey {
-    account_id: Option<String>,
-    chatgpt_user_id: Option<String>,
+    transport: TransportAuthBinding,
+    credential_revision: u64,
+    base_url: String,
+    managed: bool,
     is_workspace_account: bool,
 }
 
 impl ConnectorRuntimeContextKey {
     pub fn personal(account_id: Option<String>, chatgpt_user_id: Option<String>) -> Self {
+        Self::for_nonmanaged_ids(account_id, chatgpt_user_id, false)
+    }
+
+    pub fn workspace(account_id: Option<String>, chatgpt_user_id: Option<String>) -> Self {
+        Self::for_nonmanaged_ids(account_id, chatgpt_user_id, true)
+    }
+
+    /// Builds the exact identity for a managed account snapshot.
+    pub fn from_transport_binding(
+        transport: TransportAuthBinding,
+        credential_revision: u64,
+        base_url: impl Into<String>,
+    ) -> Self {
+        assert!(
+            credential_revision > 0,
+            "managed Codex Apps keys require a credential revision"
+        );
+        let base_url = normalize_base_url(base_url.into());
+        assert!(
+            !base_url.is_empty(),
+            "managed Codex Apps keys require a base URL"
+        );
         Self {
-            account_id,
-            chatgpt_user_id,
+            transport,
+            credential_revision,
+            base_url,
+            managed: true,
             is_workspace_account: false,
         }
     }
 
-    pub fn workspace(account_id: Option<String>, chatgpt_user_id: Option<String>) -> Self {
+    /// Returns whether this key identifies a managed account route.
+    pub fn is_managed(&self) -> bool {
+        self.managed
+    }
+
+    /// Returns the secret-free transport identity captured by this key.
+    pub fn transport_binding(&self) -> TransportAuthBinding {
+        self.transport.clone()
+    }
+
+    fn for_nonmanaged_ids(
+        account_id: Option<String>,
+        chatgpt_user_id: Option<String>,
+        is_workspace_account: bool,
+    ) -> Self {
+        let identity_key = chatgpt_user_id
+            .or_else(|| account_id.clone())
+            .unwrap_or_else(|| "nonpooled:ChatGPT".to_string());
         Self {
-            account_id,
-            chatgpt_user_id,
-            is_workspace_account: true,
+            transport: TransportAuthBinding {
+                identity_key,
+                raw_account_id: account_id,
+                fedramp: false,
+                auth_mode: AuthMode::Chatgpt,
+                route_generation: 0,
+            },
+            credential_revision: 0,
+            base_url: String::new(),
+            managed: false,
+            is_workspace_account,
         }
+    }
+}
+
+impl Hash for ConnectorRuntimeContextKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.transport.identity_key.hash(state);
+        self.transport.raw_account_id.hash(state);
+        self.transport.fedramp.hash(state);
+        auth_mode_tag(self.transport.auth_mode).hash(state);
+        self.transport.route_generation.hash(state);
+        self.credential_revision.hash(state);
+        self.base_url.hash(state);
+        self.managed.hash(state);
+        self.is_workspace_account.hash(state);
     }
 }
 
 /// Builds the connector runtime context key for the active Codex auth.
 pub fn connector_runtime_context_key(auth: Option<&CodexAuth>) -> ConnectorRuntimeContextKey {
-    let account_id = auth.and_then(CodexAuth::get_account_id);
-    let chatgpt_user_id = auth.and_then(CodexAuth::get_chatgpt_user_id);
-    if auth.is_some_and(CodexAuth::is_workspace_account) {
-        ConnectorRuntimeContextKey::workspace(account_id, chatgpt_user_id)
-    } else {
-        ConnectorRuntimeContextKey::personal(account_id, chatgpt_user_id)
+    ConnectorRuntimeContextKey {
+        transport: TransportAuthBinding::for_nonmanaged_auth(auth),
+        credential_revision: 0,
+        base_url: String::new(),
+        managed: false,
+        is_workspace_account: auth.is_some_and(CodexAuth::is_workspace_account),
+    }
+}
+
+fn normalize_base_url(base_url: String) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn auth_mode_tag(auth_mode: AuthMode) -> u8 {
+    match auth_mode {
+        AuthMode::ApiKey => 0,
+        AuthMode::Chatgpt => 1,
+        AuthMode::ChatgptAuthTokens => 2,
+        AuthMode::Headers => 3,
+        AuthMode::AgentIdentity => 4,
+        AuthMode::PersonalAccessToken => 5,
+        AuthMode::BedrockApiKey => 6,
     }
 }
 

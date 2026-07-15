@@ -22,7 +22,7 @@ The public interface of this crate is intentionally small and uniform:
     - `model: &str`.
     - `input: &[ResponseItem]` – history to compact.
     - `instructions: &str` – fully-resolved compaction instructions.
-  - Output: `Vec<ResponseItem>`.
+  - Output: `ApiCompactResponse`, containing compacted `output: Vec<ResponseItem>` and optional response-header `rate_limits`.
   - `CompactClient::compact_input(&CompactionInput, extra_headers)` wraps the JSON encoding and retry/telemetry wiring.
 
 - **Memory summarize endpoint**
@@ -31,7 +31,13 @@ The public interface of this crate is intentionally small and uniform:
     - `raw_memories: Vec<RawMemory>` (serialized as `traces` for wire compatibility).
       - `RawMemory` includes `id`, `metadata.source_path`, and normalized `items`.
     - `reasoning: Option<Reasoning>`.
-  - Output: `Vec<MemorySummarizeOutput>`.
+  - Output: `ApiMemoryResponse`, containing `output: Vec<MemorySummarizeOutput>` and optional response-header `rate_limits`.
   - `MemoriesClient::summarize_input(&MemorySummarizeInput, extra_headers)` wraps JSON encoding and retry/telemetry wiring.
 
-All HTTP details (URLs, headers, retry/backoff policies, SSE framing) are encapsulated in `codex-api` and `codex-client`. Callers construct prompts/inputs using protocol types and work with typed streams of `ResponseEvent` or compacted `ResponseItem` values.
+All HTTP details (URLs, headers, retry/backoff policies, SSE framing) are encapsulated in `codex-api` and `codex-client`. Callers construct prompts/inputs using protocol types and work with typed streams of `ResponseEvent` or typed endpoint response wrappers.
+
+## Responses WebSocket disconnect diagnostics
+
+When a Responses WebSocket closes before `response.completed`, the endpoint emits one failure-only tracing event with the close code, a redacted close reason, whether the connection was reused, the number of response events seen, and whether response output had started.
+Successful streams do not emit this diagnostic.
+The wire layer preserves the close metadata in `ApiError::WebsocketClosed`; higher layers remain responsible for deciding whether an attempt is safe to replay after observable output.

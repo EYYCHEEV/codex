@@ -92,6 +92,7 @@ impl AppsRequestProcessor {
                         mcp_manager.codex_apps_tools_cache(),
                         mcp_manager.tool_catalog_cache(),
                         cache_key.clone(),
+                        host_owned_codex_apps_enabled(&mcp_config, auth.as_ref()),
                         mcp_config.prefix_mcp_tool_names,
                         mcp_config.client_elicitation_capability.clone(),
                         /*supports_openai_form_elicitation*/ false,

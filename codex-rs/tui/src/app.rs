@@ -10,6 +10,7 @@ use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
 use crate::app_event::FeedbackCategory;
 use crate::app_event::HistoryLookupResponse;
+use crate::app_event::ManagedAccountRequestOrigin;
 use crate::app_event::PermissionProfileSelection;
 use crate::app_event::PluginLocation;
 use crate::app_event::PluginRemoteSectionError;
@@ -584,6 +585,10 @@ pub(crate) struct App {
     pending_startup_thread_start: bool,
     /// Invalidates in-flight full rate-limit reads when a newer rolling hard stop arrives.
     rate_limit_hard_stop_generation: u64,
+    managed_account_request_scope: Option<(Option<ThreadId>, String)>,
+    managed_account_scope_generation: u64,
+    managed_account_request_sequence: u64,
+    pending_managed_account_logout_refresh: Option<ManagedAccountRequestOrigin>,
     // Serialize plugin enablement writes per plugin so stale completions cannot
     // overwrite a newer toggle, even if the plugin is toggled from different
     // cwd contexts.
@@ -1076,6 +1081,10 @@ See the Codex keymap documentation for supported actions and examples."
             pending_app_server_requests: PendingAppServerRequests::default(),
             pending_startup_thread_start,
             rate_limit_hard_stop_generation: 0,
+            managed_account_request_scope: None,
+            managed_account_scope_generation: 0,
+            managed_account_request_sequence: 0,
+            pending_managed_account_logout_refresh: None,
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
         };
@@ -1093,6 +1102,9 @@ See the Codex keymap documentation for supported actions and examples."
             if should_prompt_for_paused_goal_after_startup_resume {
                 app.maybe_prompt_resume_paused_goal_after_resume(&mut app_server, thread_id)
                     .await;
+            }
+            if app.chat_widget.managed_accounts().is_some() {
+                app.refresh_managed_accounts_usage_cache(&app_server);
             }
         }
         let initial_session_ms = initial_session_started_at.elapsed().as_millis();
@@ -1145,7 +1157,10 @@ See the Codex keymap documentation for supported actions and examples."
         // Kick off a non-blocking rate-limit prefetch so the first `/status`
         // already has data and available reset credits can be surfaced, without
         // delaying the initial frame render.
-        if requires_openai_auth && has_chatgpt_account {
+        if requires_openai_auth
+            && has_chatgpt_account
+            && app.chat_widget.managed_accounts().is_none()
+        {
             let reset_hint_request_id = app.chat_widget.start_rate_limit_reset_startup_check();
             app.refresh_rate_limits(
                 &app_server,

@@ -9,6 +9,7 @@ use crate::skills::SkillError;
 use crate::state::ActiveTurn;
 use codex_extension_api::ExtensionDataInit;
 use codex_login::auth::AgentIdentityAuthPolicy;
+use codex_mcp::codex_apps_tools_cache_key;
 use codex_protocol::SessionId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
@@ -1040,16 +1041,20 @@ impl Session {
                     config.analytics_enabled,
                 )
             });
-            let mcp_runtime = Arc::new(McpRuntime::new(Arc::new(
+            // Resource operations are rebound to the exact request StepContext before sampling.
+            // Seed extension initialization with the uninitialized manager snapshot rather than
+            // exposing the replaceable thread runtime through the resource client.
+            let initial_mcp_manager = Arc::new(
                 McpConnectionManager::new_uninitialized_with_permission_profile(
                     &config.permissions.approval_policy,
                     config.permissions.permission_profile(),
                     config.prefix_mcp_tool_names(),
                 ),
-            )));
+            );
+            let mcp_runtime = Arc::new(McpRuntime::new(Arc::clone(&initial_mcp_manager)));
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
-            session_extension_data.insert(McpResourceClient::new(Arc::clone(&mcp_runtime)));
+            session_extension_data.insert(McpResourceClient::new(initial_mcp_manager));
             for contributor in extensions.thread_lifecycle_contributors() {
                 contributor.on_thread_start(codex_extension_api::ThreadStartInput {
                     config: config.as_ref(),
@@ -1208,6 +1213,34 @@ impl Session {
             }
             turn_environments.start_connection_event_forwarding(tx_event.clone());
 
+            let startup_turn_context = sess.new_default_turn().await;
+            let startup_setup = sess
+                .services
+                .model_client
+                .current_client_setup(
+                    Some(&startup_turn_context.model_info.slug),
+                    Some(&sess.session_id().to_string()),
+                )
+                .await
+                .ok();
+            let startup_auth_snapshot = sess
+                .capture_mcp_auth_snapshot(&startup_turn_context, startup_setup.as_ref())
+                .await;
+            let startup_auth = startup_auth_snapshot.auth.as_ref();
+            let mcp_servers = effective_mcp_servers(&mcp_projection.config, startup_auth);
+            let startup_cache_key = match (
+                startup_auth_snapshot.transport_auth_binding.clone(),
+                startup_auth_snapshot.credential_revision,
+            ) {
+                (Some(binding), Some(revision)) => {
+                    codex_mcp::CodexAppsToolsCacheKey::from_transport_binding(
+                        binding,
+                        revision,
+                        mcp_projection.config.chatgpt_base_url.clone(),
+                    )
+                }
+                _ => codex_apps_tools_cache_key(startup_auth),
+            };
             let mcp_startup_cancellation_token = {
                 let mut cancel_guard = sess.services.mcp_startup_cancellation_token.lock().await;
                 cancel_guard.cancel();
@@ -1216,7 +1249,7 @@ impl Session {
                 cancel_token
             };
             let codex_apps_auth_manager =
-                codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, auth)
+                codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, startup_auth)
                     .then(|| Arc::clone(&sess.services.auth_manager));
             let mcp_connection_manager = McpConnectionManager::new(
                 &mcp_servers,
@@ -1234,8 +1267,8 @@ impl Session {
                 config.codex_home.to_path_buf(),
                 sess.services.mcp_manager.codex_apps_tools_cache(),
                 sess.services.mcp_manager.tool_catalog_cache(),
-                connector_runtime_context_key(auth),
-                codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, auth),
+                startup_cache_key,
+                codex_mcp::host_owned_codex_apps_enabled(&mcp_projection.config, startup_auth),
                 config.prefix_mcp_tool_names(),
                 mcp_projection
                     .config
@@ -1245,7 +1278,7 @@ impl Session {
                     .supports_openai_form_elicitation
                     .load(std::sync::atomic::Ordering::Relaxed),
                 tool_plugin_provenance,
-                auth,
+                startup_auth,
                 codex_apps_auth_manager,
                 Some(sess.mcp_elicitation_reviewer()),
                 Some(sess.mcp_elicitation_lifecycle()),
@@ -1263,6 +1296,9 @@ impl Session {
                     mcp_runtime_context,
                     /*ready_selected_capability_roots*/ Vec::new(),
                     mcp_connection_manager,
+                    startup_auth_snapshot.transport_auth_binding,
+                    startup_auth_snapshot.credential_revision,
+                    startup_auth_snapshot.auth,
                 )
                 .await?;
             sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())

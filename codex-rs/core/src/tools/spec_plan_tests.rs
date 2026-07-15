@@ -685,6 +685,7 @@ async fn environment_tools_follow_the_step_context() {
         Vec::new(),
         /*executor_capability_discovery*/ None,
         crate::session::McpRuntimeSnapshot::new_uninitialized_for_test(&turn.config),
+        /*effective_auth*/ None,
         /*loaded_agents_md*/ None,
     ));
 
