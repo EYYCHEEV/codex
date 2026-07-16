@@ -1,3 +1,4 @@
+use super::account_processor::remove_thread_account_selection_state;
 use super::thread_fork_goal::inherit_thread_goal_snapshot;
 use super::turn_processor::can_accept_direct_input;
 use super::*;
@@ -401,17 +402,6 @@ enum RunningThreadResumeResult {
     /// The optional stored thread contains the history-bearing probe that cold
     /// resume can reuse instead of reading the rollout again.
     NotRunning(Option<Box<StoredThread>>),
-}
-
-pub(super) async fn finalize_account_selection_state(
-    thread_state_manager: &ThreadStateManager,
-    account_selection_observer: &AccountSelectionObserver,
-    thread_id: ThreadId,
-) {
-    thread_state_manager.remove_thread_state(thread_id).await;
-    account_selection_observer
-        .remove_thread(&thread_id.to_string())
-        .await;
 }
 
 impl ThreadRequestProcessor {
@@ -843,7 +833,7 @@ impl ThreadRequestProcessor {
         self.outgoing
             .cancel_requests_for_thread(thread_id, /*error*/ None)
             .await;
-        finalize_account_selection_state(
+        remove_thread_account_selection_state(
             &self.thread_state_manager,
             &self.account_selection_observer,
             thread_id,

@@ -3737,7 +3737,7 @@ async fn blank_managed_refresh_token_response_preserves_existing_credentials() {
             .expect("refresh failure should persist");
         assert_eq!(
             failure.reason_code.as_deref(),
-            Some(REFRESH_FAILURE_TRANSIENT_REASON)
+            Some("token_refresh_unavailable")
         );
         server.verify().await;
     }
@@ -4265,11 +4265,27 @@ async fn bounded_refresh_timeout_revises_row_pool_and_watch() {
     assert_eq!(after.pool_revision, before.pool_revision + 2);
     assert!(matches!(
         &after.accounts[0].refresh_status,
-        ManagedChatgptRefreshStatus::TransientUnavailable {
-            reason_code: Some(reason),
-            ..
-        } if reason == "token_refresh_timeout"
+        ManagedChatgptRefreshStatus::TransientUnavailable { .. }
     ));
+    let stored = load_auth_dot_json(
+        codex_home.path(),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::Direct,
+    )
+    .expect("load after timeout")
+    .expect("stored auth");
+    let failure = stored
+        .managed_chatgpt
+        .expect("pool")
+        .accounts
+        .into_iter()
+        .find(|account| account.identity_key == identity)
+        .and_then(|account| account.refresh_failure)
+        .expect("timeout failure");
+    assert_eq!(
+        failure.reason_code.as_deref(),
+        Some("token_refresh_timeout")
+    );
     changes.changed().await.expect("timeout notification");
     assert_eq!(*changes.borrow(), initial_change_revision + 2);
     let observed = observer
@@ -4340,11 +4356,24 @@ async fn delayed_timeout_for_operation_a_cannot_relabel_cancellation_b() {
     assert_eq!(after.accounts[0].revision, before.accounts[0].revision);
     assert!(matches!(
         &after.accounts[0].refresh_status,
-        ManagedChatgptRefreshStatus::TransientUnavailable {
-            reason_code: Some(reason),
-            ..
-        } if reason == "token_refresh_cancelled"
+        ManagedChatgptRefreshStatus::TransientUnavailable { .. }
     ));
+    let stored = storage
+        .load()
+        .expect("load after delayed timeout")
+        .expect("stored auth");
+    let failure = stored
+        .managed_chatgpt
+        .expect("pool")
+        .accounts
+        .into_iter()
+        .find(|account| account.identity_key == identity)
+        .and_then(|account| account.refresh_failure)
+        .expect("refresh failure");
+    assert_eq!(
+        failure.reason_code.as_deref(),
+        Some("token_refresh_cancelled")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -781,7 +781,6 @@ mod tests {
                 login_id: Some(Uuid::nil().to_string()),
                 success: true,
                 error: None,
-                managed_account_id: None,
             });
 
         let jsonrpc_notification =
@@ -812,7 +811,6 @@ mod tests {
                 login_id: Some(Uuid::nil().to_string()),
                 success: true,
                 error: None,
-                managed_account_id: None,
             });
 
         assert_eq!(

@@ -4057,10 +4057,10 @@ impl Session {
     }
     pub(crate) async fn observe_managed_rate_limit_binding(
         &self,
-        binding: Option<ManagedRateLimitBinding>,
+        binding: Option<&ManagedRateLimitBinding>,
     ) {
         let mut state = self.state.lock().await;
-        state.observe_managed_rate_limit_binding(binding.as_ref());
+        state.observe_managed_rate_limit_binding(binding);
     }
 
     pub(crate) async fn update_rate_limits(

@@ -2935,10 +2935,6 @@ async fn login_account_chatgpt_device_code_succeeds_and_notifies() -> Result<()>
     assert_eq!(payload.login_id, Some(login_id));
     assert_eq!(payload.success, true);
     assert_eq!(payload.error, None);
-    assert_eq!(
-        payload.managed_account_id.as_deref(),
-        Some("email:device@example.com")
-    );
 
     let note = timeout(
         DEFAULT_READ_TIMEOUT,

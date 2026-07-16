@@ -3396,36 +3396,22 @@ mod tests {
             json!(44),
         );
 
-        let singular_login =
+        let login =
             ServerNotification::AccountLoginCompleted(v2::AccountLoginCompletedNotification {
                 login_id: Some("login-1".to_string()),
                 success: true,
                 error: None,
-                managed_account_id: None,
             });
         assert_eq!(
             json!({
                 "method": "account/login/completed",
                 "params": {
-                    "managedAccountId": null,
                     "loginId": "login-1",
                     "success": true,
                     "error": null
                 }
             }),
-            serde_json::to_value(&singular_login)?,
-        );
-
-        let managed_login =
-            ServerNotification::AccountLoginCompleted(v2::AccountLoginCompletedNotification {
-                login_id: Some("login-2".to_string()),
-                success: true,
-                error: None,
-                managed_account_id: Some("email:user@example.com".to_string()),
-            });
-        assert_eq!(
-            serde_json::to_value(&managed_login)?["params"]["managedAccountId"],
-            json!("email:user@example.com"),
+            serde_json::to_value(&login)?,
         );
         Ok(())
     }

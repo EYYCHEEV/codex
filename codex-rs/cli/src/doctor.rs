@@ -1206,8 +1206,8 @@ fn auth_check(config: &Config, effective_auth: Result<Option<&CodexAuth>, &str>)
     }
     let effective_auth = match effective_auth {
         Ok(auth) => auth,
-        Err(err) => {
-            details.push(format!("effective auth error: {err}"));
+        Err(_) => {
+            details.push("effective auth error: credentials could not be loaded".to_string());
             return DoctorCheck::new(
                 "auth.credentials",
                 "auth",
@@ -3516,23 +3516,8 @@ mod tests {
         );
     }
 
-    async fn auth_check_for_stored_tokens(
-        auth_mode: &str,
-        access_token: &str,
-        refresh_token: &str,
-        account_id: Option<&str>,
-    ) -> DoctorCheck {
+    async fn auth_check_for_auth_json(auth_json: serde_json::Value) -> DoctorCheck {
         let codex_home = tempfile::tempdir().expect("temporary CODEX_HOME");
-        let auth_json = serde_json::json!({
-            "auth_mode": auth_mode,
-            "tokens": {
-                "id_token": "e30.e30.signature",
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "account_id": account_id,
-            },
-            "last_refresh": "2099-01-01T00:00:00Z",
-        });
         std::fs::write(
             codex_home.path().join("auth.json"),
             serde_json::to_vec(&auth_json).expect("serialize synthetic auth"),
@@ -3553,6 +3538,25 @@ mod tests {
                 .map(Option::as_ref)
                 .map_err(std::string::String::as_str),
         )
+    }
+
+    async fn auth_check_for_stored_tokens(
+        auth_mode: &str,
+        access_token: &str,
+        refresh_token: &str,
+        account_id: Option<&str>,
+    ) -> DoctorCheck {
+        auth_check_for_auth_json(serde_json::json!({
+            "auth_mode": auth_mode,
+            "tokens": {
+                "id_token": "e30.e30.signature",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "account_id": account_id,
+            },
+            "last_refresh": "2099-01-01T00:00:00Z",
+        }))
+        .await
     }
 
     #[tokio::test]
@@ -3643,6 +3647,26 @@ mod tests {
         assert!(refresh_check.details.iter().all(|detail| {
             !detail.contains("sensitive-access-token") && !detail.contains("sensitive-account-id")
         }));
+    }
+
+    #[tokio::test]
+    async fn auth_check_rejects_malformed_credential_shapes_without_exposing_values() {
+        let secret = "sensitive-malformed-credential";
+        for auth_json in [
+            serde_json::json!({"OPENAI_API_KEY": {"value": secret}}),
+            serde_json::json!({"auth_mode": "chatgpt", "tokens": secret}),
+            serde_json::json!({
+                "managed_chatgpt": {
+                    "version": 1,
+                    "accounts": secret,
+                }
+            }),
+        ] {
+            let check = auth_check_for_auth_json(auth_json).await;
+            assert_eq!(check.status, CheckStatus::Fail);
+            assert_eq!(check.summary, "failed to load Codex credentials");
+            assert!(check.details.iter().all(|detail| !detail.contains(secret)));
+        }
     }
 
     #[tokio::test]
@@ -3749,10 +3773,12 @@ mod tests {
 
         assert_eq!(check.status, CheckStatus::Fail);
         assert_eq!(check.summary, "failed to load Codex credentials");
-        assert!(check.details.iter().any(|detail| {
-            detail
-                == "effective auth error: personal access token account is not in an allowed workspace"
-        }));
+        assert!(
+            check
+                .details
+                .iter()
+                .any(|detail| detail == "effective auth error: credentials could not be loaded")
+        );
     }
 
     #[test]

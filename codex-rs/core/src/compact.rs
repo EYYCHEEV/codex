@@ -753,7 +753,7 @@ async fn drain_to_completed(
         .await;
     crate::compact_remote::emit_managed_selection_updates(sess, turn_context, client_session).await;
     let managed_rate_limit_binding = client_session.managed_rate_limit_binding();
-    sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.clone())
+    sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.as_ref())
         .await;
     if let Err(error) = &stream_result
         && let CodexErrorDetails::UsageLimitReached(error) = error.details()
