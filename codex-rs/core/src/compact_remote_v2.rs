@@ -366,7 +366,7 @@ async fn run_remote_compaction_request_v2(
         .await;
     emit_managed_selection_updates(sess, turn_context, client_session).await;
     let managed_rate_limit_binding = client_session.managed_rate_limit_binding();
-    sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.clone())
+    sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.as_ref())
         .await;
     let outcome = match stream_result {
         Ok(stream) => {

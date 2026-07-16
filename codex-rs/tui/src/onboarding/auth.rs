@@ -1256,7 +1256,6 @@ mod tests {
 
         widget.on_account_login_completed(AccountLoginCompletedNotification {
             login_id: Some("login-1".to_string()),
-            managed_account_id: Some("email:user@example.com".to_string()),
             success: true,
             error: None,
         });

@@ -10,6 +10,7 @@ mod account;
 mod card;
 mod format;
 mod helpers;
+mod managed_accounts;
 mod rate_limits;
 pub(crate) mod remote_connection;
 
