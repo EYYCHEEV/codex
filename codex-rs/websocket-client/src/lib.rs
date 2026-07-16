@@ -52,7 +52,7 @@ pub(crate) enum TcpNodelay {
 }
 
 impl WebSocketConnector {
-    /// Creates a connector using native roots and any configured Codex custom CA bundle.
+    /// Creates a connector that applies a configured Codex custom CA bundle when present.
     pub fn new(
         http_client_factory: &HttpClientFactory,
     ) -> Result<Self, BuildCustomCaTransportError> {
