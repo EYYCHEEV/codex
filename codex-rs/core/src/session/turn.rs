@@ -2446,7 +2446,7 @@ async fn try_run_sampling_request(
                 .await;
         }
         let managed_rate_limit_binding = client_session.managed_rate_limit_binding();
-        sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.clone())
+        sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.as_ref())
             .await;
         let mut stream = stream_result??;
         let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =

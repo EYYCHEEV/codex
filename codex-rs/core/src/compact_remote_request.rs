@@ -118,7 +118,7 @@ pub(super) async fn run_remote_compact_attempt(
             )
             .await;
         let attempt_binding = client_session.managed_rate_limit_binding();
-        sess.observe_managed_rate_limit_binding(attempt_binding.clone())
+        sess.observe_managed_rate_limit_binding(attempt_binding.as_ref())
             .await;
         emit_managed_selection_updates(sess.as_ref(), turn_context.as_ref(), client_session).await;
         if let Err(error) = &result

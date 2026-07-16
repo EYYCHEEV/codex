@@ -2298,15 +2298,14 @@ Codex stores the key and region as the primary Codex auth, replacing any previou
 2. Show `verificationUrl` and `userCode` to the user; the frontend owns the UX.
 3. Wait for notifications:
    ```json
-   { "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": true, "error": null, "managedAccountId": "managed-account-1" } }
+   { "method": "account/login/completed", "params": { "loginId": "<uuid>", "success": true, "error": null } }
    { "method": "account/updated", "params": { "authMode": "chatgpt", "planType": "plus" } }
    ```
 
 The unstable internal `chatgptAuthTokens` form accepts
 `{ "type": "chatgptAuthTokens", "accessToken": "<access-token>", "chatgptAccountId": "<account-id>", "chatgptPlanType": null }`
 and returns `{ "type": "chatgptAuthTokens" }`. It sends `account/login/completed` with
-`loginId: null`, `success: true`, `error: null`, and `managedAccountId: null`, followed by
-`account/updated`.
+`loginId: null`, `success: true`, and `error: null`, followed by `account/updated`.
 
 ### 5) Cancel a ChatGPT login
 
@@ -2517,7 +2516,7 @@ nullable `description`.
 
 `account/rateLimits/updated` is a sparse rolling notification. Its `rateLimits` field
 has the same `RateLimitSnapshot` shape; `managedAccountId` and `accountRevision` are
-nullable and are omitted for non-pooled auth modes:
+nullable and `null` for non-pooled auth modes:
 
 ```json
 {

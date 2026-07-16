@@ -3555,7 +3555,8 @@ mod tests {
                     "managedAccountId": null,
                     "loginId": "login-1",
                     "success": true,
-                    "error": null
+                    "error": null,
+                    "onboardingEntrypoint": null
                 }
             }),
             serde_json::to_value(&singular_login)?,

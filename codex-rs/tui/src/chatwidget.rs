@@ -410,6 +410,7 @@ mod review_popups;
 use self::review::ReviewState;
 #[cfg(test)]
 pub(crate) use self::review_popups::show_review_commit_picker_with_entries;
+mod managed_accounts;
 mod safety_buffering;
 mod service_tiers;
 mod settings;
