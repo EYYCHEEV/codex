@@ -225,6 +225,7 @@ pub fn build_reqwest_client_for_subprocess_tests(
 fn maybe_build_rustls_client_config_with_env(
     env_source: &dyn EnvSource,
 ) -> Result<Option<Arc<ClientConfig>>, BuildCustomCaTransportError> {
+    ensure_rustls_crypto_provider();
     let Some(bundle) = env_source.configured_ca_bundle() else {
         return Ok(None);
     };
@@ -802,6 +803,15 @@ mod tests {
             .expect("custom CA config should be present");
 
         assert!(config.enable_sni);
+    }
+
+    #[test]
+    fn rustls_provider_is_initialized_without_custom_ca() {
+        let config = maybe_build_rustls_client_config_with_env(&map_env(&[]))
+            .expect("custom CA detection should succeed");
+
+        assert!(config.is_none());
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
     }
 
     #[test]
