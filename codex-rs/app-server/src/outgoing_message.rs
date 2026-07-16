@@ -901,6 +901,7 @@ mod tests {
                     "success": true,
                     "error": null,
                     "onboardingEntrypoint": null,
+                    "managedAccountId": null,
                 },
                 "emittedAtMs": 1_234,
             }),
@@ -929,6 +930,7 @@ mod tests {
                     "success": true,
                     "error": null,
                     "onboardingEntrypoint": null,
+                    "managedAccountId": null,
                 },
             }),
             serde_json::to_value(notification)
