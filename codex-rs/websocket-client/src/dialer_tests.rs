@@ -72,13 +72,49 @@ async fn direct_route_connects_secure_websocket() {
     let (inner, _) = connect(
         request,
         WebSocketConfig::default(),
-        tls_config,
+        Some(tls_config),
         OutboundProxyRoute::Direct,
     )
     .await
     .expect("direct websocket handshake should succeed");
     drop(WebSocketConnection { inner });
 
+    target_task.await.expect("target task should finish");
+}
+
+#[tokio::test]
+async fn direct_route_secure_websocket_without_custom_ca_uses_default_tls_connector() {
+    ensure_rustls_crypto_provider();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("target listener should bind");
+    let target_addr = listener
+        .local_addr()
+        .expect("target listener should have an address");
+    let target_task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("target should accept");
+        drop(stream);
+    });
+    let request = format!("wss://localhost:{}/v1/responses", target_addr.port())
+        .into_client_request()
+        .expect("websocket request should build");
+
+    let error = match connect(
+        request,
+        WebSocketConfig::default(),
+        None,
+        OutboundProxyRoute::Direct,
+    )
+    .await
+    {
+        Ok(_) => panic!("closed TLS peer should fail the websocket handshake"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        WebSocketError::Io(_) | WebSocketError::Tls(_)
+    ));
     target_task.await.expect("target task should finish");
 }
 
@@ -90,6 +126,48 @@ async fn http_proxy_tunnels_secure_websocket_before_handshake() {
 #[tokio::test]
 async fn https_proxy_tunnels_secure_websocket_before_handshake() {
     assert_proxy_tunnels_secure_websocket(/*proxy_tls*/ true).await;
+}
+
+#[tokio::test]
+async fn https_proxy_without_custom_ca_starts_tls_before_tunneling() {
+    let proxy_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("proxy listener should bind");
+    let proxy_addr = proxy_listener
+        .local_addr()
+        .expect("proxy listener should have an address");
+    let proxy_task = tokio::spawn(async move {
+        let (mut client, _) = proxy_listener.accept().await.expect("proxy should accept");
+        let mut tls_record_header = [0_u8; 2];
+        client
+            .read_exact(&mut tls_record_header)
+            .await
+            .expect("proxy should receive a TLS client hello");
+        tls_record_header
+    });
+    let request = "wss://localhost:443/v1/responses"
+        .into_client_request()
+        .expect("websocket request should build");
+
+    let error = match connect(
+        request,
+        WebSocketConfig::default(),
+        None,
+        OutboundProxyRoute::Proxy {
+            url: format!("https://localhost:{}", proxy_addr.port()),
+        },
+    )
+    .await
+    {
+        Ok(_) => panic!("closed TLS proxy should fail the websocket handshake"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, WebSocketError::Io(_)));
+    assert_eq!(
+        proxy_task.await.expect("proxy task should finish"),
+        [0x16, 0x03]
+    );
 }
 
 #[test]
@@ -229,7 +307,7 @@ async fn assert_proxy_tunnels_secure_websocket(proxy_tls: bool) {
     let (inner, _) = connect(
         request,
         WebSocketConfig::default(),
-        tls_config,
+        Some(tls_config),
         OutboundProxyRoute::Proxy {
             url: format!("{proxy_scheme}://localhost:{}", proxy_addr.port()),
         },

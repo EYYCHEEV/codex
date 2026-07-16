@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_http_client::OutboundProxyRoute;
+use codex_http_client::build_rustls_client_config_with_custom_ca;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use rustls::ClientConfig;
@@ -34,7 +35,7 @@ const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 pub(crate) async fn connect(
     request: Request,
     config: WebSocketConfig,
-    tls_config: Arc<ClientConfig>,
+    tls_config: Option<Arc<ClientConfig>>,
     proxy_route: OutboundProxyRoute,
 ) -> Result<(ConnectionInner, Response), WebSocketError> {
     let stream: Box<dyn AsyncIo> = match proxy_route {
@@ -45,7 +46,7 @@ pub(crate) async fn connect(
                 request,
                 Some(config),
                 false, // Preserve Tungstenite's recommended Nagle default.
-                Some(Connector::Rustls(tls_config)),
+                tls_config.map(Connector::Rustls),
             )
             .await?;
             return Ok((ConnectionInner::TransportDefault(stream), response));
@@ -67,9 +68,15 @@ pub(crate) async fn connect(
                 .await
                 .map_err(WebSocketError::Io)?;
             let stream: Box<dyn AsyncIo> = if proxy.tls {
+                let proxy_tls_config = match tls_config.as_ref() {
+                    Some(tls_config) => Arc::clone(tls_config),
+                    None => build_rustls_client_config_with_custom_ca()
+                        .map_err(io::Error::from)
+                        .map_err(WebSocketError::Io)?,
+                };
                 let server_name = ServerName::try_from(proxy.config.host.clone())
                     .map_err(|_| WebSocketError::Tls(TlsError::InvalidDnsName))?;
-                let stream = TlsConnector::from(Arc::clone(&tls_config))
+                let stream = TlsConnector::from(proxy_tls_config)
                     .connect(server_name, stream)
                     .await
                     .map_err(WebSocketError::Io)?;
@@ -85,7 +92,7 @@ pub(crate) async fn connect(
         request,
         stream,
         Some(config),
-        Some(Connector::Rustls(tls_config)),
+        tls_config.map(Connector::Rustls),
     )
     .await?;
     Ok((ConnectionInner::Routed(stream), response))
