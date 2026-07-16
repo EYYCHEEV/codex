@@ -33,6 +33,11 @@ use crate::TcpNodelay;
 
 const HAPPY_EYEBALLS_DELAY: Duration = Duration::from_millis(250);
 
+#[cfg(test)]
+fn custom_tls_connector(tls_config: &Option<Arc<ClientConfig>>) -> Option<Connector> {
+    tls_config.as_ref().map(Arc::clone).map(Connector::Rustls)
+}
+
 pub(crate) async fn connect(
     request: Request,
     config: WebSocketConfig,
