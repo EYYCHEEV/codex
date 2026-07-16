@@ -9,7 +9,7 @@ use std::task::Poll;
 
 use codex_http_client::BuildCustomCaTransportError;
 use codex_http_client::HttpClientFactory;
-use codex_http_client::build_rustls_client_config_with_custom_ca;
+use codex_http_client::maybe_build_rustls_client_config_with_custom_ca;
 use futures::Sink;
 use futures::Stream;
 use rustls::ClientConfig;
@@ -32,17 +32,17 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 #[derive(Clone)]
 pub struct WebSocketConnector {
     http_client_factory: HttpClientFactory,
-    tls_config: Arc<ClientConfig>,
+    tls_config: Option<Arc<ClientConfig>>,
 }
 
 impl WebSocketConnector {
-    /// Creates a connector using native roots and any configured Codex custom CA bundle.
+    /// Creates a connector that applies a configured Codex custom CA bundle when present.
     pub fn new(
         http_client_factory: &HttpClientFactory,
     ) -> Result<Self, BuildCustomCaTransportError> {
         Ok(Self {
             http_client_factory: http_client_factory.clone(),
-            tls_config: build_rustls_client_config_with_custom_ca()?,
+            tls_config: maybe_build_rustls_client_config_with_custom_ca()?,
         })
     }
 
@@ -56,8 +56,13 @@ impl WebSocketConnector {
         let proxy_route = self
             .http_client_factory
             .resolve_proxy_route(&request.uri().to_string());
-        let (inner, response) =
-            dialer::connect(request, config, Arc::clone(&self.tls_config), proxy_route).await?;
+        let (inner, response) = dialer::connect(
+            request,
+            config,
+            self.tls_config.as_ref().map(Arc::clone),
+            proxy_route,
+        )
+        .await?;
         Ok((WebSocketConnection { inner }, response))
     }
 }
