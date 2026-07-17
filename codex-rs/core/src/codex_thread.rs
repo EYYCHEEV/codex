@@ -523,12 +523,7 @@ impl CodexThread {
     pub(crate) async fn append_message(&self, message: ResponseItem) -> CodexResult<String> {
         let submission_id = uuid::Uuid::new_v4().to_string();
         let pending_item = pending_message_input_item(&message)?;
-        if let Err(items) = self
-            .codex
-            .session
-            .inject_response_items(vec![pending_item])
-            .await
-        {
+        if let Err(items) = self.session.inject_response_items(vec![pending_item]).await {
             debug_assert_eq!(items.len(), 1);
             self.inject_response_items(vec![message]).await?;
         }

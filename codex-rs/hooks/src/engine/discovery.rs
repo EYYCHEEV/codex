@@ -16,7 +16,6 @@ use codex_config::ManagedHooksRequirementsToml;
 use codex_config::MatcherGroup;
 use codex_config::RequirementSource;
 use codex_config::TomlValue;
-use codex_config::types::LegacyHooksConfig;
 use codex_config::version_for_toml;
 use codex_plugin::PluginHookSource;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -24,8 +23,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::ConfiguredHandler;
-use super::ConfiguredHandlerBehavior;
-use super::HandlerExecution;
 use super::HookListEntry;
 use crate::config_rules::hook_states_from_stack;
 use crate::events::common::matcher_pattern_for_event;
@@ -34,7 +31,6 @@ use crate::events::session_end::SESSION_END_DEFAULT_TIMEOUT_SEC;
 use crate::events::session_end::SESSION_END_MAX_TIMEOUT_SEC;
 use crate::output_spill::AdditionalContextLimit;
 use crate::output_spill::DEFAULT_HOOK_OUTPUT_TOKEN_LIMIT;
-use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookHandlerType;
 use codex_protocol::protocol::HookSource;
 use codex_protocol::protocol::HookTrustStatus;
@@ -69,8 +65,6 @@ impl HookDiscoveryPolicy {
 }
 
 pub(crate) fn discover_handlers(
-    canonical_enabled: bool,
-    legacy_pre_tool_use_enabled: bool,
     config_layer_stack: Option<&ConfigLayerStack>,
     plugin_hook_sources: Vec<PluginHookSource>,
     plugin_hook_load_warnings: Vec<String>,
@@ -124,60 +118,44 @@ pub(crate) fn discover_handlers(
                 continue;
             }
 
-            if canonical_enabled {
-                let json_hooks = match layer.hooks_config_folder() {
-                    Some(config_folder)
-                        if visited_json_hook_folders.insert(config_folder.clone()) =>
-                    {
-                        load_hooks_json(Some(config_folder.as_path()), &mut warnings)
-                    }
-                    _ => None,
-                };
-                let toml_hooks = load_toml_hooks_from_layer(layer, &mut warnings);
-
-                if let (
-                    Some((json_source_path, json_events)),
-                    Some((toml_source_path, toml_events)),
-                ) = (&json_hooks, &toml_hooks)
-                    && !json_events.is_empty()
-                    && !toml_events.is_empty()
-                {
-                    warnings.push(format!(
-                        "loading hooks from both {} and {}; prefer a single representation for this layer",
-                        json_source_path.display(),
-                        toml_source_path.display()
-                    ));
+            let json_hooks = match layer.hooks_config_folder() {
+                Some(config_folder) if visited_json_hook_folders.insert(config_folder.clone()) => {
+                    load_hooks_json(Some(config_folder.as_path()), &mut warnings)
                 }
+                _ => None,
+            };
+            let toml_hooks = load_toml_hooks_from_layer(layer, &mut warnings);
 
-                for (source_path, hook_events) in [json_hooks, toml_hooks].into_iter().flatten() {
-                    append_hook_events(
-                        &mut handlers,
-                        &mut hook_entries,
-                        &mut warnings,
-                        &mut display_order,
-                        HookHandlerSource {
-                            path: &source_path,
-                            key_source: source_path.display().to_string(),
-                            source: hook_source,
-                            is_managed,
-                            bypass_hook_trust: policy.bypass_hook_trust,
-                            hook_states: &hook_states,
-                            env: HashMap::new(),
-                            plugin_id: None,
-                        },
-                        hook_events,
-                        policy,
-                    );
-                }
+            if let (Some((json_source_path, json_events)), Some((toml_source_path, toml_events))) =
+                (&json_hooks, &toml_hooks)
+                && !json_events.is_empty()
+                && !toml_events.is_empty()
+            {
+                warnings.push(format!(
+                    "loading hooks from both {} and {}; prefer a single representation for this layer",
+                    json_source_path.display(),
+                    toml_source_path.display()
+                ));
             }
 
-            if legacy_pre_tool_use_enabled {
-                append_legacy_pre_tool_use_handlers(
+            for (source_path, hook_events) in [json_hooks, toml_hooks].into_iter().flatten() {
+                append_hook_events(
                     &mut handlers,
+                    &mut hook_entries,
                     &mut warnings,
                     &mut display_order,
-                    layer,
-                    hook_source,
+                    HookHandlerSource {
+                        path: &source_path,
+                        key_source: source_path.display().to_string(),
+                        source: hook_source,
+                        is_managed,
+                        bypass_hook_trust: policy.bypass_hook_trust,
+                        hook_states: &hook_states,
+                        env: HashMap::new(),
+                        plugin_id: None,
+                    },
+                    hook_events,
+                    policy,
                 );
             }
         }
@@ -376,6 +354,15 @@ fn load_toml_hooks_from_layer(
 ) -> Option<(AbsolutePathBuf, HookEventsToml)> {
     let source_path = config_toml_source_path(layer);
     let hook_value = layer.config.get("hooks")?.clone();
+    if hook_value
+        .as_table()
+        .is_some_and(|hooks| hooks.contains_key("pre_tool_use"))
+    {
+        warnings.push(format!(
+            "legacy TOML hook key `hooks.pre_tool_use` in {} is ignored; migrate to `[[hooks.PreToolUse]]` or hooks.json",
+            source_path.display()
+        ));
+    }
     let parsed = match HookEventsToml::deserialize(hook_value) {
         Ok(parsed) => parsed,
         Err(err) => {
@@ -465,77 +452,6 @@ fn append_hook_events(
     }
 }
 
-fn append_legacy_pre_tool_use_handlers(
-    handlers: &mut Vec<ConfiguredHandler>,
-    warnings: &mut Vec<String>,
-    display_order: &mut i64,
-    layer: &ConfigLayerEntry,
-    source: HookSource,
-) {
-    let Some(raw_hooks) = layer.config.get("hooks").cloned() else {
-        return;
-    };
-    let source_path = config_toml_source_path(layer);
-    let parsed: LegacyHooksConfig = match raw_hooks.try_into() {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            warnings.push(format!(
-                "failed to parse legacy hooks config {}: {err}",
-                source_path.display()
-            ));
-            return;
-        }
-    };
-    if parsed.pre_tool_use.is_empty() {
-        return;
-    }
-
-    for hook in parsed.pre_tool_use {
-        if hook.command.is_empty() {
-            warnings.push(format!(
-                "skipping empty legacy pre-tool-use command in {}",
-                source_path.display()
-            ));
-            continue;
-        }
-
-        handlers.push(ConfiguredHandler {
-            event_name: HookEventName::PreToolUse,
-            matcher: legacy_tool_matcher_to_regex(&hook.matcher),
-            command: hook.command.join(" "),
-            execution: HandlerExecution::Argv(hook.command),
-            behavior: ConfiguredHandlerBehavior::LegacyPreToolUse {
-                on_failure: hook.on_failure,
-            },
-            timeout_sec: hook.timeout_sec.max(1),
-            status_message: None,
-            additional_context_limit: Default::default(),
-            source_path: source_path.clone(),
-            source,
-            display_order: *display_order,
-            env: HashMap::new(),
-        });
-        *display_order += 1;
-    }
-}
-
-fn legacy_tool_matcher_to_regex(matcher: &str) -> Option<String> {
-    if matcher.is_empty() || matcher == "*" {
-        return None;
-    }
-
-    let mut pattern = String::from("^");
-    for ch in matcher.chars() {
-        match ch {
-            '*' => pattern.push_str(".*"),
-            '?' => pattern.push('.'),
-            _ => pattern.push_str(&regex::escape(&ch.to_string())),
-        }
-    }
-    pattern.push('$');
-    Some(pattern)
-}
-
 fn append_matcher_groups(
     handlers: &mut Vec<ConfiguredHandler>,
     hook_entries: &mut Vec<HookListEntry>,
@@ -565,6 +481,7 @@ fn append_matcher_groups(
                     r#async,
                     status_message,
                     additional_context_limit,
+                    on_failure,
                 } => {
                     let command = if cfg!(windows) {
                         command_windows.unwrap_or(command)
@@ -625,6 +542,7 @@ fn append_matcher_groups(
                         r#async,
                         status_message: status_message.clone(),
                         additional_context_limit: normalized_additional_context_limit,
+                        on_failure,
                     };
                     let current_hash =
                         command_hook_hash(event_name, matcher, &group, normalized_handler);
@@ -668,8 +586,7 @@ fn append_matcher_groups(
                             event_name,
                             matcher: matcher.map(ToOwned::to_owned),
                             command,
-                            execution: HandlerExecution::ShellCommand,
-                            behavior: ConfiguredHandlerBehavior::Canonical,
+                            failure_policy: on_failure,
                             timeout_sec,
                             status_message,
                             additional_context_limit: AdditionalContextLimit::from_config(
@@ -818,6 +735,7 @@ mod tests {
     use codex_config::ConfigLayerEntry;
     use codex_config::ConfigLayerSource;
     use codex_config::HookEventsToml;
+    use codex_config::HookFailurePolicy;
     use codex_config::RequirementSource;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookSource;
@@ -827,8 +745,6 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     use super::ConfiguredHandler;
-    use super::ConfiguredHandlerBehavior;
-    use super::HandlerExecution;
     use super::HookListEntry;
     use super::append_matcher_groups;
     use crate::output_spill::AdditionalContextLimit;
@@ -925,22 +841,7 @@ mod tests {
                 r#async: false,
                 status_message: None,
                 additional_context_limit: None,
-            }],
-        }
-    }
-
-    fn command_group_with_additional_context_limit(
-        additional_context_limit: usize,
-    ) -> MatcherGroup {
-        MatcherGroup {
-            matcher: None,
-            hooks: vec![HookHandlerConfig::Command {
-                command: "echo hello".to_string(),
-                command_windows: None,
-                timeout_sec: None,
-                r#async: false,
-                status_message: None,
-                additional_context_limit: Some(additional_context_limit),
+                on_failure: HookFailurePolicy::Allow,
             }],
         }
     }
@@ -955,6 +856,15 @@ mod tests {
         let mut entries = Vec::new();
         let mut warnings = Vec::new();
         let mut display_order = 0;
+        let mut group = command_group(/*matcher*/ None);
+        let HookHandlerConfig::Command {
+            additional_context_limit: configured_limit,
+            ..
+        } = &mut group.hooks[0]
+        else {
+            unreachable!("command_group should contain a command hook");
+        };
+        *configured_limit = additional_context_limit;
         append_matcher_groups(
             &mut handlers,
             &mut entries,
@@ -962,10 +872,7 @@ mod tests {
             &mut display_order,
             &hook_handler_source(&source_path, &hook_states),
             event_name,
-            vec![match additional_context_limit {
-                Some(limit) => command_group_with_additional_context_limit(limit),
-                None => command_group(/*matcher*/ None),
-            }],
+            vec![group],
         );
         (handlers.remove(0), entries.remove(0), warnings)
     }
@@ -1056,8 +963,7 @@ mod tests {
                 event_name: HookEventName::UserPromptSubmit,
                 matcher: None,
                 command: "echo hello".to_string(),
-                execution: HandlerExecution::ShellCommand,
-                behavior: ConfiguredHandlerBehavior::Canonical,
+                failure_policy: HookFailurePolicy::Allow,
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),
@@ -1094,8 +1000,7 @@ mod tests {
                 event_name: HookEventName::PreToolUse,
                 matcher: Some("^Bash$".to_string()),
                 command: "echo hello".to_string(),
-                execution: HandlerExecution::ShellCommand,
-                behavior: ConfiguredHandlerBehavior::Canonical,
+                failure_policy: HookFailurePolicy::Allow,
                 timeout_sec: 600,
                 status_message: None,
                 additional_context_limit: Default::default(),
@@ -1108,85 +1013,35 @@ mod tests {
     }
 
     #[test]
-    fn session_end_normalizes_timeout() {
+    fn pre_tool_use_keeps_fail_closed_policy_during_discovery() {
         let mut handlers = Vec::new();
-        let mut hook_entries = Vec::new();
-        let mut warnings = Vec::new();
         let mut display_order = 0;
         let source_path = source_path();
         let hook_states = std::collections::HashMap::new();
 
         append_matcher_groups(
             &mut handlers,
-            &mut hook_entries,
-            &mut warnings,
+            &mut Vec::new(),
+            &mut Vec::new(),
             &mut display_order,
             &hook_handler_source(&source_path, &hook_states),
-            HookEventName::SessionEnd,
+            HookEventName::PreToolUse,
             vec![MatcherGroup {
-                matcher: Some("other".to_string()),
-                hooks: vec![
-                    HookHandlerConfig::Command {
-                        command: "echo default".to_string(),
-                        command_windows: None,
-                        timeout_sec: None,
-                        r#async: false,
-                        status_message: None,
-                        additional_context_limit: None,
-                    },
-                    HookHandlerConfig::Command {
-                        command: "echo clamped".to_string(),
-                        command_windows: None,
-                        timeout_sec: Some(600),
-                        r#async: true,
-                        status_message: None,
-                        additional_context_limit: None,
-                    },
-                ],
+                matcher: Some("^Bash$".to_string()),
+                hooks: vec![HookHandlerConfig::Command {
+                    command: "policy-check".to_string(),
+                    command_windows: None,
+                    timeout_sec: Some(5),
+                    r#async: false,
+                    status_message: None,
+                    additional_context_limit: None,
+                    on_failure: HookFailurePolicy::Deny,
+                }],
             }],
         );
 
-        assert_eq!(
-            handlers
-                .iter()
-                .map(|handler| handler.timeout_sec)
-                .collect::<Vec<_>>(),
-            vec![1, 3]
-        );
-        assert_eq!(
-            handlers
-                .iter()
-                .map(|handler| handler.matcher.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("other"), Some("other")]
-        );
-        assert_eq!(
-            hook_entries
-                .iter()
-                .map(|entry| entry.timeout_sec)
-                .collect::<Vec<_>>(),
-            vec![1, 3]
-        );
-        assert_eq!(
-            hook_entries
-                .iter()
-                .map(|entry| entry.matcher.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("other"), Some("other")]
-        );
-        assert_eq!(
-            warnings,
-            vec![
-                format!(
-                    "clamping SessionEnd hook timeout to 3s in {}",
-                    source_path.display()
-                ),
-                format!(
-                    "running async SessionEnd hook synchronously in {}",
-                    source_path.display()
-                ),
-            ]
-        );
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0].failure_policy, HookFailurePolicy::Deny);
     }
 
     #[test]
@@ -1329,10 +1184,71 @@ mod tests {
                         r#async: false,
                         status_message: None,
                         additional_context_limit: None,
+                        on_failure: HookFailurePolicy::Allow,
                     }],
                 }],
                 ..Default::default()
             }
+        );
+    }
+
+    #[test]
+    fn toml_hook_discovery_warns_about_legacy_pre_tool_use_key() {
+        let source_path = test_path_buf("/tmp/config.toml").abs();
+        let layer = ConfigLayerEntry::new(
+            ConfigLayerSource::User {
+                file: source_path.clone(),
+                profile: None,
+            },
+            serde_json::from_value(serde_json::json!({
+                "hooks": {
+                    "pre_tool_use": [{
+                        "matcher": "exec_command",
+                        "command": ["policy-check"],
+                    }],
+                },
+            }))
+            .expect("config TOML should deserialize"),
+        );
+        let mut warnings = Vec::new();
+
+        let hooks = super::load_toml_hooks_from_layer(&layer, &mut warnings);
+
+        assert_eq!(hooks, None);
+        assert_eq!(
+            warnings,
+            vec![format!(
+                "legacy TOML hook key `hooks.pre_tool_use` in {} is ignored; migrate to `[[hooks.PreToolUse]]` or hooks.json",
+                source_path.display()
+            )]
+        );
+    }
+
+    #[test]
+    fn failure_policy_change_invalidates_hook_trust() {
+        let allow_group = command_group(Some("^Bash$"));
+        let allow_hash = super::command_hook_hash(
+            HookEventName::PreToolUse,
+            Some("^Bash$"),
+            &allow_group,
+            allow_group.hooks[0].clone(),
+        );
+        let mut deny_group = allow_group;
+        let HookHandlerConfig::Command { on_failure, .. } = &mut deny_group.hooks[0] else {
+            panic!("expected command hook");
+        };
+        *on_failure = HookFailurePolicy::Deny;
+        let deny_hash = super::command_hook_hash(
+            HookEventName::PreToolUse,
+            Some("^Bash$"),
+            &deny_group,
+            deny_group.hooks[0].clone(),
+        );
+
+        assert_ne!(allow_hash, deny_hash);
+        assert_eq!(
+            super::hook_trust_status(/*is_managed*/ false, &deny_hash, Some(&allow_hash)),
+            HookTrustStatus::Modified
         );
     }
 
@@ -1360,6 +1276,7 @@ mod tests {
                     r#async: false,
                     status_message: None,
                     additional_context_limit: None,
+                    on_failure: HookFailurePolicy::Allow,
                 }],
             }],
         );

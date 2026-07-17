@@ -86,14 +86,8 @@ fn post_unified_exec_tool_use_payload(
     let tool_input = result.post_tool_use_input(&invocation.payload)?;
     let tool_use_id = result.post_tool_use_id(&invocation.call_id);
     let tool_response = result.post_tool_use_response(&tool_use_id, &invocation.payload)?;
-    let hook_tool_name =
-        if invocation.tool_name.namespace.is_none() && invocation.tool_name.name == "write_stdin" {
-            HookToolName::shell("exec_command")
-        } else {
-            HookToolName::shell(invocation.tool_name.to_string())
-        };
     Some(PostToolUsePayload {
-        tool_name: hook_tool_name,
+        tool_name: HookToolName::bash(),
         tool_use_id,
         tool_input,
         tool_response,

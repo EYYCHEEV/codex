@@ -11,7 +11,6 @@ use tracing::Span;
 
 use super::CommandShell;
 use super::ConfiguredHandler;
-use super::HandlerExecution;
 use super::dispatcher::hook_event_name_label;
 use super::dispatcher::hook_execution_mode_label;
 use super::dispatcher::hook_handler_type_label;
@@ -165,44 +164,30 @@ fn finish_command_run(
 }
 
 fn build_command(shell: &CommandShell, handler: &ConfiguredHandler) -> Command {
-    let mut command = match &handler.execution {
-        HandlerExecution::ShellCommand => {
-            let mut command = if shell.program.is_empty() {
-                default_shell_command()
-            } else {
-                Command::new(&shell.program)
-            };
-            if shell.program.is_empty() {
-                #[cfg(windows)]
-                command.raw_arg(format!(r#""{}""#, handler.command));
-
-                #[cfg(not(windows))]
-                command.arg(&handler.command);
-            } else {
-                command.args(&shell.args);
-
-                #[cfg(windows)]
-                if shell.args.iter().any(|arg| arg.eq_ignore_ascii_case("/c")) {
-                    command.raw_arg(format!(r#""{}""#, handler.command));
-                } else {
-                    command.arg(&handler.command);
-                }
-
-                #[cfg(not(windows))]
-                command.arg(&handler.command);
-            }
-            command
-        }
-        HandlerExecution::Argv(argv) => {
-            let mut command = argv
-                .split_first()
-                .map_or_else(|| Command::new(""), |(program, _)| Command::new(program));
-            if let Some((_, args)) = argv.split_first() {
-                command.args(args);
-            }
-            command
-        }
+    let mut command = if shell.program.is_empty() {
+        default_shell_command()
+    } else {
+        Command::new(&shell.program)
     };
+    if shell.program.is_empty() {
+        #[cfg(windows)]
+        command.raw_arg(format!(r#""{}""#, handler.command));
+
+        #[cfg(not(windows))]
+        command.arg(&handler.command);
+    } else {
+        command.args(&shell.args);
+
+        #[cfg(windows)]
+        if shell.args.iter().any(|arg| arg.eq_ignore_ascii_case("/c")) {
+            command.raw_arg(format!(r#""{}""#, handler.command));
+        } else {
+            command.arg(&handler.command);
+        }
+
+        #[cfg(not(windows))]
+        command.arg(&handler.command);
+    }
     command.envs(&handler.env);
     command
 }

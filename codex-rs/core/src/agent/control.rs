@@ -283,7 +283,6 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         agent_path: AgentPath,
-        last_task_message: Option<String>,
     ) {
         let reservation = self
             .state
@@ -292,7 +291,6 @@ impl AgentControl {
         reservation.commit(AgentMetadata {
             agent_id: Some(agent_id),
             agent_path: Some(agent_path),
-            last_task_message,
             ..Default::default()
         });
     }

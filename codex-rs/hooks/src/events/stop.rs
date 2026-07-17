@@ -433,8 +433,6 @@ mod tests {
     use super::aggregate_results;
     use super::parse_completed;
     use crate::engine::ConfiguredHandler;
-    use crate::engine::ConfiguredHandlerBehavior;
-    use crate::engine::HandlerExecution;
     use crate::engine::command_runner::CommandRunResult;
 
     #[test]
@@ -635,8 +633,7 @@ mod tests {
             event_name: HookEventName::Stop,
             matcher: None,
             command: "echo hook".to_string(),
-            execution: HandlerExecution::ShellCommand,
-            behavior: ConfiguredHandlerBehavior::Canonical,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             timeout_sec: 600,
             status_message: None,
             additional_context_limit: Default::default(),

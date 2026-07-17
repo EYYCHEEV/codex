@@ -3,11 +3,10 @@ use std::path::Path;
 
 use anyhow::Context;
 use anyhow::Result;
-use codex_core::StartThreadOptions;
-use codex_config::CONFIG_TOML_FILE;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::config::ThreadStoreConfig;
+use codex_core::StartThreadOptions;
 use codex_features::Feature;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
@@ -378,34 +377,6 @@ fn write_pre_tool_use_hook(
     mode: &str,
     reason: &str,
 ) -> Result<()> {
-    let script_path = write_pre_tool_use_hook_script(home, mode, reason)?;
-
-    let mut group = serde_json::json!({
-        "hooks": [{
-            "type": "command",
-            "command": format!("python3 {}", script_path.display()),
-            "statusMessage": "running pre tool use hook",
-        }]
-    });
-    if let Some(matcher) = matcher {
-        group["matcher"] = Value::String(matcher.to_string());
-    }
-
-    let hooks = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [group]
-        }
-    });
-
-    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
-    Ok(())
-}
-
-fn write_pre_tool_use_hook_script(
-    home: &Path,
-    mode: &str,
-    reason: &str,
-) -> Result<std::path::PathBuf> {
     let script_path = home.join("pre_tool_use_hook.py");
     let log_path = home.join("pre_tool_use_hook_log.jsonl");
     let mode_json = serde_json::to_string(mode).context("serialize pre tool use mode")?;
@@ -451,35 +422,37 @@ elif mode == "json_deny_with_context":
 elif mode == "exit_2":
     sys.stderr.write(reason + "\n")
     raise SystemExit(2)
+elif mode == "fail_closed":
+    sys.stderr.write(reason + "\n")
+    raise SystemExit(1)
 "#,
         log_path = log_path.display(),
         mode_json = mode_json,
         reason_json = reason_json,
     );
 
-    fs::write(&script_path, script).context("write pre tool use hook script")?;
-    Ok(script_path)
-}
+    let mut group = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": format!("python3 {}", script_path.display()),
+            "statusMessage": "running pre tool use hook",
+        }]
+    });
+    if let Some(matcher) = matcher {
+        group["matcher"] = Value::String(matcher.to_string());
+    }
+    if mode == "fail_closed" {
+        group["hooks"][0]["onFailure"] = Value::String("deny".to_string());
+    }
 
-fn install_legacy_pre_tool_use_hook(
-    config: &mut codex_core::config::Config,
-    matcher: &str,
-    command_argv: &[String],
-) -> Result<()> {
-    let config_path = AbsolutePathBuf::from_absolute_path(config.codex_home.join(CONFIG_TOML_FILE))
-        .context("config path should be absolute")?;
-    let command = serde_json::to_string(command_argv).context("serialize hook argv")?;
-    let user_config: toml::Value = toml::from_str(&format!(
-        r#"
-            [[hooks.pre_tool_use]]
-            matcher = {matcher:?}
-            command = {command}
-        "#,
-    ))
-    .context("legacy hook config should parse")?;
-    config.config_layer_stack = config
-        .config_layer_stack
-        .with_user_config(&config_path, user_config);
+    let hooks = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [group]
+        }
+    });
+
+    fs::write(&script_path, script).context("write pre tool use hook script")?;
+    fs::write(home.join("hooks.json"), hooks.to_string()).context("write hooks.json")?;
     Ok(())
 }
 
@@ -3125,7 +3098,7 @@ async fn pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
     let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PreToolUse");
-    assert_eq!(hook_inputs[0]["tool_name"], "shell_command");
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
     let transcript_path = hook_inputs[0]["transcript_path"]
@@ -3144,6 +3117,73 @@ async fn pre_tool_use_blocks_shell_command_before_execution() -> Result<()> {
             .as_str()
             .is_some_and(|turn_id| !turn_id.is_empty())
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_tool_use_fail_closed_hook_blocks_shell_command_before_execution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "pretooluse-fail-closed-shell-command";
+    let marker = std::env::temp_dir().join("pretooluse-fail-closed-shell-command-marker");
+    let command = format!("printf blocked > {}", marker.display());
+    let args = serde_json::json!({ "command": command });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "shell_command",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "hook failed closed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_pre_tool_use_hook(home, Some("^Bash$"), "fail_closed", "hook exploded")
+                .expect("failed to write fail-closed pre tool use hook fixture");
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build(&server).await?;
+
+    if marker.exists() {
+        fs::remove_file(&marker).context("remove leftover fail-closed marker")?;
+    }
+
+    test.submit_turn_with_permission_profile(
+        "run the fail-closed shell command",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("fail-closed shell command output string");
+    assert!(output.contains(
+        "Command blocked by PreToolUse hook: Hook failed (fail-closed): hook exited with code 1"
+    ));
+    assert!(!marker.exists(), "blocked command should not run");
+
+    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
 
     Ok(())
 }
@@ -3830,7 +3870,7 @@ print(json.dumps({{
     let hook_inputs = read_hook_inputs_from_log(&log_path)?;
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PreToolUse");
-    assert_eq!(hook_inputs[0]["tool_name"], "shell_command");
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
 
@@ -4010,7 +4050,7 @@ async fn pre_tool_use_merges_hooks_json_and_config_toml() -> Result<()> {
     .collect::<Vec<_>>();
     let expected_hook_inputs = vec![serde_json::json!({
         "hook_event_name": "PreToolUse",
-        "tool_name": "shell_command",
+        "tool_name": "Bash",
         "tool_use_id": call_id,
         "tool_input": {
             "command": command,
@@ -4314,176 +4354,6 @@ async fn pre_tool_use_blocks_apply_patch_with_write_alias() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_pre_tool_use_blocks_exec_command_without_codex_hooks_feature() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-    let call_id = "legacy-pretooluse-exec-command";
-    let marker = std::env::temp_dir().join("legacy-pretooluse-exec-command-marker");
-    let command = format!("printf blocked > {}", marker.display());
-    let args = serde_json::json!({ "cmd": command });
-    let responses = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                core_test_support::responses::ev_function_call(
-                    call_id,
-                    "exec_command",
-                    &serde_json::to_string(&args)?,
-                ),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "legacy exec command blocked"),
-                ev_completed("resp-2"),
-            ]),
-        ],
-    )
-    .await;
-
-    let mut builder = test_codex()
-        .with_pre_build_hook(|home| {
-            if let Err(error) =
-                write_pre_tool_use_hook_script(home, "json_deny", "blocked legacy exec command")
-            {
-                panic!("failed to write legacy pre tool use hook script fixture: {error}");
-            }
-        })
-        .with_config(|config| {
-            config.use_experimental_unified_exec_tool = true;
-            config
-                .features
-                .enable(Feature::UnifiedExec)
-                .expect("test config should allow feature update");
-            let script_path = config.codex_home.join("pre_tool_use_hook.py");
-            if let Err(error) = install_legacy_pre_tool_use_hook(
-                config,
-                "exec_command",
-                &["python3".to_string(), script_path.display().to_string()],
-            ) {
-                panic!("failed to install legacy pre tool use hook config: {error}");
-            }
-        });
-    let test = builder.build(&server).await?;
-
-    if marker.exists() {
-        fs::remove_file(&marker).context("remove leftover legacy exec marker")?;
-    }
-
-    test.submit_turn("run the blocked legacy exec command")
-        .await?;
-
-    let requests = responses.requests();
-    assert_eq!(requests.len(), 2);
-    let output_item = requests[1].function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("legacy exec command output string");
-    assert!(
-        output.contains("Command blocked by PreToolUse hook: blocked legacy exec command"),
-        "blocked legacy exec command output should surface the hook reason",
-    );
-    assert!(
-        output.contains(&format!("Command: {command}")),
-        "blocked legacy exec command output should surface the blocked command",
-    );
-    assert!(
-        !marker.exists(),
-        "blocked legacy exec command should not execute",
-    );
-
-    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
-    assert_eq!(hook_inputs.len(), 1);
-    assert_eq!(hook_inputs[0]["tool_name"], "exec_command");
-    assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
-    assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn legacy_pre_tool_use_blocks_non_shell_tools() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = start_mock_server().await;
-    let call_id = "legacy-pretooluse-update-plan";
-    let args = serde_json::json!({
-        "plan": [{
-            "step": "watch the tide",
-            "status": "pending",
-        }]
-    });
-    let responses = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                core_test_support::responses::ev_function_call(
-                    call_id,
-                    "update_plan",
-                    &serde_json::to_string(&args)?,
-                ),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "legacy update plan blocked"),
-                ev_completed("resp-2"),
-            ]),
-        ],
-    )
-    .await;
-
-    let mut builder = test_codex()
-        .with_pre_build_hook(|home| {
-            if let Err(error) =
-                write_pre_tool_use_hook_script(home, "json_deny", "blocked update plan")
-            {
-                panic!("failed to write legacy pre tool use hook script fixture: {error}");
-            }
-        })
-        .with_config(|config| {
-            let script_path = config.codex_home.join("pre_tool_use_hook.py");
-            if let Err(error) = install_legacy_pre_tool_use_hook(
-                config,
-                "update_plan",
-                &["python3".to_string(), script_path.display().to_string()],
-            ) {
-                panic!("failed to install legacy pre tool use hook config: {error}");
-            }
-        });
-    let test = builder.build(&server).await?;
-
-    test.submit_turn("update the plan with the tide note")
-        .await?;
-
-    let requests = responses.requests();
-    assert_eq!(requests.len(), 2);
-    let output_item = requests[1].function_call_output(call_id);
-    let output = output_item
-        .get("output")
-        .and_then(Value::as_str)
-        .expect("legacy update plan output string");
-    assert!(
-        output.contains("Tool blocked by PreToolUse hook: blocked update plan. Tool: update_plan"),
-        "blocked non-shell tool output should surface the hook reason",
-    );
-
-    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
-    assert_eq!(hook_inputs.len(), 1);
-    assert_eq!(hook_inputs[0]["tool_name"], "update_plan");
-    assert_eq!(
-        hook_inputs[0]["tool_input"]["plan"][0]["step"],
-        "watch the tide"
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pre_tool_use_does_not_fire_for_plan_tool() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -4596,7 +4466,7 @@ async fn pre_tool_use_blocks_local_function_tool_before_execution() -> Result<()
         .expect("blocked local function tool output string");
     assert!(
         output.contains(&format!(
-            "Tool blocked by PreToolUse hook: {reason}. Tool: test_sync_tool"
+            "Tool call blocked by PreToolUse hook: {reason}. Tool: test_sync_tool"
         )),
         "blocked local function output should surface the hook reason and tool name",
     );
@@ -4735,7 +4605,7 @@ async fn post_tool_use_records_additional_context_for_shell_command() -> Result<
     let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PostToolUse");
-    assert_eq!(hook_inputs[0]["tool_name"], "shell_command");
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
     assert_eq!(
@@ -5098,14 +4968,14 @@ async fn post_tool_use_blocks_when_exec_session_completes_via_write_stdin() -> R
 
     let pre_hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(pre_hook_inputs.len(), 1);
-    assert_eq!(pre_hook_inputs[0]["tool_name"], "exec_command");
+    assert_eq!(pre_hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(pre_hook_inputs[0]["tool_use_id"], start_call_id);
     assert_eq!(pre_hook_inputs[0]["tool_input"]["command"], command);
 
     let post_hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(post_hook_inputs.len(), 1);
     assert_eq!(post_hook_inputs[0]["hook_event_name"], "PostToolUse");
-    assert_eq!(post_hook_inputs[0]["tool_name"], "exec_command");
+    assert_eq!(post_hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(post_hook_inputs[0]["tool_use_id"], start_call_id);
     assert_eq!(post_hook_inputs[0]["tool_input"]["command"], command);
     assert!(

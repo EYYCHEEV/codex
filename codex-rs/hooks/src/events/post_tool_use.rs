@@ -333,8 +333,6 @@ mod tests {
     use super::parse_completed;
     use super::preview;
     use crate::engine::ConfiguredHandler;
-    use crate::engine::ConfiguredHandlerBehavior;
-    use crate::engine::HandlerExecution;
     use crate::engine::command_runner::CommandRunResult;
     use crate::events::common;
     use crate::output_spill::AdditionalContext;
@@ -579,8 +577,7 @@ mod tests {
             event_name: HookEventName::PostToolUse,
             matcher: Some("^Bash$".to_string()),
             command: "python3 post_tool_use_hook.py".to_string(),
-            execution: HandlerExecution::ShellCommand,
-            behavior: ConfiguredHandlerBehavior::Canonical,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             timeout_sec: 5,
             status_message: Some("running post tool use hook".to_string()),
             additional_context_limit: Default::default(),

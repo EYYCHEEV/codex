@@ -3472,11 +3472,12 @@ mod tests {
         .await;
 
         let message = recv_broadcast_message(&mut rx).await?;
-        let OutgoingMessage::AppServerNotification(ServerNotification::AccountSelectionUpdated(
-            notification,
-        )) = message
-        else {
+        let OutgoingMessage::AppServerNotification(envelope) = message else {
             bail!("unexpected message: {message:?}");
+        };
+        let ServerNotification::AccountSelectionUpdated(notification) = envelope.notification
+        else {
+            bail!("unexpected notification: {:?}", envelope.notification);
         };
         assert_eq!(notification.thread_id, conversation_id.to_string());
         assert_eq!(
@@ -4021,10 +4022,11 @@ mod tests {
         else {
             bail!("non-pooled rate notification must remain thread scoped");
         };
-        match second {
-            OutgoingMessage::AppServerNotification(
-                ServerNotification::AccountRateLimitsUpdated(payload),
-            ) => {
+        let OutgoingMessage::AppServerNotification(envelope) = second else {
+            bail!("unexpected message: {second:?}");
+        };
+        match envelope.notification {
+            ServerNotification::AccountRateLimitsUpdated(payload) => {
                 assert_eq!(payload.managed_account_id, None);
                 assert_eq!(payload.account_revision, None);
                 assert_eq!(payload.rate_limits.limit_id.as_deref(), Some("codex"));
@@ -4056,6 +4058,7 @@ mod tests {
             secondary: None,
             credits: None,
             individual_limit: None,
+            spend_control_reached: None,
             plan_type: None,
             rate_limit_reached_type: None,
         };
@@ -4078,11 +4081,11 @@ mod tests {
         let OutgoingEnvelope::Broadcast { message } = envelope else {
             bail!("managed rate notification must be global");
         };
-        let OutgoingMessage::AppServerNotification(ServerNotification::AccountRateLimitsUpdated(
-            payload,
-        )) = message
-        else {
+        let OutgoingMessage::AppServerNotification(envelope) = message else {
             bail!("unexpected notification: {message:?}");
+        };
+        let ServerNotification::AccountRateLimitsUpdated(payload) = envelope.notification else {
+            bail!("unexpected notification: {:?}", envelope.notification);
         };
         assert_eq!(
             payload.managed_account_id.as_deref(),
