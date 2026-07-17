@@ -975,11 +975,23 @@ impl AccountRequestProcessor {
                 requires_openai_auth: Some(false),
             }
         } else {
-            let auth = if do_refresh {
+            let mut auth = if do_refresh {
                 self.auth_manager.auth_cached()
             } else {
                 self.auth_manager.auth().await
             };
+            if auth.is_none() {
+                self.auth_manager.reload().await;
+                auth = self.auth_manager.auth_cached();
+            }
+            let has_managed_chatgpt_accounts = auth.is_none()
+                && !self
+                    .auth_manager
+                    .stored_managed_chatgpt_accounts()
+                    .map_err(|err| {
+                        internal_error(format!("failed to read managed accounts: {err}"))
+                    })?
+                    .is_empty();
             match auth {
                 Some(auth) => {
                     let permanent_refresh_failure =
@@ -1016,7 +1028,8 @@ impl AccountRequestProcessor {
                     }
                 }
                 None => GetAuthStatusResponse {
-                    auth_method: None,
+                    auth_method: has_managed_chatgpt_accounts
+                        .then_some(codex_app_server_protocol::AuthMode::Chatgpt),
                     auth_token: None,
                     requires_openai_auth: Some(true),
                 },
