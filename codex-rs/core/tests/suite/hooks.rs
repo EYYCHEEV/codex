@@ -511,6 +511,9 @@ elif mode == "json_deny_with_context":
 elif mode == "exit_2":
     sys.stderr.write(reason + "\n")
     raise SystemExit(2)
+elif mode == "fail_closed":
+    sys.stderr.write(reason + "\n")
+    raise SystemExit(1)
 "#,
         log_path = log_path.display(),
         mode_json = mode_json,
@@ -526,6 +529,9 @@ elif mode == "exit_2":
     });
     if let Some(matcher) = matcher {
         group["matcher"] = Value::String(matcher.to_string());
+    }
+    if mode == "fail_closed" {
+        group["hooks"][0]["onFailure"] = Value::String("deny".to_string());
     }
 
     let hooks = serde_json::json!({
@@ -3429,7 +3435,7 @@ async fn pre_tool_use_json_deny_blocks_exec_command_before_execution() -> Result
     let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PreToolUse");
-    assert_eq!(hook_inputs[0]["tool_name"], "shell_command");
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
     let transcript_path = hook_inputs[0]["transcript_path"]
@@ -3448,6 +3454,72 @@ async fn pre_tool_use_json_deny_blocks_exec_command_before_execution() -> Result
             .as_str()
             .is_some_and(|turn_id| !turn_id.is_empty())
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_tool_use_fail_closed_hook_blocks_exec_command_before_execution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "pretooluse-fail-closed-exec-command";
+    let marker_dir = TempDir::new()?;
+    let marker = marker_dir
+        .path()
+        .join("pretooluse-fail-closed-exec-command-marker");
+    let command = format!("printf blocked > {}", marker.display());
+    let args = serde_json::json!({ "cmd": command });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_command",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "hook failed closed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_pre_tool_use_hook(home, Some("^Bash$"), "fail_closed", "hook exploded")
+                .expect("failed to write fail-closed pre tool use hook fixture");
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build(&server).await?;
+
+    test.submit_turn_with_permission_profile(
+        "run the fail-closed shell command",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("fail-closed shell command output string");
+    assert!(output.contains(
+        "Command blocked by PreToolUse hook: Hook failed (fail-closed): hook exited with code 1"
+    ));
+    assert!(!marker.exists(), "blocked command should not run");
+
+    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
 
     Ok(())
 }
@@ -5159,7 +5231,7 @@ async fn post_tool_use_records_additional_context_for_exec_command() -> Result<(
     let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(hook_inputs.len(), 1);
     assert_eq!(hook_inputs[0]["hook_event_name"], "PostToolUse");
-    assert_eq!(hook_inputs[0]["tool_name"], "shell_command");
+    assert_eq!(hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], command);
     assert_eq!(
@@ -5507,14 +5579,14 @@ async fn post_tool_use_blocks_when_exec_session_completes_via_write_stdin() -> R
 
     let pre_hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(pre_hook_inputs.len(), 1);
-    assert_eq!(pre_hook_inputs[0]["tool_name"], "exec_command");
+    assert_eq!(pre_hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(pre_hook_inputs[0]["tool_use_id"], start_call_id);
     assert_eq!(pre_hook_inputs[0]["tool_input"]["command"], command);
 
     let post_hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
     assert_eq!(post_hook_inputs.len(), 1);
     assert_eq!(post_hook_inputs[0]["hook_event_name"], "PostToolUse");
-    assert_eq!(post_hook_inputs[0]["tool_name"], "exec_command");
+    assert_eq!(post_hook_inputs[0]["tool_name"], "Bash");
     assert_eq!(post_hook_inputs[0]["tool_use_id"], start_call_id);
     assert_eq!(post_hook_inputs[0]["tool_input"]["command"], command);
     assert!(

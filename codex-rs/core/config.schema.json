@@ -1690,6 +1690,25 @@
         }
       ]
     },
+    "HookFailurePolicy": {
+      "description": "Controls whether a failed `PreToolUse` command blocks the tool call.",
+      "oneOf": [
+        {
+          "description": "Preserve the default fail-open behavior.",
+          "enum": [
+            "allow"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Block the tool call when the hook cannot produce a valid decision.",
+          "enum": [
+            "deny"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "HookHandlerConfig": {
       "oneOf": [
         {
@@ -1710,6 +1729,14 @@
             "commandWindows": {
               "default": null,
               "type": "string"
+            },
+            "onFailure": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/HookFailurePolicy"
+                }
+              ],
+              "description": "Failure behavior for `PreToolUse` command handlers. Other hook events ignore this field."
             },
             "statusMessage": {
               "default": null,

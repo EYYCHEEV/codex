@@ -601,6 +601,7 @@ mod tests {
             kind: crate::engine::ConfiguredHandlerKind::Command {
                 command: "python3 post_tool_use_hook.py".to_string(),
                 r#async,
+                failure_policy: codex_config::HookFailurePolicy::Allow,
                 env: std::collections::HashMap::new(),
             },
         }

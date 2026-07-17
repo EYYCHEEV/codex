@@ -552,6 +552,7 @@ mod tests {
             kind: crate::engine::ConfiguredHandlerKind::Command {
                 command: "echo hook".to_string(),
                 r#async: false,
+                failure_policy: codex_config::HookFailurePolicy::Allow,
                 env: std::collections::HashMap::new(),
             },
         }

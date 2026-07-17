@@ -65,6 +65,7 @@ async fn cmd_shell_runs_quoted_hook_command_path() {
         kind: ConfiguredHandlerKind::Command {
             command: command.clone(),
             r#async: false,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: env.clone(),
         },
     };
@@ -115,6 +116,7 @@ async fn fast_exiting_hook_preserves_stdout_when_stdin_is_not_consumed() {
         kind: ConfiguredHandlerKind::Command {
             command: command.to_string(),
             r#async: false,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: env.clone(),
         },
     };
@@ -154,6 +156,7 @@ async fn command_hook_does_not_expose_configured_noise_auth_token() {
         kind: ConfiguredHandlerKind::Command {
             command: command.to_string(),
             r#async: false,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: env.clone(),
         },
     };
@@ -315,6 +318,7 @@ fn write_handler(temp: &TempDir, source: &str) -> ConfiguredHandler {
         kind: ConfiguredHandlerKind::Command {
             command: format!("python3 {}", script_path.display()),
             r#async: true,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: HashMap::new(),
         },
     }
