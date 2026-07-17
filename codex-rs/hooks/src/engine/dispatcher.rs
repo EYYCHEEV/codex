@@ -362,6 +362,7 @@ mod tests {
             kind: ConfiguredHandlerKind::Command {
                 command: command.to_string(),
                 r#async: false,
+                failure_policy: codex_config::HookFailurePolicy::Allow,
                 env: std::collections::HashMap::new(),
             },
         }

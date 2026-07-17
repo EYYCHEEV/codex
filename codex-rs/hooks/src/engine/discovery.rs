@@ -509,6 +509,7 @@ fn append_matcher_groups(
                     r#async,
                     status_message,
                     additional_context_limit,
+                    on_failure,
                 } => {
                     let command = if cfg!(windows) {
                         command_windows.unwrap_or(command)
@@ -528,7 +529,11 @@ fn append_matcher_groups(
                         source.path.as_path(),
                         warnings,
                     );
-                    let runs_async = r#async && event_name != HookEventName::SessionEnd;
+                    let fail_closed_pre_tool_use = event_name == HookEventName::PreToolUse
+                        && on_failure == codex_config::HookFailurePolicy::Deny;
+                    let runs_async = r#async
+                        && event_name != HookEventName::SessionEnd
+                        && !fail_closed_pre_tool_use;
                     if r#async && !runs_async {
                         warnings.push(format!(
                             "running async {} hook synchronously in {}",
@@ -563,6 +568,7 @@ fn append_matcher_groups(
                         r#async,
                         status_message: status_message.clone(),
                         additional_context_limit: normalized_additional_context_limit,
+                        on_failure,
                     };
                     let command = source.env.iter().fold(command, |command, (key, value)| {
                         command.replace(&format!("${{{key}}}"), value)
@@ -573,6 +579,7 @@ fn append_matcher_groups(
                             command,
                             env: source.env.clone(),
                             r#async: runs_async,
+                            failure_policy: on_failure,
                         },
                         timeout_sec,
                         status_message,
@@ -976,6 +983,7 @@ mod tests {
                 r#async: false,
                 status_message: None,
                 additional_context_limit: None,
+                on_failure: codex_config::HookFailurePolicy::Allow,
             }],
         }
     }
@@ -992,6 +1000,7 @@ mod tests {
                 r#async: false,
                 status_message: None,
                 additional_context_limit: Some(additional_context_limit),
+                on_failure: codex_config::HookFailurePolicy::Allow,
             }],
         }
     }
@@ -1266,6 +1275,7 @@ mod tests {
                 kind: ConfiguredHandlerKind::Command {
                     command: "echo hello".to_string(),
                     r#async: false,
+                    failure_policy: codex_config::HookFailurePolicy::Allow,
                     env: std::collections::HashMap::new(),
                 },
             }]
@@ -1306,10 +1316,75 @@ mod tests {
                 kind: ConfiguredHandlerKind::Command {
                     command: "echo hello".to_string(),
                     r#async: false,
+                    failure_policy: codex_config::HookFailurePolicy::Allow,
                     env: std::collections::HashMap::new(),
                 },
             }]
         );
+    }
+
+    #[test]
+    fn pre_tool_use_propagates_fail_closed_policy_during_discovery() {
+        let mut handlers = Vec::new();
+        let mut warnings = Vec::new();
+        let mut display_order = 0;
+        let source_path = source_path();
+        let hook_states = std::collections::HashMap::new();
+        let mut group = command_group(Some("^Bash$"));
+        let HookHandlerConfig::Command { on_failure, .. } = &mut group.hooks[0] else {
+            unreachable!("command_group must contain a command hook");
+        };
+        *on_failure = codex_config::HookFailurePolicy::Deny;
+
+        append_matcher_groups(
+            &mut handlers,
+            &mut Vec::new(),
+            &mut warnings,
+            &mut display_order,
+            &mut hook_handler_source(&source_path, &hook_states),
+            HookEventName::PreToolUse,
+            vec![group],
+        );
+
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(
+            handlers[0].failure_policy(),
+            codex_config::HookFailurePolicy::Deny
+        );
+    }
+
+    #[test]
+    fn fail_closed_pre_tool_use_runs_synchronously() {
+        let mut handlers = Vec::new();
+        let mut warnings = Vec::new();
+        let mut display_order = 0;
+        let source_path = source_path();
+        let hook_states = std::collections::HashMap::new();
+        let mut group = command_group(Some("^Bash$"));
+        let HookHandlerConfig::Command {
+            r#async,
+            on_failure,
+            ..
+        } = &mut group.hooks[0]
+        else {
+            unreachable!("command_group must contain a command hook");
+        };
+        *r#async = true;
+        *on_failure = codex_config::HookFailurePolicy::Deny;
+
+        append_matcher_groups(
+            &mut handlers,
+            &mut Vec::new(),
+            &mut warnings,
+            &mut display_order,
+            &mut hook_handler_source(&source_path, &hook_states),
+            HookEventName::PreToolUse,
+            vec![group],
+        );
+
+        assert_eq!(handlers[0].execution_mode(), HookExecutionMode::Sync);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("running async PreToolUse hook synchronously"));
     }
 
     #[test]
@@ -1338,6 +1413,7 @@ mod tests {
                         r#async: false,
                         status_message: None,
                         additional_context_limit: None,
+                        on_failure: codex_config::HookFailurePolicy::Allow,
                     },
                     HookHandlerConfig::Command {
                         command: "echo clamped".to_string(),
@@ -1346,6 +1422,7 @@ mod tests {
                         r#async: true,
                         status_message: None,
                         additional_context_limit: None,
+                        on_failure: codex_config::HookFailurePolicy::Allow,
                     },
                 ],
             }],
@@ -1428,6 +1505,7 @@ mod tests {
                     r#async: true,
                     status_message: None,
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
         );
@@ -1612,6 +1690,7 @@ mod tests {
                         r#async: false,
                         status_message: None,
                         additional_context_limit: None,
+                        on_failure: codex_config::HookFailurePolicy::Allow,
                     }],
                 }],
                 ..Default::default()
@@ -1643,6 +1722,7 @@ mod tests {
                     r#async: false,
                     status_message: None,
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
         );
@@ -1660,6 +1740,7 @@ mod tests {
                 .to_string(),
                 env: std::collections::HashMap::new(),
                 r#async: false,
+                failure_policy: codex_config::HookFailurePolicy::Allow,
             }
         );
     }

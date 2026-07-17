@@ -28,6 +28,7 @@ use crate::events::user_prompt_submit::UserPromptSubmitRequest;
 use crate::mcp::HookMcpExecutor;
 use crate::output_spill::AdditionalContextLimit;
 use codex_config::ConfigLayerStack;
+use codex_config::HookFailurePolicy;
 use codex_config::HookHandlerConfig;
 use codex_plugin::ExecutorPluginHookSource;
 use codex_plugin::PluginHookSource;
@@ -118,6 +119,7 @@ pub(crate) enum ConfiguredHandlerKind {
         command: String,
         env: HashMap<String, String>,
         r#async: bool,
+        failure_policy: HookFailurePolicy,
     },
     McpTool {
         server: String,
@@ -153,6 +155,13 @@ impl ConfiguredHandler {
     /// Only synchronous hooks can apply control effects.
     pub(crate) fn can_apply_control_effects(&self) -> bool {
         self.execution_mode() == HookExecutionMode::Sync
+    }
+
+    pub(crate) fn failure_policy(&self) -> HookFailurePolicy {
+        match self.kind {
+            ConfiguredHandlerKind::Command { failure_policy, .. } => failure_policy,
+            ConfiguredHandlerKind::McpTool { .. } => HookFailurePolicy::Allow,
+        }
     }
 
     pub fn run_id(&self) -> String {
