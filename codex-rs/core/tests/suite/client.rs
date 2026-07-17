@@ -1492,6 +1492,24 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
 async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
     skip_if_no_network!();
 
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use wiremock::Respond;
+
+    struct HandshakeSequence {
+        calls: AtomicUsize,
+    }
+
+    impl Respond for HandshakeSequence {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            match self.calls.fetch_add(1, Ordering::SeqCst) {
+                0 => ResponseTemplate::new(401).set_body_string("unauthorized"),
+                1 => ResponseTemplate::new(426),
+                call => panic!("unexpected WebSocket handshake {call}"),
+            }
+        }
+    }
+
     let server = MockServer::start().await;
     let _refresh_url_guard = EnvGuard::set(
         codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
@@ -1510,6 +1528,14 @@ async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
         ],
     )
     .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/responses"))
+        .respond_with(HandshakeSequence {
+            calls: AtomicUsize::new(0),
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
 
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
@@ -1545,7 +1571,7 @@ async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
     };
     let provider = ModelProviderInfo {
         base_url: Some(format!("{}/v1", server.uri())),
-        supports_websockets: false,
+        supports_websockets: true,
         ..built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone()
     };
     let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
@@ -1553,7 +1579,13 @@ async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
         codex_home.path().to_path_buf(),
     );
 
-    send_responses_request(&codex_home, provider, auth_manager).await;
+    send_responses_request(
+        &codex_home,
+        provider,
+        auth_manager,
+        ResponsesRequestRetryOwner::TurnAfterWebsocketPrewarm,
+    )
+    .await;
 
     let requests = responses_mock.requests();
     assert_eq!(requests.len(), 3);
@@ -1705,7 +1737,18 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
     let codex_home = TempDir::new().unwrap();
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::from_api_key("unused-api-key"));
-    send_responses_request(&codex_home, provider, auth_manager).await;
+    send_responses_request(
+        &codex_home,
+        provider,
+        auth_manager,
+        ResponsesRequestRetryOwner::Client,
+    )
+    .await;
+}
+
+enum ResponsesRequestRetryOwner {
+    Client,
+    TurnAfterWebsocketPrewarm,
 }
 
 #[expect(clippy::expect_used)]
@@ -1713,6 +1756,7 @@ async fn send_responses_request(
     codex_home: &TempDir,
     provider: ModelProviderInfo,
     auth_manager: Arc<AuthManager>,
+    retry_owner: ResponsesRequestRetryOwner,
 ) {
     let mut config = load_default_config_for_test(codex_home).await;
     config.model_provider_id = provider.name.clone();
@@ -1768,19 +1812,83 @@ async fn send_responses_request(
         internal_chat_message_metadata_passthrough: None,
     });
 
-    let mut stream = client_session
-        .stream(
-            &prompt,
-            &model_info,
-            &session_telemetry,
-            effort,
-            summary.unwrap_or(ReasoningSummary::Auto),
-            /*service_tier*/ None,
-            &responses_metadata,
-            &codex_rollout_trace::InferenceTraceContext::disabled(),
-        )
-        .await
-        .expect("responses stream to start");
+    let mut stream = match retry_owner {
+        ResponsesRequestRetryOwner::Client => client_session
+            .stream(
+                &prompt,
+                &model_info,
+                &session_telemetry,
+                effort,
+                summary.unwrap_or(ReasoningSummary::Auto),
+                /*service_tier*/ None,
+                &responses_metadata,
+                &codex_rollout_trace::InferenceTraceContext::disabled(),
+            )
+            .await
+            .expect("responses stream to start"),
+        ResponsesRequestRetryOwner::TurnAfterWebsocketPrewarm => {
+            loop {
+                let request_setup = client_session
+                    .current_client_setup(Some(model_info.slug.as_str()), /*session_id*/ None)
+                    .await
+                    .expect("prewarm request setup");
+                match client_session
+                    .prewarm_websocket(
+                        &prompt,
+                        &model_info,
+                        &session_telemetry,
+                        effort.clone(),
+                        summary.unwrap_or(ReasoningSummary::Auto),
+                        /*service_tier*/ None,
+                        &responses_metadata,
+                        request_setup,
+                    )
+                    .await
+                {
+                    Ok(()) => break,
+                    Err(error)
+                        if client_session
+                            .recover_last_managed_attempt(&error, /*committed*/ false)
+                            .await =>
+                    {
+                        continue;
+                    }
+                    Err(error) => panic!("responses prewarm failed: {error}"),
+                }
+            }
+
+            loop {
+                let request_setup = client_session
+                    .current_client_setup(Some(model_info.slug.as_str()), /*session_id*/ None)
+                    .await
+                    .expect("request setup");
+                match client_session
+                    .stream_attempt_with_setup(
+                        &prompt,
+                        &model_info,
+                        &session_telemetry,
+                        effort.clone(),
+                        summary.unwrap_or(ReasoningSummary::Auto),
+                        /*service_tier*/ None,
+                        &responses_metadata,
+                        &codex_rollout_trace::InferenceTraceContext::disabled(),
+                        request_setup,
+                    )
+                    .await
+                {
+                    Ok(stream) => break stream,
+                    Err(error)
+                        if client_session
+                            .recover_last_managed_attempt(&error, /*committed*/ false)
+                            .await =>
+                    {
+                        continue;
+                    }
+                    Err(error) => panic!("responses stream failed to start: {error}"),
+                }
+            }
+        }
+    };
 
     let mut saw_completed = false;
     while let Some(event) = stream.next().await {
