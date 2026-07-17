@@ -712,6 +712,7 @@ fn map_hook_handler_to_api(handler: CoreHookHandlerConfig) -> ConfiguredHookHand
             r#async,
             status_message,
             additional_context_limit,
+            on_failure: _,
         } => ConfiguredHookHandler::Command {
             command,
             command_windows,

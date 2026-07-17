@@ -48,6 +48,7 @@ fn hooks_file_deserializes_existing_json_shape() {
                         r#async: false,
                         status_message: Some("checking".to_string()),
                         additional_context_limit: Some(4096),
+                        on_failure: super::HookFailurePolicy::Allow,
                     }],
                 }],
                 ..Default::default()
@@ -182,11 +183,44 @@ additionalContextLimit = 4096
                     r#async: false,
                     status_message: Some("checking".to_string()),
                     additional_context_limit: Some(4096),
+                    on_failure: super::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
         }
     );
+}
+
+#[test]
+fn hook_events_deserialize_fail_closed_policy_and_snake_case_alias() {
+    for key in ["onFailure", "on_failure"] {
+        let source = format!(
+            r#"
+[[PreToolUse]]
+matcher = "^Bash$"
+
+[[PreToolUse.hooks]]
+type = "command"
+command = "python3 /tmp/pre.py"
+{key} = "deny"
+"#,
+        );
+        let parsed: HookEventsToml =
+            toml::from_str(&source).expect("fail-closed hook policy should deserialize");
+
+        assert_eq!(
+            parsed.pre_tool_use[0].hooks[0],
+            HookHandlerConfig::Command {
+                command: "python3 /tmp/pre.py".to_string(),
+                command_windows: None,
+                timeout_sec: None,
+                r#async: false,
+                status_message: None,
+                additional_context_limit: None,
+                on_failure: super::HookFailurePolicy::Deny,
+            }
+        );
+    }
 }
 
 #[test]
@@ -220,6 +254,7 @@ command = "python3 /tmp/pre.py"
                         r#async: false,
                         status_message: None,
                         additional_context_limit: None,
+                        on_failure: super::HookFailurePolicy::Allow,
                     }],
                 }],
                 ..Default::default()
@@ -231,7 +266,6 @@ command = "python3 /tmp/pre.py"
                     trusted_hash: Some("sha256:abc123".to_string()),
                 },
             )]),
-            legacy: Default::default(),
         }
     );
 }
@@ -267,6 +301,7 @@ command = "python3 /enterprise/place/pre.py"
                         r#async: false,
                         status_message: None,
                         additional_context_limit: None,
+                        on_failure: super::HookFailurePolicy::Allow,
                     }],
                 }],
                 ..Default::default()
@@ -304,6 +339,7 @@ command_windows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
                     r#async: false,
                     status_message: None,
                     additional_context_limit: None,
+                    on_failure: super::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -340,6 +376,7 @@ commandWindows = "powershell -File C:\\enterprise\\hooks\\pre.ps1"
                     r#async: false,
                     status_message: None,
                     additional_context_limit: None,
+                    on_failure: super::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -356,9 +393,11 @@ fn hook_handler_omits_unset_additional_context_limit() {
         r#async: false,
         status_message: None,
         additional_context_limit: None,
+        on_failure: super::HookFailurePolicy::Allow,
     };
 
     let serialized = serde_json::to_value(handler).expect("hook handler should serialize");
 
     assert_eq!(serialized.get("additionalContextLimit"), None);
+    assert_eq!(serialized.get("onFailure"), None);
 }

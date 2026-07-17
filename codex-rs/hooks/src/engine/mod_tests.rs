@@ -102,6 +102,7 @@ fn permission_request_timeout_only_counts_synchronous_handlers() {
         kind: ConfiguredHandlerKind::Command {
             command: command.to_string(),
             r#async: false,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: HashMap::new(),
         },
     };
@@ -110,6 +111,7 @@ fn permission_request_timeout_only_counts_synchronous_handlers() {
         kind: ConfiguredHandlerKind::Command {
             command: command.to_string(),
             r#async: true,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: HashMap::new(),
         },
         ..synchronous_handler.clone()
@@ -156,6 +158,7 @@ fn pre_tool_use_hook_events(command: impl Into<String>) -> HookEventsToml {
                 r#async: false,
                 status_message: Some("checking".to_string()),
                 additional_context_limit: None,
+                on_failure: codex_config::HookFailurePolicy::Allow,
             }],
         }],
         ..Default::default()
@@ -584,6 +587,7 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
                     r#async: false,
                     status_message: Some("checking".to_string()),
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -692,6 +696,7 @@ async fn requirements_managed_hooks_execute_windows_command_override() {
                     r#async: false,
                     status_message: Some("checking".to_string()),
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -773,6 +778,7 @@ fn unknown_requirement_source_hooks_stay_managed() {
                     r#async: false,
                     status_message: Some("checking".to_string()),
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -843,6 +849,7 @@ fn user_disablement_filters_non_managed_hooks_but_not_managed_hooks() {
                     r#async: false,
                     status_message: Some("checking".to_string()),
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -1087,6 +1094,7 @@ fn requirements_managed_hooks_load_when_managed_dir_is_missing() {
                     r#async: false,
                     status_message: Some("checking".to_string()),
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -1142,6 +1150,7 @@ fn requirements_managed_hooks_load_when_managed_dir_is_missing() {
         ConfiguredHandlerKind::Command {
             command: "echo hi".to_string(),
             r#async: false,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: HashMap::new(),
         }
     );
@@ -1812,6 +1821,7 @@ fn bundled_cleanup_trust_does_not_extend_to_other_handlers() {
             r#async: false,
             status_message: None,
             additional_context_limit: None,
+            on_failure: codex_config::HookFailurePolicy::Allow,
         },
     ]);
     source.hooks.stop.push(MatcherGroup {
@@ -1974,6 +1984,7 @@ fn disabled_hooks_feature_keeps_builtin_cleanup_but_not_trusted_plugin_hooks() {
         r#async: false,
         status_message: None,
         additional_context_limit: None,
+        on_failure: codex_config::HookFailurePolicy::Allow,
     });
     let stack = trusted_plugin_hook_stack(cwd().join("config.toml"), &[source.clone()]);
     let discovered = super::discovery::discover_handlers(
@@ -2039,6 +2050,7 @@ print(json.dumps({
                     r#async: false,
                     status_message: None,
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -2160,6 +2172,7 @@ fn plugin_hook_sources_expand_plugin_placeholders() {
                     r#async: false,
                     status_message: None,
                     additional_context_limit: None,
+                on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             }],
             ..Default::default()
@@ -2193,6 +2206,7 @@ fn plugin_hook_sources_expand_plugin_placeholders() {
                 plugin_data_root.display()
             ),
             r#async: false,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: HashMap::from([
                 ("PLUGIN_ROOT".to_string(), plugin_root.display().to_string()),
                 (

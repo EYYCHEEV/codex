@@ -1692,6 +1692,7 @@ mod tests {
             RateLimitSnapshot {
                 limit_id: None,
                 limit_name: None,
+                normal_model_slug: None,
                 primary: Some(RateLimitWindow {
                     used_percent: 10.0,
                     window_minutes: Some(15),
@@ -1700,12 +1701,14 @@ mod tests {
                 secondary: None,
                 credits: None,
                 individual_limit: None,
+                spend_control_reached: None,
                 plan_type: None,
                 rate_limit_reached_type: None,
             },
             RateLimitSnapshot {
                 limit_id: Some("other".to_string()),
                 limit_name: None,
+                normal_model_slug: None,
                 primary: Some(RateLimitWindow {
                     used_percent: 20.0,
                     window_minutes: Some(30),
@@ -1714,12 +1717,14 @@ mod tests {
                 secondary: None,
                 credits: None,
                 individual_limit: None,
+                spend_control_reached: None,
                 plan_type: None,
                 rate_limit_reached_type: None,
             },
             RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
                 limit_name: None,
+                normal_model_slug: None,
                 primary: Some(RateLimitWindow {
                     used_percent: 30.0,
                     window_minutes: Some(60),
@@ -1732,6 +1737,7 @@ mod tests {
                 }),
                 credits: None,
                 individual_limit: None,
+                spend_control_reached: None,
                 plan_type: None,
                 rate_limit_reached_type: None,
             },
@@ -1762,10 +1768,12 @@ mod tests {
         let observation = managed_rate_observation(vec![RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: None,
+            normal_model_slug: None,
             primary: None,
             secondary: None,
             credits: None,
             individual_limit: None,
+            spend_control_reached: None,
             plan_type: None,
             rate_limit_reached_type: None,
         }]);
