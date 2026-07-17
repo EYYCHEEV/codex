@@ -1150,16 +1150,11 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
         },
     )?;
 
-    let manager = AuthManager::shared(
-        codex_home.path().to_path_buf(),
-        false,
-        AuthCredentialsStoreMode::File,
-        None,
-        None,
-        AuthKeyringBackendKind::Direct,
-        None,
+    seed_managed_accounts(
+        codex_home.path(),
+        &[("zz-startup@example.com", WORKSPACE_ID_SECOND_ALLOWED)],
     )
-    .await;
+    .await?;
     let mut tokens = TokenData::default();
     tokens.id_token.email = Some("timeout@example.com".to_string());
     tokens.id_token.chatgpt_account_id = Some(WORKSPACE_ID_ALLOWED.to_string());
@@ -1171,6 +1166,16 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
     tokens.access_token = "expired-access-token".to_string();
     tokens.refresh_token = "refresh-timeout".to_string();
     tokens.account_id = Some(WORKSPACE_ID_ALLOWED.to_string());
+    let manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
+        AuthCredentialsStoreMode::File,
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        None,
+    )
+    .await;
     manager
         .upsert_managed_chatgpt_oauth(ManagedChatgptOauthCredentials {
             tokens,
@@ -1178,6 +1183,14 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
             oauth_api_key: None,
         })
         .await?;
+    let startup_selection = manager
+        .list_managed_chatgpt_accounts(&codex_login::ManagedChatgptSelectionScope::default())
+        .await?;
+    assert_eq!(
+        startup_selection.selected_account_id.as_deref(),
+        Some("email:zz-startup@example.com"),
+        "startup must select the fresh account so the RPC owns the stale refresh"
+    );
     drop(manager);
 
     Mock::given(method("POST"))
@@ -1221,8 +1234,14 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
     let ServerNotification::AccountPoolUpdated(payload) = parsed else {
         bail!("unexpected notification: {parsed:?}");
     };
-    assert_eq!(payload.accounts.len(), 1);
-    let timeout_status = payload.accounts[0].refresh_status.clone();
+    assert_eq!(payload.accounts.len(), 2);
+    let timeout_status = payload
+        .accounts
+        .iter()
+        .find(|account| account.email.as_deref() == Some("timeout@example.com"))
+        .expect("timed out account must remain in the notification")
+        .refresh_status
+        .clone();
     assert!(matches!(
         &timeout_status,
         ManagedChatgptAccountRefreshStatus::TransientUnavailable { .. }
@@ -1235,8 +1254,16 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
         )
         .await??,
     )?;
-    assert_eq!(first.accounts.len(), 1);
-    assert_eq!(first.accounts[0].refresh_status, timeout_status);
+    assert_eq!(first.accounts.len(), 2);
+    assert_eq!(
+        first
+            .accounts
+            .iter()
+            .find(|account| account.email.as_deref() == Some("timeout@example.com"))
+            .expect("timed out account must remain in the response")
+            .refresh_status,
+        timeout_status
+    );
 
     send_request(
         &mut observer,
@@ -1250,8 +1277,15 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
     .await?;
     let next: ListAccountsResponse =
         to_response(timeout(DEFAULT_READ_TIMEOUT, read_response_for_id(&mut observer, 4)).await??)?;
-    assert_eq!(next.accounts.len(), 1);
-    assert_eq!(next.accounts[0].refresh_status, timeout_status);
+    assert_eq!(next.accounts.len(), 2);
+    assert_eq!(
+        next.accounts
+            .iter()
+            .find(|account| account.email.as_deref() == Some("timeout@example.com"))
+            .expect("timed out account must remain globally observable")
+            .refresh_status,
+        timeout_status
+    );
 
     mock_server.verify().await;
     process.kill().await?;
