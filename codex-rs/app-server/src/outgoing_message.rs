@@ -855,7 +855,9 @@ mod tests {
             json!({
                 "method": "account/rateLimits/updated",
                 "params": {
-                        "rateLimits": {
+                    "managedAccountId": null,
+                    "accountRevision": null,
+                    "rateLimits": {
                         "limitId": "codex",
                         "limitName": null,
                         "primary": {
