@@ -619,7 +619,10 @@ impl TestCodexBuilder {
             });
         let thread_manager = ThreadManager::new(
             &config,
-            codex_core::test_support::auth_manager_from_auth(auth.clone()),
+            codex_core::test_support::auth_manager_from_auth_with_home(
+                auth.clone(),
+                config.codex_home.to_path_buf(),
+            ),
             SessionSource::Exec,
             Arc::clone(&environment_manager),
             Arc::clone(&self.extensions),
@@ -650,7 +653,10 @@ impl TestCodexBuilder {
 
         let new_conversation = match (resume_from, user_shell_override) {
             (Some(path), Some(user_shell_override)) => {
-                let auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
+                let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
+                    auth,
+                    config.codex_home.to_path_buf(),
+                );
                 Box::pin(
                     codex_core::test_support::resume_thread_from_rollout_with_user_shell_override(
                         thread_manager.as_ref(),
@@ -664,7 +670,10 @@ impl TestCodexBuilder {
                 .await?
             }
             (Some(path), None) => {
-                let auth_manager = codex_core::test_support::auth_manager_from_auth(auth);
+                let auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
+                    auth,
+                    config.codex_home.to_path_buf(),
+                );
                 Box::pin(thread_manager.resume_thread_from_rollout(
                     config.clone(),
                     path,
