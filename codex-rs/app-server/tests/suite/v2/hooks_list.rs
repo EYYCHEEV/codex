@@ -58,6 +58,7 @@ fn command_hook_hash(
                 timeout_sec: Some(timeout_sec),
                 r#async: false,
                 status_message: status_message.map(ToOwned::to_owned),
+                on_failure: codex_config::HookFailurePolicy::Allow,
             }],
         },
     };

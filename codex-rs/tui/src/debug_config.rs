@@ -1183,6 +1183,7 @@ approval_policy = "never"
                                 timeout_sec: Some(10),
                                 r#async: false,
                                 status_message: Some("checking".to_string()),
+                                on_failure: codex_config::HookFailurePolicy::Allow,
                             }],
                         }],
                         ..Default::default()
