@@ -7,8 +7,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::types::LegacyHooksConfig;
-
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HooksFile {
@@ -22,8 +20,6 @@ pub struct HooksFile {
 pub struct HooksToml {
     #[serde(flatten)]
     pub events: HookEventsToml,
-    #[serde(flatten)]
-    pub legacy: LegacyHooksConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub state: BTreeMap<String, HookStateToml>,
 }
@@ -163,20 +159,48 @@ pub enum HookHandlerConfig {
         #[serde(default, rename = "statusMessage")]
         status_message: Option<String>,
         /// Approximate token threshold for spilling this hook's `additionalContext` to disk.
-        /// Unset uses 2,500 tokens; `0` disables spilling for this hook. The threshold is
-        /// evaluated against the original context; a spilled preview also includes recovery
-        /// metadata.
+        /// Unset uses 2,500 tokens; `0` disables spilling for this hook.
         #[serde(
             default,
             rename = "additionalContextLimit",
             skip_serializing_if = "Option::is_none"
         )]
         additional_context_limit: Option<usize>,
+        /// Failure behavior for `PreToolUse` command handlers.
+        /// Other hook events ignore this field.
+        #[serde(
+            default,
+            rename = "onFailure",
+            alias = "on_failure",
+            skip_serializing_if = "HookFailurePolicy::is_allow"
+        )]
+        on_failure: HookFailurePolicy,
     },
     #[serde(rename = "prompt")]
     Prompt {},
     #[serde(rename = "agent")]
     Agent {},
+}
+
+/// Controls whether a failed `PreToolUse` command blocks the tool call.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailurePolicy {
+    /// Preserve the upstream fail-open behavior.
+    #[default]
+    Allow,
+    /// Block the tool call when the hook cannot produce a valid decision.
+    Deny,
+}
+
+impl HookFailurePolicy {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde skip_serializing_if requires a borrowed value"
+    )]
+    fn is_allow(&self) -> bool {
+        *self == Self::Allow
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]

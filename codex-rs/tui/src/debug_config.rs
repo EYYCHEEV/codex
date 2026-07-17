@@ -1253,6 +1253,7 @@ approval_policy = "never"
                                 r#async: false,
                                 status_message: Some("checking".to_string()),
                                 additional_context_limit: None,
+                                on_failure: codex_config::HookFailurePolicy::Allow,
                             }],
                         }],
                         ..Default::default()

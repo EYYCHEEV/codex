@@ -96,6 +96,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     };
@@ -134,6 +135,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -148,6 +150,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -184,6 +187,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     };
@@ -235,6 +239,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -328,6 +333,7 @@ async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard(
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -389,6 +395,7 @@ async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard(
         secondary: None,
         credits: None,
         individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });

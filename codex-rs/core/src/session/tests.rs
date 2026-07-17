@@ -1532,6 +1532,7 @@ async fn refresh_runtime_config_refreshes_hooks() -> anyhow::Result<()> {
                     r#async: false,
                     status_message: None,
                     additional_context_limit: None,
+                    on_failure: codex_config::HookFailurePolicy::Allow,
                 }],
             },
         };
@@ -8079,6 +8080,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup),
         )
         .await;
@@ -8087,6 +8089,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup),
         )
         .await;
@@ -8117,6 +8120,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup),
         )
         .await;
@@ -8143,6 +8147,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup),
         )
         .await;
@@ -8207,6 +8212,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup),
         )
         .await;
@@ -8219,6 +8225,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup),
         )
         .await;
@@ -8235,6 +8242,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup),
         )
         .await;
@@ -8255,6 +8263,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &turn_context,
             &turn_context.environments,
             &[],
+            /*executor_capability_discovery*/ None,
             Some(&request_setup.clone()),
         )
         .await;
@@ -8377,6 +8386,7 @@ async fn deferred_environment_roots_refresh_plugin_availability() {
             &environments,
             &resolved_roots,
             /*executor_capability_discovery*/ None,
+            /*request_setup*/ None,
         )
         .await;
 

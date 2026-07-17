@@ -68,19 +68,6 @@ where
     }
 }
 
-#[test]
-fn guardian_session_source_disables_legacy_pre_tool_use() {
-    let guardian_source =
-        SessionSource::SubAgent(SubAgentSource::Other(GUARDIAN_REVIEWER_NAME.to_string()));
-
-    assert!(!crate::session::legacy_pre_tool_use_enabled_for_session(
-        &guardian_source,
-    ));
-    assert!(crate::session::legacy_pre_tool_use_enabled_for_session(
-        &SessionSource::Cli,
-    ));
-}
-
 #[tokio::test]
 async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     let server = start_mock_server().await;

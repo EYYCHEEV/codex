@@ -70,6 +70,7 @@ mod tests {
                             r#async: false,
                             status_message: None,
                             additional_context_limit: None,
+                            on_failure: codex_config::HookFailurePolicy::Allow,
                         },
                     ],
                 }],

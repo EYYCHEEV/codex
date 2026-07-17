@@ -60,7 +60,6 @@ use codex_login::load_auth_dot_json;
 use codex_login::login_with_api_key;
 use codex_login::login_with_bedrock_api_key;
 use codex_login::save_auth;
-use codex_protocol::account::AmazonBedrockCredentialSource;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::AuthMode as DomainAuthMode;
 use core_test_support::responses;
@@ -446,7 +445,7 @@ async fn logout_account_succeeds_when_config_reload_fails() -> Result<()> {
     .await??;
     assert_eq!(
         to_response::<LogoutAccountResponse>(response)?,
-        LogoutAccountResponse {}
+        LogoutAccountResponse::default()
     );
     assert_eq!(load_file_auth(codex_home.path())?, None);
     assert_account_updated(&mut mcp, /*auth_mode*/ None).await?;
@@ -2345,6 +2344,7 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider() -> R
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: Some(BedrockApiKeyAuth {
                 api_key: "managed-bedrock-api-key".to_string(),
@@ -2477,6 +2477,7 @@ async fn login_amazon_bedrock_allows_bedrock_provider_override() -> Result<()> {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: Some(BedrockApiKeyAuth {
                 api_key: "managed-bedrock-api-key".to_string(),
@@ -2548,7 +2549,7 @@ async fn logout_managed_bedrock_restores_default_account() -> Result<()> {
     .await??;
     assert_eq!(
         to_response::<LogoutAccountResponse>(response)?,
-        LogoutAccountResponse {}
+        LogoutAccountResponse::default()
     );
     assert_eq!(load_file_auth(codex_home.path())?, None);
     assert_eq!(read_config_toml(codex_home.path())?, expected_config);
@@ -2643,7 +2644,7 @@ async fn logout_managed_bedrock_preserves_changed_provider_without_experimental_
     .await??;
     assert_eq!(
         to_response::<LogoutAccountResponse>(response)?,
-        LogoutAccountResponse {}
+        LogoutAccountResponse::default()
     );
     assert_eq!(load_file_auth(codex_home.path())?, None);
     assert_eq!(read_config_toml(codex_home.path())?, expected_config);

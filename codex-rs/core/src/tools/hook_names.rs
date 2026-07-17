@@ -50,39 +50,9 @@ impl HookToolName {
         }
     }
 
-    /// Returns the hook identity historically used for permission hooks on
-    /// shell-like tools.
+    /// Returns the hook identity historically used for shell-like tools.
     pub(crate) fn bash() -> Self {
-        Self {
-            name: "Bash".to_string(),
-            matcher_aliases: vec![
-                "shell_command".to_string(),
-                "exec_command".to_string(),
-                "local_shell".to_string(),
-            ],
-        }
-    }
-
-    /// Returns the hook identity for a shell-family tool call.
-    ///
-    /// Hook stdin preserves the actual invoked Codex tool name
-    /// (`shell_command`, `exec_command`, `local_shell`, or `shell`) while hook
-    /// matcher selection also accepts the sibling shell tool names plus the
-    /// historical `Bash` matcher.
-    pub(crate) fn shell(name: impl Into<String>) -> Self {
-        let name = name.into();
-        let mut matcher_aliases = vec![
-            "Bash".to_string(),
-            "shell".to_string(),
-            "shell_command".to_string(),
-            "exec_command".to_string(),
-            "local_shell".to_string(),
-        ];
-        matcher_aliases.retain(|alias| alias != &name);
-        Self {
-            name,
-            matcher_aliases,
-        }
+        Self::new("Bash")
     }
 
     /// Returns the canonical hook name serialized into hook stdin.
@@ -93,12 +63,5 @@ impl HookToolName {
     /// Returns additional matcher inputs that should select the same handlers.
     pub(crate) fn matcher_aliases(&self) -> &[String] {
         &self.matcher_aliases
-    }
-
-    pub(crate) fn is_shell_family(&self) -> bool {
-        matches!(
-            self.name.as_str(),
-            "Bash" | "shell" | "shell_command" | "exec_command" | "local_shell"
-        )
     }
 }

@@ -25,7 +25,7 @@ use crate::events::user_prompt_submit::UserPromptSubmitRequest;
 use crate::output_spill::AdditionalContextLimit;
 use crate::output_spill::HookOutputSpiller;
 use codex_config::ConfigLayerStack;
-use codex_config::types::HookFailurePolicy;
+use codex_config::HookFailurePolicy;
 use codex_plugin::PluginHookSource;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookEventName;
@@ -43,24 +43,11 @@ pub(crate) struct CommandShell {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HandlerExecution {
-    ShellCommand,
-    Argv(Vec<String>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ConfiguredHandlerBehavior {
-    Canonical,
-    LegacyPreToolUse { on_failure: HookFailurePolicy },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ConfiguredHandler {
     pub event_name: codex_protocol::protocol::HookEventName,
     pub matcher: Option<String>,
     pub command: String,
-    pub execution: HandlerExecution,
-    pub behavior: ConfiguredHandlerBehavior,
+    pub failure_policy: HookFailurePolicy,
     pub timeout_sec: u64,
     pub status_message: Option<String>,
     pub additional_context_limit: AdditionalContextLimit,
@@ -127,15 +114,14 @@ pub(crate) struct ClaudeHooksEngine {
 
 impl ClaudeHooksEngine {
     pub(crate) fn new(
-        canonical_enabled: bool,
-        legacy_pre_tool_use_enabled: bool,
+        enabled: bool,
         bypass_hook_trust: bool,
         config_layer_stack: Option<&ConfigLayerStack>,
         plugin_hook_sources: Vec<PluginHookSource>,
         plugin_hook_load_warnings: Vec<String>,
         shell: CommandShell,
     ) -> Self {
-        if !canonical_enabled && !legacy_pre_tool_use_enabled {
+        if !enabled {
             return Self {
                 handlers: Vec::new(),
                 warnings: Vec::new(),
@@ -146,8 +132,6 @@ impl ClaudeHooksEngine {
 
         let _ = schema_loader::generated_hook_schemas();
         let discovered = discovery::discover_handlers(
-            canonical_enabled,
-            legacy_pre_tool_use_enabled,
             config_layer_stack,
             plugin_hook_sources,
             plugin_hook_load_warnings,

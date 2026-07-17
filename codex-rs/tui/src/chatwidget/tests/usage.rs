@@ -1,5 +1,4 @@
 use super::super::reset_credits::ResetCreditOption;
-use super::super::reset_credits::rate_limit_reset_scope;
 use super::super::reset_credits::reset_credit_options;
 use super::*;
 use chrono::TimeZone;
@@ -162,11 +161,6 @@ async fn managed_usage_uses_selected_row_plan_and_never_exposes_singular_reset_f
         chat.current_plan_type(),
         Some(codex_protocol::account::PlanType::Free)
     );
-    assert!(matches!(
-        rate_limit_reset_scope(&chat.rate_limit_snapshots_by_limit_id, chat.plan_type),
-        RateLimitResetScope::Monthly
-    ));
-
     chat.dispatch_command(SlashCommand::Usage);
 
     let rendered = render_bottom_popup(&chat, /*width*/ 80);
