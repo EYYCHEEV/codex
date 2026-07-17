@@ -240,14 +240,10 @@ impl ModelClientSession {
                 Some(responses_metadata.session_id.as_str()),
             );
             let recovery_key = UnauthorizedRecoveryKey::for_setup(&client_setup);
-            if auth_recovery_key.as_ref() != Some(&recovery_key) {
-                auth_recovery = auth_manager.as_ref().map(|manager| {
-                    client_setup.managed_snapshot.as_ref().map_or_else(
-                        || manager.unauthorized_recovery(),
-                        |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
-                    )
-                });
-                auth_recovery_key = Some(recovery_key);
+            if !explicit_setup && auth_recovery_key.as_ref() != Some(&recovery_key) {
+                auth_recovery =
+                    unauthorized_recovery_for_setup(auth_manager.as_ref(), &client_setup);
+                auth_recovery_key = Some(recovery_key.clone());
                 pending_retry = PendingUnauthorizedRetry::default();
             }
             let include_internal = self
@@ -259,6 +255,11 @@ impl ModelClientSession {
                 .client
                 .responses_headers(client_setup.effective_auth.as_ref(), &model_info.slug);
             tracing::Span::current().record("api.path", "/responses");
+            let mut fresh_request_scope_recovery = if explicit_setup {
+                unauthorized_recovery_for_setup(auth_manager.as_ref(), &client_setup)
+            } else {
+                None
+            };
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup
                     .effective_auth
@@ -332,8 +333,8 @@ impl ModelClientSession {
                         return Err(self
                             .refresh_request_scope_after_unauthorized(
                                 unauthorized_transport,
-                                &mut auth_recovery,
-                                &mut provider_auth_recovery_attempted,
+                                recovery_key.clone(),
+                                fresh_request_scope_recovery.take(),
                                 session_telemetry,
                             )
                             .await);
@@ -512,8 +513,8 @@ impl ModelClientSession {
                         return Err(self
                             .refresh_request_scope_after_unauthorized(
                                 unauthorized_transport,
-                                &mut auth_recovery,
-                                &mut provider_auth_recovery_attempted,
+                                recovery_key.clone(),
+                                fresh_request_scope_recovery.take(),
                                 session_telemetry,
                             )
                             .await);
@@ -567,8 +568,8 @@ impl ModelClientSession {
                         return Err(self
                             .refresh_request_scope_after_unauthorized(
                                 unauthorized_transport,
-                                &mut auth_recovery,
-                                &mut provider_auth_recovery_attempted,
+                                recovery_key,
+                                fresh_request_scope_recovery.take(),
                                 session_telemetry,
                             )
                             .await);
@@ -601,6 +602,9 @@ impl ModelClientSession {
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             stream.interrupt = interrupt;
+            if explicit_setup {
+                self.request_scope_auth_recovery = None;
+            }
             return Ok(WebsocketStreamOutcome::Stream(stream));
         }
     }
