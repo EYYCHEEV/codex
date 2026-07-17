@@ -28,27 +28,6 @@ use schemars::JsonSchema;
 use crate::ResponseItemId;
 use crate::mcp::CallToolResult;
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum ShellCommandInput {
-    String(String),
-    Array(Vec<String>),
-}
-
-fn deserialize_shell_command_input<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let input = ShellCommandInput::deserialize(deserializer)?;
-    Ok(match input {
-        ShellCommandInput::String(command) => command,
-        ShellCommandInput::Array(parts) => join_shell_command_parts(&parts),
-    })
-}
-
-fn join_shell_command_parts(parts: &[String]) -> String {
-    parts.join(" ")
-}
 /// Controls the per-command sandbox override requested by a shell-like tool call.
 #[derive(
     Debug, Clone, Copy, Default, Eq, Hash, PartialEq, Serialize, Deserialize, JsonSchema, TS,
@@ -1820,8 +1799,6 @@ pub struct SearchToolCallParams {
 /// `arguments` field should deserialize to this struct.
 #[derive(Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 pub struct ShellCommandToolCallParams {
-    #[serde(alias = "cmd")]
-    #[serde(deserialize_with = "deserialize_shell_command_input")]
     pub command: String,
     pub workdir: Option<String>,
 
@@ -2437,47 +2414,6 @@ mod tests {
                 uses_additional_permissions
             );
         }
-    }
-
-    #[test]
-    fn shell_command_tool_call_params_accepts_cmd_alias() {
-        let params = serde_json::from_value::<ShellCommandToolCallParams>(serde_json::json!({
-            "cmd": "printf shell command",
-            "workdir": null,
-        }))
-        .expect("cmd alias should deserialize");
-
-        assert_eq!(
-            params,
-            ShellCommandToolCallParams {
-                command: "printf shell command".to_string(),
-                workdir: None,
-                login: None,
-                timeout_ms: None,
-                sandbox_permissions: None,
-                prefix_rule: None,
-                additional_permissions: None,
-                justification: None,
-            }
-        );
-    }
-
-    #[test]
-    fn shell_command_tool_call_params_join_array_command_for_hooks() {
-        let params = serde_json::from_value::<ShellCommandToolCallParams>(serde_json::json!({
-            "command": [
-                "python3",
-                "-c",
-                "from pathlib import Path; Path('tool_ran.txt').write_text('ran')",
-            ],
-            "workdir": null,
-        }))
-        .expect("command array should deserialize");
-
-        assert_eq!(
-            params.command,
-            "python3 -c from pathlib import Path; Path('tool_ran.txt').write_text('ran')"
-        );
     }
 
     #[test]
