@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use codex_config::HookFailurePolicy;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HookCompletedEvent;
 use codex_protocol::protocol::HookEventName;
@@ -14,6 +15,7 @@ use super::common;
 use crate::engine::ClaudeHooksEngine;
 use crate::engine::ConfiguredHandler;
 use crate::engine::HandlerRunResult;
+use crate::engine::HandlerSourcePath;
 use crate::engine::dispatcher;
 use crate::engine::output_parser;
 use crate::output_spill::AdditionalContext;
@@ -92,13 +94,12 @@ pub(crate) async fn run(
     let input_json = match command_input_json(&request) {
         Ok(input_json) => input_json,
         Err(error) => {
-            let hook_events = common::serialization_failure_hook_events_for_tool_use(
+            return serialization_failure_outcome(
                 matched,
                 Some(request.turn_id.clone()),
                 format!("failed to serialize pre tool use hook input: {error}"),
                 &request.tool_use_id,
             );
-            return serialization_failure_outcome(hook_events);
         }
     };
 
@@ -292,6 +293,15 @@ fn parse_completed(
         },
     }
 
+    apply_failure_policy(
+        handler,
+        &mut status,
+        &mut entries,
+        &mut should_block,
+        &mut block_reason,
+        &mut updated_input,
+    );
+
     let completed = HookCompletedEvent {
         turn_id,
         run: dispatcher::completed_summary(handler, &run_result, status, entries),
@@ -309,11 +319,79 @@ fn parse_completed(
     }
 }
 
-fn serialization_failure_outcome(hook_events: Vec<HookCompletedEvent>) -> PreToolUseOutcome {
+fn apply_failure_policy(
+    handler: &ConfiguredHandler,
+    status: &mut HookRunStatus,
+    entries: &mut Vec<HookOutputEntry>,
+    should_block: &mut bool,
+    block_reason: &mut Option<String>,
+    updated_input: &mut Option<Value>,
+) {
+    if *status != HookRunStatus::Failed
+        || !handler.can_apply_control_effects()
+        || handler.failure_policy() != HookFailurePolicy::Deny
+    {
+        return;
+    }
+
+    let Some(failure_message) = entries
+        .iter()
+        .rev()
+        .find(|entry| entry.kind == HookOutputEntryKind::Error)
+        .map(|entry| entry.text.clone())
+    else {
+        return;
+    };
+    let reason = format!("Hook failed (fail-closed): {failure_message}");
+    entries.retain(|entry| entry.kind != HookOutputEntryKind::Error);
+    entries.push(HookOutputEntry {
+        kind: HookOutputEntryKind::Feedback,
+        text: reason.clone(),
+    });
+    *status = HookRunStatus::Blocked;
+    *should_block = true;
+    *block_reason = Some(reason);
+    *updated_input = None;
+}
+
+fn serialization_failure_outcome(
+    handlers: Vec<ConfiguredHandler>,
+    turn_id: Option<String>,
+    error_message: String,
+    tool_use_id: &str,
+) -> PreToolUseOutcome {
+    let fail_closed = handlers
+        .iter()
+        .filter(|handler| matches!(&handler.source_path, HandlerSourcePath::Local(_)))
+        .map(|handler| {
+            handler.can_apply_control_effects()
+                && handler.failure_policy() == HookFailurePolicy::Deny
+        })
+        .collect::<Vec<_>>();
+    let mut hook_events = common::serialization_failure_hook_events_for_tool_use(
+        handlers,
+        turn_id,
+        error_message.clone(),
+        tool_use_id,
+    );
+    let mut block_reason = None;
+    for (event, fail_closed) in hook_events.iter_mut().zip(fail_closed) {
+        if !fail_closed {
+            continue;
+        }
+        let reason = format!("Hook failed (fail-closed): {error_message}");
+        event.run.status = HookRunStatus::Blocked;
+        event.run.entries = vec![HookOutputEntry {
+            kind: HookOutputEntryKind::Feedback,
+            text: reason.clone(),
+        }];
+        block_reason.get_or_insert(reason);
+    }
+
     PreToolUseOutcome {
         hook_events,
-        should_block: false,
-        block_reason: None,
+        should_block: block_reason.is_some(),
+        block_reason,
         additional_contexts: Vec::new(),
         updated_input: None,
     }
@@ -728,6 +806,75 @@ mod tests {
     }
 
     #[test]
+    fn fail_closed_handler_blocks_runtime_and_malformed_output_failures() {
+        let cases = [
+            run_result(Some(1), "", "hook exploded"),
+            run_result(Some(0), "{\"decision\":\n", ""),
+        ];
+
+        for result in cases {
+            let parsed = parse_completed(
+                &handler_with_failure_policy(codex_config::HookFailurePolicy::Deny),
+                result,
+                Some("turn-1".to_string()),
+            );
+
+            assert!(parsed.data.should_block);
+            assert!(
+                parsed
+                    .data
+                    .block_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("Hook failed (fail-closed):"))
+            );
+            assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
+            assert_eq!(
+                parsed.completed.run.entries[0].kind,
+                HookOutputEntryKind::Feedback
+            );
+        }
+    }
+
+    #[test]
+    fn fail_closed_handler_blocks_process_and_serialization_failures() {
+        let mut process_failure = run_result(/*exit_code*/ None, "", "");
+        process_failure.error = Some("hook process failed".to_string());
+        let parsed = parse_completed(
+            &handler_with_failure_policy(codex_config::HookFailurePolicy::Deny),
+            process_failure,
+            Some("turn-1".to_string()),
+        );
+        assert!(parsed.data.should_block);
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Blocked);
+
+        let outcome = super::serialization_failure_outcome(
+            vec![handler_with_failure_policy(
+                codex_config::HookFailurePolicy::Deny,
+            )],
+            Some("turn-1".to_string()),
+            "serialize failed".to_string(),
+            "tool-call-123",
+        );
+        assert!(outcome.should_block);
+        assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Blocked);
+    }
+
+    #[test]
+    fn async_fail_closed_handler_cannot_block() {
+        let parsed = parse_completed(
+            &handler_with_async_and_failure_policy(
+                /*async*/ true,
+                codex_config::HookFailurePolicy::Deny,
+            ),
+            run_result(Some(1), "", "hook exploded"),
+            Some("turn-1".to_string()),
+        );
+
+        assert!(!parsed.data.should_block);
+        assert_eq!(parsed.completed.run.status, HookRunStatus::Failed);
+    }
+
+    #[test]
     fn preview_and_completed_run_ids_include_tool_use_id() {
         let request = request_for_tool_use("tool-call-123");
         let runs = preview(&[handler()], &request);
@@ -772,6 +919,19 @@ mod tests {
     }
 
     fn handler_with_async(r#async: bool) -> ConfiguredHandler {
+        handler_with_async_and_failure_policy(r#async, codex_config::HookFailurePolicy::Allow)
+    }
+
+    fn handler_with_failure_policy(
+        failure_policy: codex_config::HookFailurePolicy,
+    ) -> ConfiguredHandler {
+        handler_with_async_and_failure_policy(/*async*/ false, failure_policy)
+    }
+
+    fn handler_with_async_and_failure_policy(
+        r#async: bool,
+        failure_policy: codex_config::HookFailurePolicy,
+    ) -> ConfiguredHandler {
         ConfiguredHandler {
             builtin: false,
             event_name: HookEventName::PreToolUse,
@@ -785,6 +945,7 @@ mod tests {
             kind: crate::engine::ConfiguredHandlerKind::Command {
                 command: "echo hook".to_string(),
                 r#async,
+                failure_policy,
                 env: std::collections::HashMap::new(),
             },
         }
