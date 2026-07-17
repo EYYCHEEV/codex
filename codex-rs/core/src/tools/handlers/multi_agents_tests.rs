@@ -7,11 +7,13 @@ use crate::config::PermissionProfileSnapshot;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
+use crate::local_agent_graph_store_from_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
+use crate::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
@@ -21,6 +23,7 @@ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHa
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -1541,13 +1544,8 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
     session
         .services
         .agent_control
-        .register_agent_metadata_for_tests(
-            root.thread_id,
-            worker_path,
-            Some("inspect this repo".to_string()),
-        );
+        .register_agent_metadata_for_tests(root.thread_id, worker_path);
     root.thread
-        .codex
         .session
         .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
             codex_protocol::protocol::McpStartupUpdateEvent {
@@ -3522,7 +3520,6 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
     let agent_id = thread.thread_id;
     thread
         .thread
-        .codex
         .session
         .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
             codex_protocol::protocol::McpStartupUpdateEvent {

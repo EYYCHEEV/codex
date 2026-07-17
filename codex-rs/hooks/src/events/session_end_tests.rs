@@ -63,6 +63,7 @@ fn handler(matcher: Option<&str>) -> ConfiguredHandler {
         event_name: HookEventName::SessionEnd,
         matcher: matcher.map(str::to_string),
         command: "echo hook".to_string(),
+        failure_policy: codex_config::HookFailurePolicy::Allow,
         timeout_sec: 2,
         status_message: None,
         additional_context_limit: Default::default(),

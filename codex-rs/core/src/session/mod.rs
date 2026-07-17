@@ -249,10 +249,6 @@ use self::turn_context::TurnContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
-pub(crate) fn legacy_pre_tool_use_enabled_for_session(session_source: &SessionSource) -> bool {
-    !crate::guardian::is_guardian_reviewer_source(session_source)
-}
-
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
@@ -1751,13 +1747,10 @@ impl Session {
         // layers such as request/session overrides that were present when this session
         // was created.
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
-        let (previous_config, new_config, config, legacy_pre_tool_use_enabled) = {
+        let (previous_config, new_config, config) = {
             let mut state = self.state.lock().await;
             let previous_config = notify_config_contributors
                 .then(|| Self::build_effective_session_config(&state.session_configuration));
-            let legacy_pre_tool_use_enabled = legacy_pre_tool_use_enabled_for_session(
-                &state.session_configuration.session_source,
-            );
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
             config.config_layer_stack = config
                 .config_layer_stack
@@ -1777,12 +1770,7 @@ impl Session {
             self.mark_mcp_runtime_dirty();
             let new_config = notify_config_contributors
                 .then(|| Self::build_effective_session_config(&state.session_configuration));
-            (
-                previous_config,
-                new_config,
-                config,
-                legacy_pre_tool_use_enabled,
-            )
+            (previous_config, new_config, config)
         };
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         self.schedule_mcp_prewarm();
@@ -1791,7 +1779,6 @@ impl Session {
             config.as_ref(),
             self.services.plugins_manager.as_ref(),
             environments.single_local_environment(),
-            legacy_pre_tool_use_enabled,
         )
         .await;
 
@@ -4437,7 +4424,6 @@ async fn build_hooks_for_config(
     config: &Config,
     plugins_manager: &PluginsManager,
     environment: Option<&TurnEnvironment>,
-    legacy_pre_tool_use_enabled: bool,
 ) -> Hooks {
     let (hook_shell_program, hook_shell_argv) = environment
         .and_then(|environment| environment.shell.as_ref())
@@ -4456,7 +4442,6 @@ async fn build_hooks_for_config(
         legacy_notify_argv: config.notify.clone(),
         feature_enabled: config.features.enabled(Feature::CodexHooks),
         bypass_hook_trust: config.bypass_hook_trust,
-        legacy_pre_tool_use_enabled,
         config_layer_stack: Some(config.config_layer_stack.clone()),
         plugin_hook_sources,
         plugin_hook_load_warnings,

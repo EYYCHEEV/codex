@@ -933,48 +933,6 @@ pub struct SandboxWorkspaceWrite {
     pub exclude_slash_tmp: bool,
 }
 
-// ===== Legacy hooks compatibility =====
-
-/// Compatibility config for the fork's legacy `[[hooks.pre_tool_use]]` TOML
-/// contract. The canonical hooks runtime translates these handlers into the
-/// official hook engine instead of maintaining a second executor path.
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct LegacyHooksConfig {
-    #[serde(default)]
-    pub pre_tool_use: Vec<LegacyPreToolUseHookConfig>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
-#[schemars(deny_unknown_fields)]
-pub struct LegacyPreToolUseHookConfig {
-    /// Wildcard matcher for tool names (for example `"shell*"`, `"exec_command"`, or `"*"`).
-    pub matcher: String,
-    /// Command argv to execute directly.
-    #[serde(default)]
-    pub command: Vec<String>,
-    /// Timeout in seconds. Defaults to `5` to preserve the legacy contract.
-    #[serde(default = "default_legacy_hook_timeout_sec")]
-    pub timeout_sec: u64,
-    /// Whether runtime failures deny or allow the tool call.
-    #[serde(default)]
-    pub on_failure: HookFailurePolicy,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum HookFailurePolicy {
-    /// Fail closed and block the tool call.
-    #[default]
-    Deny,
-    /// Fail open and allow the tool call to continue.
-    Allow,
-}
-
-const fn default_legacy_hook_timeout_sec() -> u64 {
-    5
-}
-
 #[cfg(test)]
 #[path = "types_tests.rs"]
 mod tests;

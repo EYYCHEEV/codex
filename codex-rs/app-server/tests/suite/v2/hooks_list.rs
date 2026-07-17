@@ -59,6 +59,7 @@ fn command_hook_hash(
                 r#async: false,
                 status_message: status_message.map(ToOwned::to_owned),
                 additional_context_limit,
+                on_failure: codex_config::HookFailurePolicy::Allow,
             }],
         },
     };

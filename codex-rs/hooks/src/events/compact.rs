@@ -432,8 +432,6 @@ mod tests {
     use super::post_command_input_json;
     use super::pre_command_input_json;
     use crate::engine::ConfiguredHandler;
-    use crate::engine::ConfiguredHandlerBehavior;
-    use crate::engine::HandlerExecution;
     use crate::engine::command_runner::CommandRunResult;
 
     #[test]
@@ -600,8 +598,7 @@ mod tests {
             event_name,
             matcher: None,
             command: "python3 compact_hook.py".to_string(),
-            execution: HandlerExecution::ShellCommand,
-            behavior: ConfiguredHandlerBehavior::Canonical,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             timeout_sec: 5,
             status_message: Some("running compact hook".to_string()),
             additional_context_limit: Default::default(),

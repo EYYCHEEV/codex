@@ -862,7 +862,7 @@ mod replay_safety_tests {
 
     fn compact_output(id: &str) -> ResponseItem {
         ResponseItem::Message {
-            id: Some(id.to_string()),
+            id: Some(codex_protocol::ResponseItemId::from_server(id.to_string())),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "partial summary".to_string(),
@@ -911,7 +911,7 @@ mod replay_safety_tests {
             .filter(|item| {
                 matches!(
                     item,
-                    ResponseItem::Message { id: Some(id), .. } if id == expected_id
+                    ResponseItem::Message { id: Some(id), .. } if id.as_str() == expected_id
                 )
             })
             .count()

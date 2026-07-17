@@ -1660,6 +1660,8 @@ async fn current_mcp_runtime_returns_error_when_managed_pool_has_no_eligible_acc
     let thread_manager = ThreadManager::new(
         &config,
         Arc::clone(&auth_manager),
+        codex_core::build_models_manager(&config, Arc::clone(&auth_manager)),
+        codex_core::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
         empty_extension_registry(),
