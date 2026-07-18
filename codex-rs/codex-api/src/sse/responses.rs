@@ -164,6 +164,7 @@ pub struct ResponsesStreamEvent {
     pub(crate) headers: Option<Value>,
     metadata: Option<Value>,
     response: Option<Value>,
+    response_id: Option<String>,
     item: Option<Value>,
     item_id: Option<String>,
     call_id: Option<String>,
@@ -177,6 +178,15 @@ pub struct ResponsesStreamEvent {
 impl ResponsesStreamEvent {
     pub fn kind(&self) -> &str {
         &self.kind
+    }
+
+    pub(crate) fn response_id(&self) -> Option<&str> {
+        self.response_id.as_deref().or_else(|| {
+            self.response
+                .as_ref()
+                .and_then(|response| response.get("id"))
+                .and_then(Value::as_str)
+        })
     }
 
     /// Returns the effective model reported by the server, if present.

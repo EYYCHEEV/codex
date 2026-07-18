@@ -1459,6 +1459,9 @@ pub enum EventMsg {
     RawResponseItem(RawResponseItemEvent),
     RawResponseCompleted(RawResponseCompletedEvent),
 
+    /// Discard transient model output from a failed response attempt before replacement output.
+    ResponseAttemptReset(ResponseAttemptResetEvent),
+
     ItemStarted(ItemStartedEvent),
     ItemCompleted(ItemCompletedEvent),
     HookStarted(HookStartedEvent),
@@ -1833,6 +1836,11 @@ pub struct RawResponseItemEvent {
 pub struct RawResponseCompletedEvent {
     pub response_id: String,
     pub token_usage: Option<TokenUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+pub struct ResponseAttemptResetEvent {
+    pub turn_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -3247,6 +3255,7 @@ pub enum ResponsesWebsocketCloseRecovery {
     RefreshRequestAuth,
     RotateAccount,
     FallbackToHttp,
+    FallbackToHttpAfterReset,
     NoReplayAfterOutput,
     NoRetry,
     RetryExhausted,
