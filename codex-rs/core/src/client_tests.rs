@@ -387,6 +387,8 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
 
     let codex_home = TempDir::new()?;
     let auth_manager = chatgpt_auth_manager(&codex_home, server.uri()).await;
+    let auth_lock_path = codex_home.path().join(".auth.json.lock");
+    std::fs::remove_file(&auth_lock_path)?;
     let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
@@ -448,6 +450,7 @@ async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::
         .await?;
 
     assert!(output.output.is_empty());
+    assert!(auth_lock_path.is_file());
     assert_eq!(registration_count.load(Ordering::SeqCst), 3);
     let requests = server
         .received_requests()
@@ -843,8 +846,9 @@ async fn chatgpt_auth_manager(
     )
     .await;
     let auth = auth_manager.auth().await.expect("auth should load");
-    AuthManager::from_auth_for_testing_with_agent_identity_authapi_base_url(
+    AuthManager::from_auth_for_testing_with_home_and_agent_identity_authapi_base_url(
         auth,
+        codex_home.path().to_path_buf(),
         agent_identity_authapi_base_url,
     )
 }
