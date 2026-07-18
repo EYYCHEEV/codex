@@ -2417,20 +2417,9 @@ impl AuthManager {
         })
     }
 
-    /// Create an AuthManager with a specific CodexAuth and Agent Identity AuthAPI base URL, for testing only.
+    /// Create an AuthManager with a specific CodexAuth, Codex home, and Agent Identity AuthAPI base URL, for testing only.
     #[doc(hidden)]
-    pub fn from_auth_for_testing_with_agent_identity_authapi_base_url(
-        auth: CodexAuth,
-        agent_identity_authapi_base_url: String,
-    ) -> Arc<Self> {
-        Self::from_auth_for_testing_with_home_and_agent_identity_authapi_base_url(
-            auth,
-            PathBuf::from("non-existent"),
-            agent_identity_authapi_base_url,
-        )
-    }
-
-    fn from_auth_for_testing_with_home_and_agent_identity_authapi_base_url(
+    pub fn from_auth_for_testing_with_home_and_agent_identity_authapi_base_url(
         auth: CodexAuth,
         codex_home: PathBuf,
         agent_identity_authapi_base_url: String,
