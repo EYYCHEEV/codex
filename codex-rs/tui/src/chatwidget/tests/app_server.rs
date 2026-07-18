@@ -221,6 +221,48 @@ fn open_safety_buffering_retry_confirmation(
 }
 
 #[tokio::test]
+async fn response_attempt_reset_clears_incomplete_stream_state() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.turn_lifecycle.last_turn_id = Some("turn-1".to_string());
+    chat.on_task_started();
+    chat.on_agent_message_delta("failed websocket output".to_string());
+    chat.reasoning_buffer
+        .push_str("failed websocket reasoning summary");
+    chat.reasoning_header = Some("Failed websocket reasoning".to_string());
+    chat.reasoning_summary_parts
+        .push("failed websocket reasoning content".to_string());
+
+    chat.handle_server_notification(
+        ServerNotification::TurnResponseAttemptReset(TurnResponseAttemptResetNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: "stale-turn".to_string(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(chat.stream_controller.is_some());
+    assert!(!chat.reasoning_buffer.is_empty());
+
+    chat.handle_server_notification(
+        ServerNotification::TurnResponseAttemptReset(TurnResponseAttemptResetNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: "turn-1".to_string(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(chat.stream_controller.is_none());
+    assert!(chat.plan_stream_controller.is_none());
+    assert!(chat.reasoning_buffer.is_empty());
+    assert_eq!(chat.reasoning_header, None);
+    assert!(chat.reasoning_summary_parts.is_empty());
+    assert!(
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::DiscardResponseAttemptOutput))
+    );
+}
+
+#[tokio::test]
 async fn safety_buffering_offers_one_retry_with_app_wording() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let mut preset = get_available_model(&chat, "gpt-5.5");

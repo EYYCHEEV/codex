@@ -836,6 +836,9 @@ impl App {
                 self.turn_tips.ready(thread_id, &turn_id, self.transcript_cells.last());
                 tui.frame_requester().schedule_frame();
             }
+            AppEvent::DiscardResponseAttemptOutput => {
+                self.discard_response_attempt_output(tui)?;
+            }
             AppEvent::EndInitialHistoryReplayBuffer => {
                 self.scrollback_has_older_history = self
                     .chat_widget
