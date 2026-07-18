@@ -509,12 +509,12 @@ impl App {
         }
     }
 
-    /// Rebuild scrollback after rollback removes transcript cells.
+    /// Rebuild scrollback after transcript cells are removed.
     ///
     /// Unlike resize reflow, rollback must clear the terminal even when no cells remain. Otherwise
     /// the cancelled user prompt stays visible in scrollback despite being removed from the source
     /// transcript.
-    pub(super) fn rebuild_transcript_after_backtrack(
+    pub(super) fn rebuild_transcript_after_history_rewrite(
         &mut self,
         tui: &mut tui::Tui,
         terminal_width: TerminalWidth,

@@ -117,7 +117,10 @@ pub(super) async fn run_remote_compact_v2_attempt(
             "input": &prompt.input,
             "parallel_tool_calls": prompt.parallel_tool_calls,
         }));
-        let AttemptOutcome { result, committed } = run_remote_compaction_request_v2(
+        let AttemptOutcome {
+            result,
+            replay_state,
+        } = run_remote_compaction_request_v2(
             sess,
             turn_context.as_ref(),
             client_session,
@@ -126,6 +129,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
             request_setup,
         )
         .await;
+        let committed = replay_state.is_committed();
         trace_attempt.record_result(
             result
                 .as_ref()

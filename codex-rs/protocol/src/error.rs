@@ -92,8 +92,8 @@ pub enum CodexErrorDetails {
     #[error("shared rollout token budget exhausted")]
     SessionBudgetExceeded,
 
-    /// Returned when the Responses WebSocket closes after the handshake but before
-    /// `response.completed`.
+    /// Returned when the Responses WebSocket closes or stops making progress after the handshake
+    /// but before `response.completed`.
     ///
     /// The close frame is kept as bounded, sanitized diagnostic data so the core retry owner can
     /// persist a failure-only rollout record without enabling per-frame telemetry.

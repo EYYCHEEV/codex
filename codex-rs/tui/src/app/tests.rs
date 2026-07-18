@@ -5142,6 +5142,36 @@ fn rendered_line_text(line: &crate::terminal_hyperlinks::HyperlinkLine) -> Strin
 }
 
 #[tokio::test]
+async fn response_attempt_reset_removes_failed_stream_before_replacement() -> Result<()> {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.transcript_cells = vec![
+        plain_line_cell("recover this turn"),
+        Arc::new(AgentMessageCell::new(
+            vec![Line::from("failed websocket output")],
+            /*is_first_line*/ true,
+        )),
+    ];
+
+    app.discard_response_attempt_output(&mut tui)?;
+    app.transcript_cells.push(Arc::new(AgentMarkdownCell::new(
+        "complete HTTPS replacement".to_string(),
+        Path::new("/tmp"),
+    )));
+
+    let rendered = app.render_transcript_lines_for_reflow(/*width*/ 80);
+    let rendered = rendered
+        .lines
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("failed websocket output"));
+    assert_app_snapshot!("response_attempt_reset_replacement", rendered);
+    Ok(())
+}
+
+#[tokio::test]
 async fn capped_resize_reflow_renders_recent_suffix_only() {
     let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
     app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(5);

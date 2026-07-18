@@ -22,6 +22,28 @@ use crate::pager_overlay::Overlay;
 use crate::tui;
 
 impl App {
+    pub(super) fn discard_response_attempt_output(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        let end = self.transcript_cells.len();
+        let start = self
+            .transcript_cells
+            .iter()
+            .rposition(|cell| {
+                !cell.as_any().is::<history_cell::AgentMessageCell>()
+                    && !cell.as_any().is::<history_cell::ProposedPlanStreamCell>()
+            })
+            .map_or(0, |index| index.saturating_add(1));
+        if start == end {
+            return Ok(());
+        }
+
+        self.transcript_cells.truncate(start);
+        if let Some(Overlay::Transcript(transcript)) = &mut self.overlay {
+            transcript.replace_cells(self.transcript_cells.clone());
+        }
+        let terminal_width = tui.terminal.last_known_screen_size.into();
+        self.rebuild_transcript_after_history_rewrite(tui, terminal_width)
+    }
+
     pub(super) fn handle_consolidate_agent_message(
         &mut self,
         tui: &mut tui::Tui,

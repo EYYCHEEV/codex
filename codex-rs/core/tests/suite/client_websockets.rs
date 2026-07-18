@@ -52,10 +52,19 @@ use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::WebSocketTestServer;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_message_item_added;
+use core_test_support::responses::ev_output_text_delta;
+use core_test_support::responses::ev_reasoning_item_added;
+use core_test_support::responses::ev_reasoning_summary_text_delta;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::sse;
+use core_test_support::responses::sse_failed;
 use core_test_support::responses::start_rejecting_websocket_server;
 use core_test_support::responses::start_websocket_server;
 use core_test_support::responses::start_websocket_server_with_close_frames;
+use core_test_support::responses::start_websocket_server_with_close_frames_and_http;
+use core_test_support::responses::start_websocket_server_with_delayed_disconnect_and_http;
 use core_test_support::responses::start_websocket_server_with_headers;
 use core_test_support::responses_metadata as test_responses_metadata;
 use core_test_support::skip_if_no_network;
@@ -1773,7 +1782,7 @@ async fn responses_websocket_invalid_request_error_with_status_is_forwarded() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn responses_websocket_close_after_output_persists_no_replay_diagnostic() {
+async fn responses_websocket_close_after_completed_tool_does_not_replay() {
     skip_if_no_network!();
 
     let server = start_websocket_server_with_close_frames(
@@ -1784,7 +1793,11 @@ async fn responses_websocket_close_after_output_persists_no_replay_diagnostic() 
             ],
             vec![
                 ev_response_created("resp-1"),
-                ev_assistant_message("msg-1", "partial"),
+                ev_function_call(
+                    "call-1",
+                    "shell_command",
+                    r#"{"command":"printf tool-once","timeout_ms":1000}"#,
+                ),
             ],
         ]],
         vec![Some(WebSocketCloseFrame {
@@ -1815,9 +1828,19 @@ async fn responses_websocket_close_after_output_persists_no_replay_diagnostic() 
         })
         .await
         .expect("submit turn");
-    let error_event = wait_for_event(&test.codex, |msg| matches!(msg, EventMsg::Error(_))).await;
-    let EventMsg::Error(error_event) = error_event else {
-        unreachable!();
+    let mut exec_starts = 0;
+    let error_event = loop {
+        match test
+            .codex
+            .next_event()
+            .await
+            .expect("tool delivery event")
+            .msg
+        {
+            EventMsg::ExecCommandBegin(event) if event.call_id == "call-1" => exec_starts += 1,
+            EventMsg::Error(event) => break event,
+            _ => {}
+        }
     };
     assert!(
         error_event
@@ -1829,6 +1852,7 @@ async fn responses_websocket_close_after_output_persists_no_replay_diagnostic() 
     test.codex.flush_rollout().await.expect("flush rollout");
     assert_eq!(server.handshakes().len(), 1);
     assert_eq!(server.single_connection().len(), 2);
+    assert_eq!(exec_starts, 1);
 
     let rollout_path = test.codex.rollout_path().expect("rollout path");
     let diagnostics = websocket_close_diagnostics(&rollout_path);
@@ -1853,8 +1877,362 @@ async fn responses_websocket_close_after_output_persists_no_replay_diagnostic() 
     assert_eq!(diagnostic.binding_matched, Some(true));
     assert!(!diagnostic.connection_reused);
     let rollout = std::fs::read_to_string(rollout_path).expect("read rollout");
+    let completed_tool_deliveries = rollout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+        .filter(|line| {
+            matches!(
+                &line.item,
+                RolloutItem::ResponseItem(ResponseItem::FunctionCall { call_id, .. })
+                    if call_id == "call-1"
+            )
+        })
+        .count();
+    assert_eq!(completed_tool_deliveries, 1);
     assert!(!rollout.contains("access_token"));
     assert!(!rollout.contains("refresh_token"));
+    server.shutdown().await;
+}
+
+#[derive(Clone, Copy)]
+enum IncompleteOutputTermination {
+    Close,
+    IdleTimeout,
+}
+
+async fn assert_incomplete_output_replays_once_over_http(
+    partial_events: Vec<serde_json::Value>,
+    termination: IncompleteOutputTermination,
+) {
+    let mut websocket_events = vec![ev_response_created("resp-failed")];
+    websocket_events.extend(partial_events);
+    let connections = vec![vec![
+        vec![
+            ev_response_created("resp-prewarm"),
+            ev_completed("resp-prewarm"),
+        ],
+        websocket_events,
+    ]];
+    let http_responses = vec![
+        sse(vec![
+            ev_response_created("resp-http"),
+            ev_assistant_message("msg-http", "complete HTTPS replacement"),
+            ev_completed("resp-http"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-followup"),
+            ev_assistant_message("msg-followup", "second HTTPS answer"),
+            ev_completed("resp-followup"),
+        ]),
+    ];
+    let server = match termination {
+        IncompleteOutputTermination::Close => {
+            start_websocket_server_with_close_frames_and_http(
+                connections,
+                vec![Some(WebSocketCloseFrame {
+                    code: 4001,
+                    reason: "maintenance".to_string(),
+                })],
+                http_responses,
+            )
+            .await
+        }
+        IncompleteOutputTermination::IdleTimeout => {
+            start_websocket_server_with_delayed_disconnect_and_http(
+                connections,
+                vec![Some(Duration::from_millis(500))],
+                http_responses,
+            )
+            .await
+        }
+    };
+    let mut builder = test_codex().with_config(move |config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+        if matches!(termination, IncompleteOutputTermination::IdleTimeout) {
+            config.model_provider.stream_idle_timeout_ms = Some(100);
+        }
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "recover this turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit turn");
+    let reset = wait_for_event(&test.codex, |msg| {
+        matches!(msg, EventMsg::ResponseAttemptReset(_))
+    })
+    .await;
+    assert!(matches!(reset, EventMsg::ResponseAttemptReset(_)));
+    let replacement = wait_for_event(&test.codex, |msg| {
+        matches!(msg, EventMsg::AgentMessage(event) if event.message == "complete HTTPS replacement")
+    })
+    .await;
+    assert!(matches!(replacement, EventMsg::AgentMessage(_)));
+    wait_for_event(&test.codex, |msg| matches!(msg, EventMsg::TurnComplete(_))).await;
+
+    test.submit_turn("follow-up")
+        .await
+        .expect("remaining session should stay on HTTP");
+    test.codex.flush_rollout().await.expect("flush rollout");
+
+    assert_eq!(server.handshakes().len(), 1);
+    assert_eq!(server.single_connection().len(), 2);
+    let http_requests = server.http_requests();
+    assert_eq!(http_requests.len(), 2);
+    assert!(
+        http_requests[0]
+            .get("previous_response_id")
+            .is_none_or(serde_json::Value::is_null)
+    );
+    let http_requests_json = serde_json::to_string(&http_requests).expect("encode HTTP requests");
+    assert!(!http_requests_json.contains("failed websocket output"));
+    assert!(http_requests_json.contains("complete HTTPS replacement"));
+
+    let rollout_path = test.codex.rollout_path().expect("rollout path");
+    let rollout = std::fs::read_to_string(&rollout_path).expect("read rollout");
+    assert!(!rollout.contains("failed websocket output"));
+    assert!(!rollout.contains("response_attempt_reset"));
+    assert!(rollout.contains("complete HTTPS replacement"));
+    assert!(rollout.contains("second HTTPS answer"));
+    assert!(!rollout.contains("access_token"));
+    assert!(!rollout.contains("refresh_token"));
+
+    let diagnostics = websocket_close_diagnostics(&rollout_path);
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0].1;
+    assert!(!diagnostic.output_committed);
+    assert_eq!(
+        diagnostic.recovery_decision,
+        ResponsesWebsocketCloseRecovery::FallbackToHttpAfterReset
+    );
+    assert_eq!(diagnostic.binding_matched, Some(true));
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_partial_text_is_replaced_over_http() {
+    skip_if_no_network!();
+
+    assert_incomplete_output_replays_once_over_http(
+        vec![
+            ev_message_item_added("msg-failed", ""),
+            ev_output_text_delta("failed websocket output"),
+        ],
+        IncompleteOutputTermination::Close,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_partial_reasoning_is_replaced_over_http() {
+    skip_if_no_network!();
+
+    assert_incomplete_output_replays_once_over_http(
+        vec![
+            ev_reasoning_item_added("reasoning-failed", &[]),
+            ev_reasoning_summary_text_delta("failed websocket output"),
+        ],
+        IncompleteOutputTermination::Close,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_partial_text_idle_timeout_is_replaced_over_http() {
+    skip_if_no_network!();
+
+    assert_incomplete_output_replays_once_over_http(
+        vec![
+            ev_message_item_added("msg-failed", ""),
+            ev_output_text_delta("failed websocket output"),
+        ],
+        IncompleteOutputTermination::IdleTimeout,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_partial_reasoning_idle_timeout_is_replaced_over_http() {
+    skip_if_no_network!();
+
+    assert_incomplete_output_replays_once_over_http(
+        vec![
+            ev_reasoning_item_added("reasoning-failed", &[]),
+            ev_reasoning_summary_text_delta("failed websocket output"),
+        ],
+        IncompleteOutputTermination::IdleTimeout,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_operator_cancellation_does_not_replay() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server_with_delayed_disconnect_and_http(
+        vec![vec![
+            vec![
+                ev_response_created("resp-prewarm"),
+                ev_completed("resp-prewarm"),
+            ],
+            vec![
+                ev_response_created("resp-cancelled"),
+                ev_message_item_added("msg-cancelled", ""),
+                ev_output_text_delta("cancel this output"),
+            ],
+        ]],
+        vec![Some(Duration::from_millis(500))],
+        vec![sse(vec![
+            ev_response_created("resp-http-unexpected"),
+            ev_assistant_message("msg-http-unexpected", "must not replay"),
+            ev_completed("resp-http-unexpected"),
+        ])],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "cancel the turn".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit turn");
+    wait_for_event(&test.codex, |msg| {
+        matches!(msg, EventMsg::AgentMessageContentDelta(_))
+    })
+    .await;
+    test.codex
+        .submit(Op::Interrupt)
+        .await
+        .expect("interrupt turn");
+
+    let saw_reset = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut saw_reset = false;
+        loop {
+            match test
+                .codex
+                .next_event()
+                .await
+                .expect("cancellation event")
+                .msg
+            {
+                EventMsg::ResponseAttemptReset(_) => saw_reset = true,
+                EventMsg::TurnAborted(_) => break saw_reset,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("turn cancellation timed out");
+    assert!(!saw_reset);
+    assert_eq!(server.handshakes().len(), 1);
+    assert_eq!(server.single_connection().len(), 2);
+    assert!(server.http_requests().is_empty());
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_partial_output_attempts_http_replacement_once() {
+    skip_if_no_network!();
+
+    let server = start_websocket_server_with_delayed_disconnect_and_http(
+        vec![vec![
+            vec![
+                ev_response_created("resp-prewarm"),
+                ev_completed("resp-prewarm"),
+            ],
+            vec![
+                ev_response_created("resp-failed"),
+                ev_message_item_added("msg-failed", ""),
+                ev_output_text_delta("failed websocket output"),
+            ],
+        ]],
+        vec![Some(Duration::from_millis(500))],
+        vec![
+            sse_failed("resp-http-failed", "server_error", "temporary failure"),
+            sse(vec![
+                ev_response_created("resp-http-unexpected"),
+                ev_assistant_message("msg-http-unexpected", "must not replay twice"),
+                ev_completed("resp-http-unexpected"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(1);
+        config.model_provider.stream_idle_timeout_ms = Some(100);
+    });
+    let test = builder
+        .build_with_websocket_server(&server)
+        .await
+        .expect("build websocket codex");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "replace once".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit turn");
+    wait_for_event(&test.codex, |msg| {
+        matches!(msg, EventMsg::ResponseAttemptReset(_))
+    })
+    .await;
+
+    if tokio::time::timeout(Duration::from_secs(5), async {
+        while server.http_requests().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        let websocket_requests = server.single_connection().len();
+        let handshakes = server.handshakes().len();
+        server.shutdown().await;
+        panic!(
+            "first HTTPS replacement request timed out after {handshakes} handshakes and {websocket_requests} websocket requests"
+        );
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    assert_eq!(server.http_requests().len(), 1);
     server.shutdown().await;
 }
 
