@@ -110,6 +110,7 @@ pub(super) use codex_app_server_protocol::ToolRequestUserInputQuestion;
 pub(super) use codex_app_server_protocol::Turn as AppServerTurn;
 pub(super) use codex_app_server_protocol::TurnCompletedNotification;
 pub(super) use codex_app_server_protocol::TurnError as AppServerTurnError;
+pub(super) use codex_app_server_protocol::TurnResponseAttemptResetNotification;
 pub(super) use codex_app_server_protocol::TurnStartedNotification;
 pub(super) use codex_app_server_protocol::TurnStatus as AppServerTurnStatus;
 pub(super) use codex_app_server_protocol::UserInput;

@@ -744,6 +744,7 @@ async fn run_websocket_response_stream(
     timing_log_context: &ResponsesWebsocketTimingLogContext,
 ) -> Result<(), ApiError> {
     let mut last_server_model: Option<String> = None;
+    let mut active_response_id: Option<String> = None;
     let mut safety_buffering_treatment = SafetyBufferingTreatment::default();
     send_websocket_request(
         ws_stream,
@@ -758,7 +759,7 @@ async fn run_websocket_response_stream(
         let poll_start = Instant::now();
         let response = tokio::time::timeout(idle_timeout, ws_stream.next())
             .await
-            .map_err(|_| ApiError::Stream("idle timeout waiting for websocket".into()));
+            .map_err(|_| ApiError::WebsocketClosed(Box::new(websocket_close_details(None))));
         if let Some(t) = telemetry.as_ref() {
             t.on_ws_event(&response, poll_start.elapsed());
         }
@@ -817,6 +818,35 @@ async fn run_websocket_response_stream(
                             })
                 {
                     let _ = tx_event.send(Ok(ResponseEvent::ModelsEtag(etag))).await;
+                }
+                let event_response_id = event.response_id().map(str::to_string);
+                if event.kind() == "response.created" {
+                    let Some(response_id) = event_response_id.as_ref() else {
+                        return Err(ApiError::Stream(
+                            "response.created missing response id".to_string(),
+                        ));
+                    };
+                    active_response_id = Some(response_id.clone());
+                } else if matches!(
+                    event.kind(),
+                    "response.completed" | "response.failed" | "response.incomplete"
+                ) {
+                    if event_response_id.as_deref() != active_response_id.as_deref() {
+                        debug!(
+                            event_kind = event.kind(),
+                            "ignored terminal event for inactive websocket response"
+                        );
+                        continue;
+                    }
+                } else if let (Some(active_response_id), Some(event_response_id)) =
+                    (active_response_id.as_deref(), event_response_id.as_deref())
+                    && event_response_id != active_response_id
+                {
+                    debug!(
+                        event_kind = event.kind(),
+                        "ignored event for inactive websocket response"
+                    );
+                    continue;
                 }
                 if let Some(response_turn_state) = event.turn_state()
                     && let Some(turn_state) = turn_state
@@ -1111,6 +1141,20 @@ mod tests {
         })
     }
 
+    fn test_timing_log_context() -> ResponsesWebsocketTimingLogContext {
+        ResponsesWebsocketTimingLogContext {
+            model: "gpt-test".to_string(),
+            session_id: None,
+            thread_id: None,
+            turn_id: None,
+            traceparent: None,
+            previous_response_id: None,
+            request_start_ms: None,
+            warmup: false,
+            connection_reused: false,
+        }
+    }
+
     fn ws_stream_with_messages(messages: Vec<Result<Message, WsError>>) -> WsStream {
         let (tx_command, mut rx_command) = mpsc::channel(1);
         let (tx_message, rx_message) = mpsc::unbounded_channel();
@@ -1130,20 +1174,6 @@ mod tests {
         }
     }
 
-    fn test_timing_log_context() -> ResponsesWebsocketTimingLogContext {
-        ResponsesWebsocketTimingLogContext {
-            model: "gpt-test".to_string(),
-            session_id: None,
-            thread_id: None,
-            turn_id: None,
-            traceparent: None,
-            previous_response_id: None,
-            request_start_ms: None,
-            warmup: false,
-            connection_reused: false,
-        }
-    }
-
     #[tokio::test]
     async fn response_stream_eof_is_websocket_closed() {
         let mut ws_stream = ws_stream_with_messages(Vec::new());
@@ -1155,8 +1185,8 @@ mod tests {
             tx_event,
             "{}".to_string(),
             Duration::from_secs(1),
-            None,
-            None,
+            /*telemetry*/ None,
+            /*turn_state*/ None,
             &timing_log_context,
         )
         .await
@@ -1180,14 +1210,119 @@ mod tests {
             tx_event,
             "{}".to_string(),
             Duration::from_secs(1),
-            None,
-            None,
+            /*telemetry*/ None,
+            /*turn_state*/ None,
             &timing_log_context,
         )
         .await
         .expect_err("non-close websocket error must fail");
 
         assert!(matches!(error, ApiError::Stream(message) if message.contains("opcode")));
+    }
+
+    #[tokio::test]
+    async fn matching_completion_queued_before_close_completes_successfully() {
+        let mut ws_stream = ws_stream_with_messages(vec![
+            Ok(Message::Text(
+                json!({
+                    "type": "response.created",
+                    "response": { "id": "resp-current" }
+                })
+                .to_string()
+                .into(),
+            )),
+            Ok(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": { "id": "resp-current" }
+                })
+                .to_string()
+                .into(),
+            )),
+            Ok(Message::Close(None)),
+        ]);
+        let (tx_event, mut rx_event) = mpsc::channel(4);
+        let timing_log_context = test_timing_log_context();
+
+        run_websocket_response_stream(
+            &mut ws_stream,
+            tx_event,
+            "{}".to_string(),
+            Duration::from_secs(1),
+            /*telemetry*/ None,
+            /*turn_state*/ None,
+            &timing_log_context,
+        )
+        .await
+        .expect("matching completion must win over a later queued close");
+
+        assert!(matches!(
+            rx_event.recv().await,
+            Some(Ok(ResponseEvent::Created {
+                response_id: Some(response_id),
+            })) if response_id == "resp-current"
+        ));
+        assert!(matches!(
+            rx_event.recv().await,
+            Some(Ok(ResponseEvent::Completed { .. }))
+        ));
+        assert!(rx_event.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_terminal_event_is_ignored() {
+        let mut ws_stream = ws_stream_with_messages(vec![
+            Ok(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": { "id": "resp-stale" }
+                })
+                .to_string()
+                .into(),
+            )),
+            Ok(Message::Text(
+                json!({
+                    "type": "response.created",
+                    "response": { "id": "resp-current" }
+                })
+                .to_string()
+                .into(),
+            )),
+            Ok(Message::Text(
+                json!({
+                    "type": "response.completed",
+                    "response": { "id": "resp-current" }
+                })
+                .to_string()
+                .into(),
+            )),
+        ]);
+        let (tx_event, mut rx_event) = mpsc::channel(4);
+        let timing_log_context = test_timing_log_context();
+
+        run_websocket_response_stream(
+            &mut ws_stream,
+            tx_event,
+            "{}".to_string(),
+            Duration::from_secs(1),
+            /*telemetry*/ None,
+            /*turn_state*/ None,
+            &timing_log_context,
+        )
+        .await
+        .expect("current response must complete after ignoring stale terminal event");
+
+        assert!(matches!(
+            rx_event.recv().await,
+            Some(Ok(ResponseEvent::Created {
+                response_id: Some(response_id),
+            })) if response_id == "resp-current"
+        ));
+        assert!(matches!(
+            rx_event.recv().await,
+            Some(Ok(ResponseEvent::Completed { .. }))
+        ));
+        assert!(rx_event.recv().await.is_none());
     }
 
     #[tokio::test]

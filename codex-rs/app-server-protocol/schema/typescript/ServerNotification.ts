@@ -82,6 +82,7 @@ import type { TurnCompletedNotification } from "./v2/TurnCompletedNotification";
 import type { TurnDiffUpdatedNotification } from "./v2/TurnDiffUpdatedNotification";
 import type { TurnModerationMetadataNotification } from "./v2/TurnModerationMetadataNotification";
 import type { TurnPlanUpdatedNotification } from "./v2/TurnPlanUpdatedNotification";
+import type { TurnResponseAttemptResetNotification } from "./v2/TurnResponseAttemptResetNotification";
 import type { TurnStartedNotification } from "./v2/TurnStartedNotification";
 import type { WarningNotification } from "./v2/WarningNotification";
 import type { WindowsSandboxSetupCompletedNotification } from "./v2/WindowsSandboxSetupCompletedNotification";
