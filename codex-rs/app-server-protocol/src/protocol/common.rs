@@ -1961,6 +1961,7 @@ server_notification_definitions! {
     #[experimental("autoApprovalReview/strictReviewRequired")]
     StrictReviewRequired => "autoApprovalReview/strictReviewRequired" (v2::StrictReviewRequiredNotification),
     ItemCompleted => "item/completed" (v2::ItemCompletedNotification),
+    TurnResponseAttemptReset => "turn/responseAttempt/reset" (v2::TurnResponseAttemptResetNotification),
     /// This event is internal-only. Used by Codex Cloud.
     RawResponseItemCompleted => "rawResponseItem/completed" (v2::RawResponseItemCompletedNotification),
     /// This event is internal-only. Used by clients that need exact upstream usage.

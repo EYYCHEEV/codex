@@ -304,7 +304,7 @@ async fn run_compact_task_inner_impl(
         };
         let AttemptOutcome {
             result: attempt_result,
-            committed,
+            replay_state,
         } = drain_to_completed(
             &sess,
             turn_context.as_ref(),
@@ -314,6 +314,7 @@ async fn run_compact_task_inner_impl(
             request_setup,
         )
         .await;
+        let committed = replay_state.is_committed();
 
         if let Err(error) = &attempt_result
             && !committed
@@ -853,7 +854,7 @@ async fn drain_compaction_stream(
     mut stream: ResponseStream,
     managed_rate_limit_binding: Option<crate::state::ManagedRateLimitBinding>,
 ) -> AttemptOutcome<String> {
-    let mut committed = false;
+    let mut replay_state = crate::session::turn::AttemptReplayState::Uncommitted;
     loop {
         let maybe_event = stream.next().await;
         let Some(event) = maybe_event else {
@@ -861,12 +862,15 @@ async fn drain_compaction_stream(
                 Err(CodexErr::Stream(
                     "stream closed before response.completed".into(),
                 )),
-                committed,
+                replay_state,
             );
         };
         match event {
             Ok(event) => {
-                committed |= crate::session::turn::response_event_commits_attempt(&event);
+                replay_state = std::cmp::max(
+                    replay_state,
+                    crate::session::turn::response_event_replay_state(&event),
+                );
                 match event {
                     ResponseEvent::OutputItemDone(item) => {
                         sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
@@ -900,12 +904,12 @@ async fn drain_compaction_stream(
                             .update_token_usage_info(turn_context, token_usage.as_ref())
                             .await
                             .map(|()| response_id);
-                        return AttemptOutcome::new(result, committed);
+                        return AttemptOutcome::new(result, replay_state);
                     }
                     _ => continue,
                 }
             }
-            Err(e) => return AttemptOutcome::new(Err(e), committed),
+            Err(e) => return AttemptOutcome::new(Err(e), replay_state),
         }
     }
 }
@@ -967,7 +971,7 @@ mod replay_safety_tests {
             let outcome = drain_compaction_stream(session, turn_context, stream, None).await;
             match outcome.result {
                 Ok(response_id) => return (Ok(response_id), attempts),
-                Err(err) if outcome.committed || !err.is_retryable() => {
+                Err(err) if outcome.replay_state.is_committed() || !err.is_retryable() => {
                     return (Err(err), attempts);
                 }
                 Err(_) => continue,

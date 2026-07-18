@@ -936,7 +936,7 @@ impl App {
                 }
                 TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
                     if self.backtrack_render_pending {
-                        self.rebuild_transcript_after_backtrack(tui, screen_size.into())?;
+                        self.rebuild_transcript_after_history_rewrite(tui, screen_size.into())?;
                         self.backtrack_render_pending = false;
                     }
                     self.chat_widget.maybe_post_pending_notification(tui);
