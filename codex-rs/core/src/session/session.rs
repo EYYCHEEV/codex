@@ -45,6 +45,8 @@ pub(crate) struct Session {
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(super) mcp_startup_recording: Arc<Mutex<McpStartupRecordingState>>,
     pub(crate) services: SessionServices,
+    #[cfg(test)]
+    pub(super) test_codex_home: Option<tempfile::TempDir>,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -1156,6 +1158,8 @@ impl Session {
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 mcp_startup_recording: Arc::new(Mutex::new(Default::default())),
                 services,
+                #[cfg(test)]
+                test_codex_home: None,
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
