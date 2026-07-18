@@ -5432,7 +5432,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("Test API Key"),
+        config.codex_home.to_path_buf(),
+    );
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
@@ -5663,6 +5666,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         mcp_startup_recording: Arc::new(Mutex::new(Default::default())),
         services,
+        test_codex_home: Some(codex_home),
         next_internal_sub_id: AtomicU64::new(0),
     };
 
@@ -7822,6 +7826,7 @@ where
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         mcp_startup_recording: Arc::new(Mutex::new(Default::default())),
         services,
+        test_codex_home: None,
         next_internal_sub_id: AtomicU64::new(0),
     });
 
@@ -7856,6 +7861,12 @@ pub(crate) async fn make_session_and_context_with_rx() -> (
 #[tokio::test]
 async fn refresh_mcp_servers_keeps_the_previous_runtime_alive() {
     let (session, turn_context) = make_session_and_context().await;
+    let codex_home = session
+        .test_codex_home
+        .as_ref()
+        .expect("session should retain its temporary Codex home")
+        .path()
+        .to_path_buf();
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
     let step_context = session
@@ -7940,6 +7951,10 @@ async fn refresh_mcp_servers_keeps_the_previous_runtime_alive() {
         codex_mcp::configured_mcp_servers(new_runtime.config()),
         refreshed_mcp_servers
     );
+    drop(step_context);
+    drop(turn_context);
+    drop(session);
+    assert!(!codex_home.exists());
 }
 
 struct PendingNoiseConnectProvider;
