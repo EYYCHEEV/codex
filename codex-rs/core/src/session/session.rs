@@ -63,6 +63,8 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
+    #[cfg(test)]
+    pub(super) test_codex_home: Option<tempfile::TempDir>,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -1218,6 +1220,8 @@ impl Session {
                 services,
                 git_enrichment_policy,
                 fork_persistence,
+                #[cfg(test)]
+                test_codex_home: None,
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
