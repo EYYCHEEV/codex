@@ -6,6 +6,24 @@
 use super::*;
 
 impl ChatWidget {
+    pub(super) fn on_response_attempt_reset(&mut self) {
+        let had_stream = self.stream_controller.take().is_some();
+        let had_plan_stream = self.plan_stream_controller.take().is_some();
+        self.clear_active_stream_tail();
+        self.adaptive_chunking.reset();
+        self.transcript.plan_delta_buffer.clear();
+        self.transcript.plan_item_active = false;
+        self.reasoning_buffer.clear();
+        self.full_reasoning_buffer.clear();
+        self.app_event_tx
+            .send(AppEvent::DiscardResponseAttemptOutput);
+        if had_stream || had_plan_stream {
+            self.app_event_tx.send(AppEvent::StopCommitAnimation);
+            self.request_pending_usage_output_insertion_after_stream_shutdown();
+        }
+        self.request_redraw();
+    }
+
     pub(super) fn restore_reasoning_status_header(&mut self) {
         if let Some(header) = extract_first_bold(&self.reasoning_buffer) {
             self.status_state.terminal_title_status_kind = TerminalTitleStatusKind::Thinking;
