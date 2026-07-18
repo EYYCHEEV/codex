@@ -96,6 +96,8 @@ pub(crate) struct Session {
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
+    #[cfg(test)]
+    pub(super) test_codex_home: Option<tempfile::TempDir>,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -1799,6 +1801,8 @@ impl Session {
                 git_enrichment_policy,
                 fork_persistence,
                 forked_from_ordinal_exclusive,
+                #[cfg(test)]
+                test_codex_home: None,
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(startup) = &startup {
