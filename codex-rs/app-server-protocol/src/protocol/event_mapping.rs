@@ -19,6 +19,7 @@ use crate::protocol::v2::ReasoningSummaryTextDeltaNotification;
 use crate::protocol::v2::ReasoningTextDeltaNotification;
 use crate::protocol::v2::TerminalInteractionNotification;
 use crate::protocol::v2::ThreadItem;
+use crate::protocol::v2::TurnResponseAttemptResetNotification;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
 use codex_protocol::protocol::EventMsg;
 use std::collections::HashMap;
@@ -509,6 +510,12 @@ pub fn item_event_to_server_notification(
                 completed_at_ms: item_completed_event.completed_at_ms,
             })
         }
+        EventMsg::ResponseAttemptReset(event) => {
+            ServerNotification::TurnResponseAttemptReset(TurnResponseAttemptResetNotification {
+                thread_id,
+                turn_id: event.turn_id,
+            })
+        }
         EventMsg::PatchApplyUpdated(event) => {
             ServerNotification::FileChangePatchUpdated(FileChangePatchUpdatedNotification {
                 thread_id,
@@ -566,6 +573,7 @@ mod tests {
     use codex_protocol::protocol::CollabResumeEndEvent;
     use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
     use codex_protocol::protocol::ExecOutputStream;
+    use codex_protocol::protocol::ResponseAttemptResetEvent;
     use pretty_assertions::assert_eq;
 
     fn assert_item_started_server_notification(
@@ -720,6 +728,28 @@ mod tests {
                 item_id: "call-1".to_string(),
                 delta: "hello".to_string(),
             },
+        );
+    }
+
+    #[test]
+    fn response_attempt_reset_maps_to_turn_notification() {
+        let notification = item_event_to_server_notification(
+            EventMsg::ResponseAttemptReset(ResponseAttemptResetEvent {
+                turn_id: "turn-1".to_string(),
+            }),
+            "thread-1",
+            "ignored-turn",
+        );
+
+        let ServerNotification::TurnResponseAttemptReset(notification) = notification else {
+            panic!("expected response attempt reset notification");
+        };
+        assert_eq!(
+            notification,
+            TurnResponseAttemptResetNotification {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+            }
         );
     }
 }

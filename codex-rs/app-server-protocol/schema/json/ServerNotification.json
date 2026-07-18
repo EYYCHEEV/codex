@@ -5877,6 +5877,21 @@
       ],
       "type": "object"
     },
+    "TurnResponseAttemptResetNotification": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
     "TurnStartedNotification": {
       "properties": {
         "threadId": {
@@ -6757,6 +6772,26 @@
         "params"
       ],
       "title": "Item/completedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "turn/responseAttempt/reset"
+          ],
+          "title": "Turn/responseAttempt/resetNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/TurnResponseAttemptResetNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Turn/responseAttempt/resetNotification",
       "type": "object"
     },
     {

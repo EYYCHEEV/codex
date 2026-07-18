@@ -110,6 +110,7 @@ use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::ResponseAttemptResetEvent;
 use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SafetyBufferingEvent;
@@ -1244,6 +1245,7 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut original_input = None;
     let mut prepared_attempt = Some((step_context, initial_request_setup));
+    let mut https_replacement_started = false;
     loop {
         let (attempt_step_context, request_setup) = match prepared_attempt.take() {
             Some(attempt) => attempt,
@@ -1297,7 +1299,10 @@ async fn run_sampling_request(
             turn_context.as_ref(),
             base_instructions.clone(),
         );
-        let AttemptOutcome { result, committed } = try_run_sampling_request(
+        let AttemptOutcome {
+            result,
+            replay_state,
+        } = try_run_sampling_request(
             tool_runtime,
             Arc::clone(&sess),
             Arc::clone(&turn_context),
@@ -1320,12 +1325,16 @@ async fn run_sampling_request(
             }
             Err(err) => err,
         };
+        if cancellation_token.is_cancelled() {
+            return Err(CodexErr::TurnAborted);
+        }
+        let committed = replay_state.is_committed();
         let mut websocket_close_diagnostic = client_session.websocket_close_diagnostic_context(
             &err,
             turn_context.sub_id.as_str(),
             responses_metadata.session_id.as_str(),
             turn_context.model_info.slug.as_str(),
-            committed,
+            replay_state.is_irreversible(),
         );
         let attempt_number = retries.saturating_add(1);
 
@@ -1333,12 +1342,15 @@ async fn run_sampling_request(
             original_input = Some(prompt.input);
         }
 
-        if !committed {
+        if replay_state.is_uncommitted() {
             let refresh_request_auth = client_session.request_scope_refresh_pending();
             if client_session
                 .recover_last_managed_attempt(&err, committed)
                 .await
             {
+                if cancellation_token.is_cancelled() {
+                    return Err(CodexErr::TurnAborted);
+                }
                 let recovery_decision = if refresh_request_auth {
                     ResponsesWebsocketCloseRecovery::RefreshRequestAuth
                 } else {
@@ -1375,6 +1387,53 @@ async fn run_sampling_request(
             }
             _ => err,
         };
+
+        if https_replacement_started {
+            return Err(err);
+        }
+
+        if replay_state.is_rewindable()
+            && matches!(err.details(), CodexErrorDetails::WebsocketClosed(_))
+            && err.is_retryable()
+            && client_session.websocket_http_fallback_allowed()
+        {
+            if cancellation_token.is_cancelled() {
+                return Err(CodexErr::TurnAborted);
+            }
+            client_session.try_switch_fallback_transport(
+                &turn_context.session_telemetry,
+                &turn_context.model_info,
+            );
+            sess.send_event(
+                &turn_context,
+                EventMsg::ResponseAttemptReset(ResponseAttemptResetEvent {
+                    turn_id: turn_context.sub_id.clone(),
+                }),
+            )
+            .await;
+            sess.send_event(
+                &turn_context,
+                EventMsg::Warning(WarningEvent {
+                    message: "WebSocket disconnected after incomplete output. Retrying over HTTPS."
+                        .to_string(),
+                }),
+            )
+            .await;
+            persist_websocket_close_diagnostic(
+                &sess,
+                websocket_close_diagnostic.take(),
+                attempt_number,
+                max_retries,
+                ResponsesWebsocketCloseRecovery::FallbackToHttpAfterReset,
+            )
+            .await;
+            if cancellation_token.is_cancelled() {
+                return Err(CodexErr::TurnAborted);
+            }
+            https_replacement_started = true;
+            turn_context.turn_timing_state.record_sampling_retry();
+            continue;
+        }
 
         if committed {
             persist_websocket_close_diagnostic(
@@ -1437,6 +1496,9 @@ async fn run_sampling_request(
             recovery_decision,
         )
         .await;
+        if cancellation_token.is_cancelled() {
+            return Err(CodexErr::TurnAborted);
+        }
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }
@@ -1613,48 +1675,78 @@ pub(crate) async fn built_tools(
     (all_mcp_tools, tool_router)
 }
 
-/// The result of one transport attempt together with the replay-safety boundary.
-///
-/// `committed` means the attempt has emitted model output or tool activity, or has
-/// mutated conversation history. Retry and account-recovery code must not replay
-/// a committed attempt, regardless of how its error is classified.
+/// Replay safety for one Responses sampling attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AttemptReplayState {
+    Uncommitted,
+    RewindableOutput,
+    Irreversible,
+}
+
+impl AttemptReplayState {
+    fn observe(&mut self, event: &ResponseEvent) {
+        *self = std::cmp::max(*self, response_event_replay_state(event));
+    }
+
+    pub(crate) fn is_uncommitted(self) -> bool {
+        self == Self::Uncommitted
+    }
+
+    pub(crate) fn is_rewindable(self) -> bool {
+        self == Self::RewindableOutput
+    }
+
+    pub(crate) fn is_irreversible(self) -> bool {
+        self == Self::Irreversible
+    }
+
+    pub(crate) fn is_committed(self) -> bool {
+        !self.is_uncommitted()
+    }
+}
+
+/// The result of one transport attempt together with its replay-safety boundary.
 #[must_use = "attempt commitment must be checked before retrying"]
 pub(crate) struct AttemptOutcome<T> {
     pub(crate) result: CodexResult<T>,
-    pub(crate) committed: bool,
+    pub(crate) replay_state: AttemptReplayState,
 }
 
 impl<T> AttemptOutcome<T> {
-    pub(crate) fn new(result: CodexResult<T>, committed: bool) -> Self {
-        Self { result, committed }
+    pub(crate) fn new(result: CodexResult<T>, replay_state: AttemptReplayState) -> Self {
+        Self {
+            result,
+            replay_state,
+        }
     }
 
     pub(crate) fn uncommitted(result: CodexResult<T>) -> Self {
-        Self::new(result, false)
+        Self::new(result, AttemptReplayState::Uncommitted)
     }
 
     #[cfg(test)]
     pub(crate) fn retry_allowed(&self) -> bool {
-        self.result.is_err() && !self.committed
+        self.result.is_err() && self.replay_state.is_uncommitted()
     }
 }
 
-/// Central classification for response events that cross the replay-safety boundary.
-///
-/// Metadata-only events remain uncommitted. Output item lifecycle events and all
-/// streamed text, reasoning, and tool-argument activity commit conservatively even
-/// when a particular client suppresses their presentation.
-pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
+/// Central replay classification for every Responses event.
+pub(crate) fn response_event_replay_state(event: &ResponseEvent) -> AttemptReplayState {
     match event {
-        ResponseEvent::OutputItemDone(_)
-        | ResponseEvent::OutputItemAdded(_)
+        ResponseEvent::OutputItemAdded(
+            ResponseItem::Message { .. }
+            | ResponseItem::Reasoning { .. }
+            | ResponseItem::AgentMessage { .. },
+        )
         | ResponseEvent::OutputTextDelta(_)
-        | ResponseEvent::ToolCallInputDelta { .. }
         | ResponseEvent::ReasoningSummaryDelta { .. }
         | ResponseEvent::ReasoningSummaryDone { .. }
         | ResponseEvent::ReasoningContentDelta { .. }
-        | ResponseEvent::ReasoningSummaryPartAdded { .. }
-        | ResponseEvent::Completed { .. } => true,
+        | ResponseEvent::ReasoningSummaryPartAdded { .. } => AttemptReplayState::RewindableOutput,
+        ResponseEvent::OutputItemDone(_)
+        | ResponseEvent::OutputItemAdded(_)
+        | ResponseEvent::ToolCallInputDelta { .. }
+        | ResponseEvent::Completed { .. } => AttemptReplayState::Irreversible,
         ResponseEvent::Created
         | ResponseEvent::SafetyBuffering(_)
         | ResponseEvent::ServerModel(_)
@@ -1662,8 +1754,12 @@ pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
         | ResponseEvent::TurnModerationMetadata(_)
         | ResponseEvent::ServerReasoningIncluded(_)
         | ResponseEvent::RateLimits(_)
-        | ResponseEvent::ModelsEtag(_) => false,
+        | ResponseEvent::ModelsEtag(_) => AttemptReplayState::Uncommitted,
     }
+}
+
+pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
+    response_event_replay_state(event).is_committed()
 }
 
 #[derive(Debug)]
@@ -1911,6 +2007,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::ExitedReviewMode(_)
         | EventMsg::RawResponseItem(_)
         | EventMsg::RawResponseCompleted(_)
+        | EventMsg::ResponseAttemptReset(_)
         | EventMsg::ItemStarted(_)
         | EventMsg::HookStarted(_)
         | EventMsg::HookCompleted(_)
@@ -2271,7 +2368,7 @@ async fn try_run_sampling_request(
     request_setup: CurrentClientSetup,
     cancellation_token: CancellationToken,
 ) -> AttemptOutcome<SamplingRequestResult> {
-    let mut committed = false;
+    let mut replay_state = AttemptReplayState::Uncommitted;
     let result = async {
         feedback_tags!(
             model = turn_context.model_info.slug.clone(),
@@ -2378,7 +2475,7 @@ async fn try_run_sampling_request(
                 .record_responses(&handle_responses, &event);
             record_turn_ttft_metric(&turn_context, &event).await;
 
-            committed |= response_event_commits_attempt(&event);
+            replay_state.observe(&event);
 
             match event {
                 ResponseEvent::Created => {}
@@ -2849,7 +2946,7 @@ async fn try_run_sampling_request(
         outcome
     }
     .await;
-    AttemptOutcome::new(result, committed)
+    AttemptOutcome::new(result, replay_state)
 }
 
 pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
@@ -2868,7 +2965,7 @@ mod replay_safety_tests {
     fn retryable_failure_after(event: ResponseEvent) -> AttemptOutcome<()> {
         AttemptOutcome::new(
             Err(CodexErr::Stream("retryable test failure".to_string())),
-            response_event_commits_attempt(&event),
+            response_event_replay_state(&event),
         )
     }
 
@@ -2880,16 +2977,23 @@ mod replay_safety_tests {
     }
 
     #[test]
-    fn output_text_reasoning_tool_and_item_events_commit_attempt() {
-        let committing_events = [
-            ResponseEvent::OutputItemAdded(ResponseItem::Other),
-            ResponseEvent::OutputItemDone(ResponseItem::Other),
+    fn incomplete_text_and_reasoning_output_is_rewindable() {
+        let rewindable_events = [
+            ResponseEvent::OutputItemAdded(ResponseItem::Message {
+                id: Some(ResponseItemId::new("message")),
+                role: "assistant".to_string(),
+                content: Vec::new(),
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            ResponseEvent::OutputItemAdded(ResponseItem::Reasoning {
+                id: Some(ResponseItemId::new("reasoning")),
+                summary: Vec::new(),
+                content: None,
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
             ResponseEvent::OutputTextDelta("text".to_string()),
-            ResponseEvent::ToolCallInputDelta {
-                item_id: "item".to_string(),
-                call_id: Some("call".to_string()),
-                delta: "{}".to_string(),
-            },
             ResponseEvent::ReasoningSummaryDelta {
                 delta: "summary".to_string(),
                 summary_index: 0,
@@ -2906,9 +3010,28 @@ mod replay_safety_tests {
             ResponseEvent::ReasoningSummaryPartAdded { summary_index: 1 },
         ];
 
-        for event in committing_events {
+        for event in rewindable_events {
             let outcome = retryable_failure_after(event);
-            assert!(outcome.committed);
+            assert!(outcome.replay_state.is_rewindable());
+            assert!(!outcome.retry_allowed());
+        }
+    }
+
+    #[test]
+    fn completed_items_and_tool_delivery_are_irreversible() {
+        let irreversible_events = [
+            ResponseEvent::OutputItemAdded(ResponseItem::Other),
+            ResponseEvent::OutputItemDone(ResponseItem::Other),
+            ResponseEvent::ToolCallInputDelta {
+                item_id: "item".to_string(),
+                call_id: Some("call".to_string()),
+                delta: "{}".to_string(),
+            },
+        ];
+
+        for event in irreversible_events {
+            let outcome = retryable_failure_after(event);
+            assert!(outcome.replay_state.is_irreversible());
             assert!(!outcome.retry_allowed());
         }
     }
@@ -2921,7 +3044,7 @@ mod replay_safety_tests {
             end_turn: Some(true),
         });
 
-        assert!(outcome.committed);
+        assert!(outcome.replay_state.is_irreversible());
         assert!(!outcome.retry_allowed());
     }
 
@@ -2933,7 +3056,7 @@ mod replay_safety_tests {
         ];
 
         for event in metadata_events {
-            assert!(!response_event_commits_attempt(&event));
+            assert!(response_event_replay_state(&event).is_uncommitted());
         }
     }
 }

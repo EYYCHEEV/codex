@@ -764,6 +764,9 @@ pub(crate) enum AppEvent {
 
     InsertHistoryCell(Box<dyn HistoryCell>),
 
+    /// Remove provisional transcript cells from a failed response attempt.
+    DiscardResponseAttemptOutput,
+
     /// Finish buffering initial resume replay after all replay events have been queued.
     EndInitialHistoryReplayBuffer,
 

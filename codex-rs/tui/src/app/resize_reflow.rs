@@ -433,12 +433,15 @@ impl App {
         Ok(terminal_width)
     }
 
-    /// Rebuild scrollback after rollback removes transcript cells.
+    /// Rebuild scrollback after transcript cells are removed.
     ///
     /// Unlike resize reflow, rollback must clear the terminal even when no cells remain. Otherwise
     /// the cancelled user prompt stays visible in scrollback despite being removed from the source
     /// transcript.
-    pub(super) fn rebuild_transcript_after_backtrack(&mut self, tui: &mut tui::Tui) -> Result<()> {
+    pub(super) fn rebuild_transcript_after_history_rewrite(
+        &mut self,
+        tui: &mut tui::Tui,
+    ) -> Result<()> {
         let terminal_width = tui.terminal.size()?.width;
         let width = self.chat_widget.history_wrap_width(terminal_width);
         let reflowed_lines = if self.transcript_cells.is_empty() {

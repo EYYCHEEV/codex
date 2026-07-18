@@ -13,6 +13,8 @@ use codex_protocol::openai_models::ModelsResponse;
 use futures::SinkExt;
 use futures::StreamExt;
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
@@ -557,6 +559,7 @@ struct WebSocketHandshakeRejection {
 pub struct WebSocketTestServer {
     uri: String,
     connections: Arc<Mutex<Vec<Vec<WebSocketRequest>>>>,
+    http_requests: Arc<Mutex<Vec<Value>>>,
     handshakes: Arc<Mutex<Vec<WebSocketHandshake>>>,
     request_log_updated: Arc<Notify>,
     shutdown: oneshot::Sender<()>,
@@ -602,6 +605,10 @@ impl WebSocketTestServer {
 
     pub fn handshakes(&self) -> Vec<WebSocketHandshake> {
         self.handshakes.lock().unwrap().clone()
+    }
+
+    pub fn http_requests(&self) -> Vec<Value> {
+        self.http_requests.lock().unwrap().clone()
     }
 
     /// Waits until at least `expected` websocket handshakes have been observed or timeout elapses.
@@ -1293,13 +1300,27 @@ pub async fn start_websocket_server(connections: Vec<Vec<Vec<Value>>>) -> WebSoc
             close_after_requests: true,
         })
         .collect();
-    start_websocket_server_with_handshake_rejection(connections, Vec::new(), None).await
+    start_websocket_server_with_handshake_rejection(
+        connections,
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+    )
+    .await
 }
 
 pub async fn start_websocket_server_with_headers(
     connections: Vec<WebSocketConnectionConfig>,
 ) -> WebSocketTestServer {
-    start_websocket_server_with_handshake_rejection(connections, Vec::new(), None).await
+    start_websocket_server_with_handshake_rejection(
+        connections,
+        Vec::new(),
+        Vec::new(),
+        None,
+        Vec::new(),
+    )
+    .await
 }
 
 pub async fn start_websocket_server_with_close_frames(
@@ -1315,7 +1336,62 @@ pub async fn start_websocket_server_with_close_frames(
             close_after_requests: true,
         })
         .collect();
-    start_websocket_server_with_handshake_rejection(connections, close_frames, None).await
+    start_websocket_server_with_handshake_rejection(
+        connections,
+        close_frames,
+        Vec::new(),
+        None,
+        Vec::new(),
+    )
+    .await
+}
+
+pub async fn start_websocket_server_with_close_frames_and_http(
+    connections: Vec<Vec<Vec<Value>>>,
+    close_frames: Vec<Option<WebSocketCloseFrame>>,
+    http_responses: Vec<String>,
+) -> WebSocketTestServer {
+    let connections = connections
+        .into_iter()
+        .map(|requests| WebSocketConnectionConfig {
+            requests,
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: true,
+        })
+        .collect();
+    start_websocket_server_with_handshake_rejection(
+        connections,
+        close_frames,
+        Vec::new(),
+        None,
+        http_responses,
+    )
+    .await
+}
+
+pub async fn start_websocket_server_with_delayed_disconnect_and_http(
+    connections: Vec<Vec<Vec<Value>>>,
+    disconnect_delays: Vec<Option<Duration>>,
+    http_responses: Vec<String>,
+) -> WebSocketTestServer {
+    let connections = connections
+        .into_iter()
+        .map(|requests| WebSocketConnectionConfig {
+            requests,
+            response_headers: Vec::new(),
+            accept_delay: None,
+            close_after_requests: true,
+        })
+        .collect();
+    start_websocket_server_with_handshake_rejection(
+        connections,
+        Vec::new(),
+        disconnect_delays,
+        None,
+        http_responses,
+    )
+    .await
 }
 
 pub async fn start_rejecting_websocket_server(
@@ -1332,11 +1408,13 @@ pub async fn start_rejecting_websocket_server(
     start_websocket_server_with_handshake_rejection(
         vec![connection],
         Vec::new(),
+        Vec::new(),
         Some(WebSocketHandshakeRejection {
             status,
             response_headers,
             body,
         }),
+        Vec::new(),
     )
     .await
 }
@@ -1344,21 +1422,27 @@ pub async fn start_rejecting_websocket_server(
 async fn start_websocket_server_with_handshake_rejection(
     connections: Vec<WebSocketConnectionConfig>,
     close_frames: Vec<Option<WebSocketCloseFrame>>,
+    disconnect_delays: Vec<Option<Duration>>,
     handshake_rejection: Option<WebSocketHandshakeRejection>,
+    http_responses: Vec<String>,
 ) -> WebSocketTestServer {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind websocket server");
     let addr = listener.local_addr().expect("websocket server address");
-    let uri = format!("ws://{addr}");
+    let uri = format!("http://{addr}");
     let connections_log = Arc::new(Mutex::new(Vec::new()));
+    let http_requests_log = Arc::new(Mutex::new(Vec::new()));
     let handshakes_log = Arc::new(Mutex::new(Vec::new()));
     let request_log_updated = Arc::new(Notify::new());
     let requests = Arc::clone(&connections_log);
+    let http_requests = Arc::clone(&http_requests_log);
     let handshakes = Arc::clone(&handshakes_log);
     let request_log = Arc::clone(&request_log_updated);
     let connections = Arc::new(Mutex::new(VecDeque::from(connections)));
+    let http_responses = Arc::new(Mutex::new(VecDeque::from(http_responses)));
     let mut close_frames = VecDeque::from(close_frames);
+    let mut disconnect_delays = VecDeque::from(disconnect_delays);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
     let task = tokio::spawn(async move {
@@ -1367,10 +1451,88 @@ async fn start_websocket_server_with_handshake_rejection(
                 _ = &mut shutdown_rx => return,
                 accept_res = listener.accept() => accept_res,
             };
-            let (stream, _) = match accept_res {
+            let (mut stream, _) = match accept_res {
                 Ok(value) => value,
                 Err(_) => return,
             };
+
+            let mut peek_buffer = [0_u8; 16 * 1024];
+            let peek_len = loop {
+                let len = match stream.peek(&mut peek_buffer).await {
+                    Ok(len) => len,
+                    Err(_) => break 0,
+                };
+                if len == 0
+                    || peek_buffer[..len]
+                        .windows(4)
+                        .any(|bytes| bytes == b"\r\n\r\n")
+                {
+                    break len;
+                }
+                tokio::task::yield_now().await;
+            };
+            let request_head = String::from_utf8_lossy(&peek_buffer[..peek_len]);
+            let is_websocket = request_head
+                .lines()
+                .any(|line| line.trim().eq_ignore_ascii_case("upgrade: websocket"));
+            if !is_websocket {
+                if !request_head.starts_with("POST /v1/responses ") {
+                    continue;
+                }
+                let Some(response_body) = http_responses.lock().unwrap().pop_front() else {
+                    continue;
+                };
+                let mut request = Vec::new();
+                let mut body_bounds = None;
+                loop {
+                    let mut chunk = [0_u8; 8192];
+                    let Ok(read) = stream.read(&mut chunk).await else {
+                        break;
+                    };
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(header_end) =
+                        request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                    else {
+                        continue;
+                    };
+                    let body_start = header_end + 4;
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    if request.len() >= body_start + content_length {
+                        body_bounds = Some((body_start, body_start + content_length));
+                        break;
+                    }
+                }
+                let Some((body_start, body_end)) = body_bounds else {
+                    continue;
+                };
+                if let Ok(body) = serde_json::from_slice(&request[body_start..body_end]) {
+                    http_requests.lock().unwrap().push(body);
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response_body}",
+                    response_body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+                if connections.lock().unwrap().is_empty()
+                    && http_responses.lock().unwrap().is_empty()
+                {
+                    return;
+                }
+                continue;
+            }
             // Ordinary HTTP probes can share this listener with websocket tests. Only a
             // successful websocket handshake should consume a scripted connection.
             let connection = {
@@ -1446,6 +1608,7 @@ async fn start_websocket_server_with_handshake_rejection(
             };
             connections.lock().unwrap().pop_front();
             let close_frame = close_frames.pop_front().flatten();
+            let disconnect_delay = disconnect_delays.pop_front().flatten();
 
             let connection_index = {
                 let mut log = requests.lock().unwrap();
@@ -1475,7 +1638,10 @@ async fn start_websocket_server_with_handshake_rejection(
                 }
             }
 
-            if let Some(close_frame) = close_frame {
+            if let Some(disconnect_delay) = disconnect_delay {
+                tokio::time::sleep(disconnect_delay).await;
+                let _ = ws_stream.get_mut().shutdown().await;
+            } else if let Some(close_frame) = close_frame {
                 let _ = ws_stream
                     .close(Some(CloseFrame {
                         code: CloseCode::from(close_frame.code),
@@ -1489,7 +1655,7 @@ async fn start_websocket_server_with_handshake_rejection(
                 return;
             }
 
-            if connections.lock().unwrap().is_empty() {
+            if connections.lock().unwrap().is_empty() && http_responses.lock().unwrap().is_empty() {
                 return;
             }
         }
@@ -1498,6 +1664,7 @@ async fn start_websocket_server_with_handshake_rejection(
     WebSocketTestServer {
         uri,
         connections: connections_log,
+        http_requests: http_requests_log,
         handshakes: handshakes_log,
         request_log_updated,
         shutdown: shutdown_tx,
