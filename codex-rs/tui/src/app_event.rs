@@ -1162,6 +1162,8 @@ pub(crate) enum AppEvent {
 
     /// Move visible completed voice captions into history in one app event.
     CommitRealtimeTranscriptHistory,
+    /// Remove provisional transcript cells from a failed response attempt.
+    DiscardResponseAttemptOutput,
 
     VoiceControl {
         thread_id: Option<ThreadId>,

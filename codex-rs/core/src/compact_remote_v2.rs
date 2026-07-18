@@ -462,14 +462,17 @@ async fn collect_compaction_output_inner(
     let mut compaction_count = 0usize;
     let mut compaction_output = None;
     let mut completed_response_id = None;
-    let mut committed = false;
+    let mut replay_state = crate::session::turn::AttemptReplayState::Uncommitted;
     let mut completed_token_usage = None;
     while let Some(event) = stream.next().await {
         let event = match event {
             Ok(event) => event,
-            Err(err) => return AttemptOutcome::new(Err(err), committed),
+            Err(err) => return AttemptOutcome::new(Err(err), replay_state),
         };
-        committed |= crate::session::turn::response_event_commits_attempt(&event);
+        replay_state = std::cmp::max(
+            replay_state,
+            crate::session::turn::response_event_replay_state(&event),
+        );
         match event {
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
@@ -519,7 +522,7 @@ async fn collect_compaction_output_inner(
             Err(CodexErr::Stream(
                 "remote compaction v2 stream closed before response.completed".to_string(),
             )),
-            committed,
+            replay_state,
         );
     };
 
@@ -528,7 +531,7 @@ async fn collect_compaction_output_inner(
             Err(CodexErr::Fatal(format!(
                 "remote compaction v2 expected exactly one compaction output item, got {compaction_count} from {output_item_count} output items"
             ))),
-            committed,
+            replay_state,
         );
     }
 
@@ -541,7 +544,7 @@ async fn collect_compaction_output_inner(
             response_id,
             token_usage: completed_token_usage,
         }),
-        committed,
+        replay_state,
     )
 }
 #[cfg(test)]
@@ -1291,7 +1294,7 @@ mod tests {
 
         let outcome = collect_compaction_output(stream).await;
 
-        assert!(outcome.committed);
+        assert!(outcome.replay_state.is_committed());
         let Err(err) = outcome.result else {
             panic!("buffered stream failure should be returned");
         };
@@ -1342,7 +1345,7 @@ mod tests {
             )),
         )
         .await;
-        assert!(outcome.committed);
+        assert!(outcome.replay_state.is_committed());
         let output = outcome.result.expect("compaction should be collected");
 
         assert_eq!(output.compaction_output, compaction);
