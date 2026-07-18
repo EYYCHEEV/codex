@@ -6721,7 +6721,10 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
     let thread_id = ThreadId::default();
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let auth_manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("Test API Key"),
+        config.codex_home.to_path_buf(),
+    );
     let models_manager = models_manager_with_provider(
         config.codex_home.to_path_buf(),
         auth_manager.clone(),
@@ -6967,6 +6970,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
         forked_from_ordinal_exclusive: None,
+        test_codex_home: Some(codex_home),
         next_internal_sub_id: AtomicU64::new(0),
     };
     let per_turn_config = session.build_per_turn_config(
@@ -9244,6 +9248,7 @@ where
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
         forked_from_ordinal_exclusive: None,
+        test_codex_home: None,
         next_internal_sub_id: AtomicU64::new(0),
     });
     let per_turn_config = session.build_per_turn_config(
@@ -9418,6 +9423,12 @@ async fn cancelled_step_capture_finishes_warning_delivery() {
 #[tokio::test]
 async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
     let (session, turn_context) = make_session_and_context().await;
+    let codex_home = session
+        .test_codex_home
+        .as_ref()
+        .expect("session should retain its temporary Codex home")
+        .path()
+        .to_path_buf();
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
     let old_step = session
@@ -9492,7 +9503,10 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
     let rematerialized_old = session
         .mcp_runtime_for_step(
             &turn_context,
+            &turn_context.environments,
             /*selected_capability_roots*/ &[],
+            /*executor_capability_discovery*/ None,
+            /*request_setup*/ None,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -9521,6 +9535,13 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
         codex_mcp::configured_mcp_servers(current.config()).contains_key("refreshed"),
         "the refreshed state should remain globally current"
     );
+    drop(old_step);
+    drop(new_step);
+    drop(rematerialized_old);
+    drop(current);
+    drop(turn_context);
+    drop(session);
+    assert!(!codex_home.exists());
 }
 
 #[tokio::test]
