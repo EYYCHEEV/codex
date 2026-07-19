@@ -57,6 +57,10 @@ For hard failures, `codex exec --websocket-diagnostic "your prompt"` produces a 
 Fork releases contain a matched `codex` and `codex-code-mode-host` pair.
 Keep both executables from the same release in the same directory.
 
+> [!NOTE]
+> Prebuilt Stronk Codex releases currently support macOS on Apple Silicon only.
+> This is the environment actively dogfooded by the maintainer; other platforms will be considered when there is enough demand and real-world testing.
+
 ### macOS Apple Silicon
 
 Using the [GitHub CLI](https://cli.github.com/):
@@ -89,8 +93,8 @@ install -m 755 \
 ```
 
 Make sure `~/.local/bin` is on your `PATH`, or use a directory that already is.
-Check the [latest release](https://github.com/EYYCHEEV/codex/releases/latest) for other targets and its `RELEASE_MANIFEST.json` for exact provenance.
-Linux assets are optional per release; npm and Homebrew install upstream Codex, not this fork.
+Check the [latest release](https://github.com/EYYCHEEV/codex/releases/latest) and its `RELEASE_MANIFEST.json` for exact provenance.
+The npm package and Homebrew cask install upstream Codex, not this fork.
 
 ## More forked reliability
 
