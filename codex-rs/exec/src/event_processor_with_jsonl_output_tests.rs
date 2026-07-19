@@ -87,6 +87,48 @@ fn runtime_warning_emits_a_non_fatal_error_item() {
 }
 
 #[test]
+fn v2_subagent_activity_emits_an_auditable_collab_event() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+    let collected = processor.collect_thread_events(ServerNotification::ItemCompleted(
+        codex_app_server_protocol::ItemCompletedNotification {
+            item: ThreadItem::SubAgentActivity {
+                id: "spawn-1".to_string(),
+                kind: SubAgentActivityKind::Started,
+                agent_thread_id: "thread-child".to_string(),
+                agent_path: "/root/worker".to_string(),
+            },
+            thread_id: "thread-parent".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+        },
+    ));
+
+    let [ThreadEvent::ItemCompleted(ItemCompletedEvent { item })] = collected.events.as_slice()
+    else {
+        panic!("expected one completed collaboration event");
+    };
+    let ThreadItemDetails::CollabToolCall(call) = &item.details else {
+        panic!("expected a collaboration tool call");
+    };
+    assert_eq!(
+        (
+            &call.tool,
+            call.sender_thread_id.as_str(),
+            call.receiver_thread_ids.as_slice(),
+            &call.agents_states["thread-child"].status,
+            &call.status,
+        ),
+        (
+            &CollabTool::SpawnAgent,
+            "thread-parent",
+            ["thread-child".to_string()].as_slice(),
+            &CollabAgentStatus::Running,
+            &CollabToolCallStatus::Completed,
+        )
+    );
+}
+
+#[test]
 fn mcp_tool_call_result_preserves_meta_in_jsonl_event() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
 

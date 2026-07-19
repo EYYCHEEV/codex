@@ -6,11 +6,13 @@ use std::sync::atomic::Ordering;
 use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionStatus;
+use codex_app_server_protocol::McpServerStartupFailureReason;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpToolCallStatus;
 use codex_app_server_protocol::PatchApplyStatus;
 use codex_app_server_protocol::PatchChangeKind;
 use codex_app_server_protocol::ServerNotification;
+use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
@@ -142,13 +144,18 @@ impl EventProcessorWithJsonOutput {
     fn mcp_startup_status_from_notification(
         status: McpServerStartupState,
         error: Option<String>,
+        failure_reason: Option<McpServerStartupFailureReason>,
     ) -> protocol::McpStartupStatus {
         match status {
             McpServerStartupState::Starting => protocol::McpStartupStatus::Starting,
             McpServerStartupState::Ready => protocol::McpStartupStatus::Ready,
             McpServerStartupState::Failed => protocol::McpStartupStatus::Failed {
                 error: error.unwrap_or_else(|| "unknown MCP startup failure".to_string()),
-                reason: None,
+                reason: failure_reason.map(
+                    |McpServerStartupFailureReason::ReauthenticationRequired| {
+                        protocol::McpStartupFailureReason::ReauthenticationRequired
+                    },
+                ),
             },
             McpServerStartupState::Cancelled => protocol::McpStartupStatus::Cancelled,
         }
@@ -547,6 +554,7 @@ impl EventProcessorWithJsonOutput {
                 let status = Self::mcp_startup_status_from_notification(
                     notification.status,
                     notification.error,
+                    notification.failure_reason,
                 );
                 let server = notification.name;
                 self.mcp_startup_statuses
@@ -566,7 +574,33 @@ impl EventProcessorWithJsonOutput {
                 CodexStatus::Running
             }
             ServerNotification::ItemCompleted(notification) => {
-                if let Some(item) = self.map_completed_item_mut(notification.item) {
+                let sender_thread_id = notification.thread_id;
+                let item = match notification.item {
+                    ThreadItem::SubAgentActivity {
+                        id,
+                        kind: SubAgentActivityKind::Started,
+                        agent_thread_id,
+                        ..
+                    } => Some(ExecThreadItem {
+                        id: self.completed_item_id(&id),
+                        details: ThreadItemDetails::CollabToolCall(CollabToolCallItem {
+                            tool: CollabTool::SpawnAgent,
+                            sender_thread_id,
+                            receiver_thread_ids: vec![agent_thread_id.clone()],
+                            prompt: None,
+                            agents_states: HashMap::from([(
+                                agent_thread_id,
+                                CollabAgentState {
+                                    status: CollabAgentStatus::Running,
+                                    message: None,
+                                },
+                            )]),
+                            status: CollabToolCallStatus::Completed,
+                        }),
+                    }),
+                    item => self.map_completed_item_mut(item),
+                };
+                if let Some(item) = item {
                     if let ThreadItemDetails::AgentMessage(AgentMessageItem { text }) =
                         &item.details
                     {
