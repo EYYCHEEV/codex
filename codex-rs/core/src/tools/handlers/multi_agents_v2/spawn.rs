@@ -3,6 +3,7 @@ use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
+use crate::agent::role::apply_role_to_config;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
@@ -47,7 +48,8 @@ impl ToolExecutor<ToolInvocation> for Handler {
             let turn_id = invocation.step_context.turn.sub_id.clone();
             let call_id = invocation.call_id.clone();
             let started_at_ms = now_unix_timestamp_ms();
-            let result = handle_spawn_agent(invocation).await;
+            let result =
+                handle_spawn_agent(invocation, self.options.hide_agent_type_model_reasoning).await;
             let completed_at_ms = now_unix_timestamp_ms();
             let (status, receiver_thread_ids, agents_states) = match &result {
                 Ok((_, thread_id, agent_status, _)) => (
@@ -84,7 +86,6 @@ impl ToolExecutor<ToolInvocation> for Handler {
                 started_at_ms,
                 completed_at_ms,
             );
-
             result.map(|(output, _, _, _)| boxed_tool_output(output))
         })
     }
@@ -92,6 +93,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
 
 async fn handle_spawn_agent(
     invocation: ToolInvocation,
+    provider_reserved: bool,
 ) -> Result<
     (
         SpawnAgentResult,
@@ -112,6 +114,14 @@ async fn handle_spawn_agent(
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+    if provider_reserved
+        && (args.model.is_some() || args.reasoning_effort.is_some() || args.service_tier.is_some())
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "Provider-reserved spawn_agent callers must omit model, reasoning_effort, and service_tier"
+                .to_string(),
+        ));
+    }
     let fork_mode = args.fork_mode()?;
     let message = message_content(args.message)?;
     let role_name = args
@@ -119,40 +129,66 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
+    let parent_route = capture_spawn_agent_parent_route(turn.as_ref());
 
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
-    apply_requested_spawn_agent_model_overrides(
-        &session,
-        turn.as_ref(),
-        &mut config,
-        args.model.as_deref(),
-        args.reasoning_effort.clone(),
-    )
-    .await?;
-    if !is_full_history_fork || role_name.is_some() {
-        apply_spawn_agent_role(&session, &mut config, role_name).await?;
-        if is_full_history_fork && config.developer_instructions.is_none() {
-            config
-                .developer_instructions
-                .clone_from(&turn.developer_instructions);
+    let mut effective_role_name = if is_full_history_fork {
+        turn.session_source.get_agent_role()
+    } else {
+        role_name.map(str::to_string)
+    };
+    let route = if is_full_history_fork {
+        reject_full_fork_agent_type_override(role_name)?;
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            turn.as_ref(),
+            &mut config,
+            args.model.as_deref(),
+            args.reasoning_effort.clone(),
+        )
+        .await?;
+        SpawnAgentRoute::Preferred
+    } else if role_name.is_some() {
+        if args.model.is_some() || args.reasoning_effort.is_some() {
+            return Err(FunctionCallError::RespondToModel(
+                "Typed spawn_agent routes are owned by agent_type; omit model and reasoning_effort"
+                    .to_string(),
+            ));
         }
-    }
+        apply_role_to_config(&mut config, role_name)
+            .await
+            .map_err(FunctionCallError::RespondToModel)?;
+        resolve_typed_spawn_agent_route(&session, &mut config, &parent_route).await?
+    } else {
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            turn.as_ref(),
+            &mut config,
+            args.model.as_deref(),
+            args.reasoning_effort.clone(),
+        )
+        .await?;
+        apply_spawn_agent_role(&session, &mut config, role_name).await?;
+        SpawnAgentRoute::Preferred
+    };
     apply_spawn_agent_service_tier(&session, &mut config).await?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     // Remember an applied configured default so cold reload reapplies its restrictions.
-    let persisted_role_name = role_name.or_else(|| {
-        (!is_full_history_fork
-            && config
-                .agent_roles
-                .get(DEFAULT_ROLE_NAME)
-                .is_some_and(|role| role.config_file.is_some()))
-        .then_some(DEFAULT_ROLE_NAME)
-    });
+    if effective_role_name.is_none()
+        && !is_full_history_fork
+        && config
+            .agent_roles
+            .get(DEFAULT_ROLE_NAME)
+            .is_some_and(|role| role.config_file.is_some())
+    {
+        effective_role_name = Some(DEFAULT_ROLE_NAME.to_string());
+    }
+    let persisted_role_name = effective_role_name.as_deref();
     let spawn_source = thread_spawn_source(
         session.thread_id,
         &turn.session_source,
@@ -249,21 +285,40 @@ async fn handle_spawn_agent(
         },
     )
     .await;
-    let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
+    let role_tag = effective_role_name.as_deref().unwrap_or(DEFAULT_ROLE_NAME);
     turn.session_telemetry.counter(
         "codex.multi_agent.spawn",
         /*inc*/ 1,
         &[("role", role_tag), ("version", "v2")],
     );
     let task_name = String::from(new_agent_path);
+    let agent_type = spawned_agent
+        .metadata
+        .agent_role
+        .unwrap_or_else(|| DEFAULT_ROLE_NAME.to_string());
+    let model = spawned_agent.model;
+    let reasoning_effort = spawned_agent.reasoning_effort;
+    let (route, fallback_reason) = route.into_report();
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let output = if hide_agent_metadata {
-        SpawnAgentResult::HiddenMetadata { task_name }
+        SpawnAgentResult::WithoutNickname {
+            task_name,
+            agent_type,
+            model,
+            reasoning_effort,
+            route,
+            fallback_reason,
+        }
     } else {
         SpawnAgentResult::WithNickname {
             task_name,
             nickname,
+            agent_type,
+            model,
+            reasoning_effort,
+            route,
+            fallback_reason,
         }
     };
     Ok((output, new_thread_id, agent_status, agent_snapshot))
@@ -283,6 +338,7 @@ struct SpawnAgentArgs {
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
+    service_tier: Option<String>,
     fork_turns: Option<String>,
     fork_context: Option<bool>,
 }
@@ -300,7 +356,13 @@ impl SpawnAgentArgs {
             .as_deref()
             .map(str::trim)
             .filter(|fork_turns| !fork_turns.is_empty())
-            .unwrap_or("all");
+            .unwrap_or_else(|| {
+                self.agent_type
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|role| !role.is_empty())
+                    .map_or("all", |_| "none")
+            });
 
         if fork_turns.eq_ignore_ascii_case("none") {
             return Ok(None);
@@ -330,9 +392,19 @@ pub(crate) enum SpawnAgentResult {
     WithNickname {
         task_name: String,
         nickname: Option<String>,
+        agent_type: String,
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
+        route: &'static str,
+        fallback_reason: Option<String>,
     },
-    HiddenMetadata {
+    WithoutNickname {
         task_name: String,
+        agent_type: String,
+        model: String,
+        reasoning_effort: Option<ReasoningEffort>,
+        route: &'static str,
+        fallback_reason: Option<String>,
     },
 }
 
