@@ -848,6 +848,74 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_reasoning_item() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn queued_inter_agent_mail_preempts_before_later_message_item() {
+    let (gate_reasoning_done_tx, gate_reasoning_done_rx) = oneshot::channel();
+
+    let first_chunks = vec![
+        chunk(ev_response_created("resp-1")),
+        chunk(ev_reasoning_item_added("reason-1", &["thinking"])),
+        gated_chunk(
+            gate_reasoning_done_rx,
+            vec![
+                ev_reasoning_item("reason-1", &["thinking"], &[]),
+                ev_message_item_added("msg-stale", ""),
+                ev_output_text_delta("stale final"),
+                ev_message_item_done("msg-stale", "stale final"),
+                ev_completed("resp-1"),
+            ],
+        ),
+    ];
+
+    let (server, _completions) =
+        start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
+    let codex = build_codex(&server).await;
+
+    submit_user_input(&codex, "first prompt").await;
+    wait_for_reasoning_item_started(&codex).await;
+    submit_queue_only_agent_mail(&codex, "queued child update").await;
+    let _ = gate_reasoning_done_tx.send(());
+
+    let mut saw_stale_message_event = false;
+    loop {
+        match codex.next_event().await.expect("next event").msg {
+            EventMsg::ItemStarted(event)
+                if matches!(
+                    event.item,
+                    TurnItem::AgentMessage(ref item) if item.id == "msg-stale"
+                ) =>
+            {
+                saw_stale_message_event = true;
+            }
+            EventMsg::AgentMessageContentDelta(event) if event.item_id == "msg-stale" => {
+                saw_stale_message_event = true;
+            }
+            EventMsg::ItemCompleted(event)
+                if matches!(
+                    event.item,
+                    TurnItem::AgentMessage(ref item) if item.id == "msg-stale"
+                ) =>
+            {
+                saw_stale_message_event = true;
+            }
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
+
+    assert!(!saw_stale_message_event);
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let requests_text = requests
+        .iter()
+        .map(|request| String::from_utf8_lossy(request))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!requests_text.contains("stale final"));
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queued_inter_agent_mail_triggers_follow_up_after_commentary_message_item() {
     let (gate_message_done_tx, gate_message_done_rx) = oneshot::channel();
 

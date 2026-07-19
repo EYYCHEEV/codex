@@ -46,6 +46,7 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::stream_events_utils::HandleOutputCtx;
+use crate::stream_events_utils::OutputItemResult;
 use crate::stream_events_utils::TurnItemContributorPolicy;
 use crate::stream_events_utils::finalize_non_tool_response_item;
 use crate::stream_events_utils::handle_non_tool_response_item;
@@ -1530,11 +1531,7 @@ async fn run_sampling_request(
             return Err(err);
         }
 
-        if replay_state.is_rewindable()
-            && matches!(err.details(), CodexErrorDetails::WebsocketClosed(_))
-            && err.is_retryable()
-            && client_session.websocket_http_fallback_allowed()
-        {
+        if can_fallback_rewindable_websocket_attempt(replay_state, &err, client_session) {
             if cancellation_token.is_cancelled() {
                 return Err(CodexErr::TurnAborted);
             }
@@ -1864,20 +1861,17 @@ impl<T> AttemptOutcome<T> {
 /// Central replay classification for every Responses event.
 pub(crate) fn response_event_replay_state(event: &ResponseEvent) -> AttemptReplayState {
     match event {
-        ResponseEvent::OutputItemAdded(
-            ResponseItem::Message { .. }
-            | ResponseItem::Reasoning { .. }
-            | ResponseItem::AgentMessage { .. },
-        )
-        | ResponseEvent::OutputTextDelta(_)
+        ResponseEvent::OutputItemAdded(item) | ResponseEvent::OutputItemDone(item) => {
+            response_item_replay_state(item)
+        }
+        ResponseEvent::OutputTextDelta(_)
         | ResponseEvent::ReasoningSummaryDelta { .. }
         | ResponseEvent::ReasoningSummaryDone { .. }
         | ResponseEvent::ReasoningContentDelta { .. }
         | ResponseEvent::ReasoningSummaryPartAdded { .. } => AttemptReplayState::RewindableOutput,
-        ResponseEvent::OutputItemDone(_)
-        | ResponseEvent::OutputItemAdded(_)
-        | ResponseEvent::ToolCallInputDelta { .. }
-        | ResponseEvent::Completed { .. } => AttemptReplayState::Irreversible,
+        ResponseEvent::ToolCallInputDelta { .. } | ResponseEvent::Completed { .. } => {
+            AttemptReplayState::Irreversible
+        }
         ResponseEvent::Created
         | ResponseEvent::SafetyBuffering(_)
         | ResponseEvent::ServerModel(_)
@@ -1887,6 +1881,39 @@ pub(crate) fn response_event_replay_state(event: &ResponseEvent) -> AttemptRepla
         | ResponseEvent::RateLimits(_)
         | ResponseEvent::ModelsEtag(_) => AttemptReplayState::Uncommitted,
     }
+}
+
+fn response_item_replay_state(item: &ResponseItem) -> AttemptReplayState {
+    match item {
+        ResponseItem::Message { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::AgentMessage { .. } => AttemptReplayState::RewindableOutput,
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => AttemptReplayState::Irreversible,
+    }
+}
+
+fn can_fallback_rewindable_websocket_attempt(
+    replay_state: AttemptReplayState,
+    err: &CodexErr,
+    client_session: &ModelClientSession,
+) -> bool {
+    replay_state.is_rewindable()
+        && matches!(err.details(), CodexErrorDetails::WebsocketClosed(_))
+        && err.is_retryable()
+        && client_session.websocket_http_fallback_allowed()
 }
 
 pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
@@ -2437,6 +2464,91 @@ async fn handle_assistant_item_done_in_plan_mode(
     false
 }
 
+struct PendingCompletedResponseItem {
+    item: ResponseItem,
+    previously_streamed_item: Option<TurnItem>,
+    preempt_for_mailbox_mail: bool,
+}
+
+fn response_item_preempts_for_mailbox_mail(item: &ResponseItem, plan_mode: bool) -> bool {
+    match item {
+        ResponseItem::Message { role, phase, .. } => {
+            !plan_mode && role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
+        }
+        ResponseItem::Reasoning { .. } => true,
+        ResponseItem::AgentMessage { .. }
+        | ResponseItem::AdditionalTools { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => false,
+    }
+}
+
+async fn handle_completed_response_item(
+    ctx: &mut HandleOutputCtx,
+    item: ResponseItem,
+    previously_streamed_item: Option<TurnItem>,
+    plan_mode_state: Option<&mut PlanModeStreamState>,
+    last_agent_message: &mut Option<String>,
+) -> CodexResult<OutputItemResult> {
+    if let Some(state) = plan_mode_state
+        && handle_assistant_item_done_in_plan_mode(
+            ctx.sess.as_ref(),
+            ctx.turn_context.as_ref(),
+            ctx.turn_store.as_ref(),
+            &item,
+            state,
+            previously_streamed_item.as_ref(),
+            last_agent_message,
+        )
+        .await
+    {
+        return Ok(OutputItemResult::default());
+    }
+
+    handle_output_item_done(ctx, item, previously_streamed_item).await
+}
+
+async fn flush_pending_completed_response_items(
+    pending_items: &mut Vec<PendingCompletedResponseItem>,
+    ctx: &mut HandleOutputCtx,
+    plan_mode_state: &mut Option<PlanModeStreamState>,
+    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
+    last_agent_message: &mut Option<String>,
+    needs_follow_up: &mut bool,
+) -> CodexResult<bool> {
+    let mut preempt_for_mailbox_mail = false;
+    for pending in std::mem::take(pending_items) {
+        let output = handle_completed_response_item(
+            ctx,
+            pending.item,
+            pending.previously_streamed_item,
+            plan_mode_state.as_mut(),
+            last_agent_message,
+        )
+        .await?;
+        if let Some(tool_future) = output.tool_future {
+            in_flight.push_back(tool_future);
+        }
+        if let Some(agent_message) = output.last_agent_message {
+            *last_agent_message = Some(agent_message);
+        }
+        *needs_follow_up |= output.needs_follow_up;
+        preempt_for_mailbox_mail |= pending.preempt_for_mailbox_mail;
+    }
+    Ok(preempt_for_mailbox_mail)
+}
+
 #[instrument(level = "trace", skip_all)]
 async fn drain_in_flight(
     in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
@@ -2566,8 +2678,16 @@ async fn try_run_sampling_request(
         let defer_streamed_turn_items_for_contributors =
             !sess.services.extensions.turn_item_contributors().is_empty();
         let mut active_item_is_streaming_to_client = false;
+        let mut pending_completed_response_items = Vec::new();
+        let mut handle_output_ctx = HandleOutputCtx {
+            sess: sess.clone(),
+            turn_context: turn_context.clone(),
+            turn_store: Arc::clone(&turn_store),
+            tool_runtime: tool_runtime.clone(),
+            cancellation_token: cancellation_token.child_token(),
+        };
         let receiving_span = trace_span!("receiving_stream");
-        let outcome: CodexResult<SamplingRequestResult> = loop {
+        let mut outcome: CodexResult<SamplingRequestResult> = loop {
             let handle_responses = trace_span!(
                 parent: &receiving_span,
                 "handle_responses",
@@ -2609,6 +2729,22 @@ async fn try_run_sampling_request(
             record_turn_ttft_metric(&turn_context, &event).await;
 
             replay_state.observe(&event);
+            if response_event_replay_state(&event).is_irreversible()
+                && flush_pending_completed_response_items(
+                    &mut pending_completed_response_items,
+                    &mut handle_output_ctx,
+                    &mut plan_mode_state,
+                    &mut in_flight,
+                    &mut last_agent_message,
+                    &mut needs_follow_up,
+                )
+                .await?
+            {
+                break Ok(SamplingRequestResult {
+                    needs_follow_up: true,
+                    last_agent_message: last_agent_message.clone(),
+                });
+            }
 
             match event {
                 ResponseEvent::Created => {}
@@ -2657,75 +2793,59 @@ async fn try_run_sampling_request(
                         )
                         .await;
                     }
-                    if let Some(state) = plan_mode_state.as_mut()
-                        && handle_assistant_item_done_in_plan_mode(
-                            &sess,
-                            &turn_context,
-                            turn_store.as_ref(),
-                            &item,
-                            state,
-                            previously_streamed_item.as_ref(),
-                            &mut last_agent_message,
-                        )
-                        .await
-                    {
+                    if response_item_replay_state(&item).is_rewindable() {
+                        let preempt_for_mailbox_mail =
+                            response_item_preempts_for_mailbox_mail(&item, plan_mode)
+                                && sess.input_queue.has_pending_mailbox_items().await;
+                        pending_completed_response_items.push(PendingCompletedResponseItem {
+                            item,
+                            previously_streamed_item,
+                            preempt_for_mailbox_mail,
+                        });
+                        if preempt_for_mailbox_mail {
+                            match flush_pending_completed_response_items(
+                                &mut pending_completed_response_items,
+                                &mut handle_output_ctx,
+                                &mut plan_mode_state,
+                                &mut in_flight,
+                                &mut last_agent_message,
+                                &mut needs_follow_up,
+                            )
+                            .await
+                            {
+                                Ok(true) => {
+                                    break Ok(SamplingRequestResult {
+                                        needs_follow_up: true,
+                                        last_agent_message: last_agent_message.clone(),
+                                    });
+                                }
+                                Ok(false) => {}
+                                Err(err) => break Err(err),
+                            }
+                        }
                         continue;
                     }
 
-                    let mut ctx = HandleOutputCtx {
-                        sess: sess.clone(),
-                        turn_context: turn_context.clone(),
-                        turn_store: Arc::clone(&turn_store),
-                        tool_runtime: tool_runtime.clone(),
-                        cancellation_token: cancellation_token.child_token(),
+                    let output = match handle_completed_response_item(
+                        &mut handle_output_ctx,
+                        item,
+                        previously_streamed_item,
+                        plan_mode_state.as_mut(),
+                        &mut last_agent_message,
+                    )
+                    .instrument(handle_responses)
+                    .await
+                    {
+                        Ok(output) => output,
+                        Err(err) => break Err(err),
                     };
-
-                    let preempt_for_mailbox_mail = match &item {
-                        ResponseItem::Message { role, phase, .. } => {
-                            role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
-                        }
-                        ResponseItem::Reasoning { .. } => true,
-                        ResponseItem::AgentMessage { .. } => false,
-                        ResponseItem::AdditionalTools { .. }
-                        | ResponseItem::LocalShellCall { .. }
-                        | ResponseItem::FunctionCall { .. }
-                        | ResponseItem::ToolSearchCall { .. }
-                        | ResponseItem::FunctionCallOutput { .. }
-                        | ResponseItem::CustomToolCall { .. }
-                        | ResponseItem::CustomToolCallOutput { .. }
-                        | ResponseItem::ToolSearchOutput { .. }
-                        | ResponseItem::WebSearchCall { .. }
-                        | ResponseItem::ImageGenerationCall { .. }
-                        | ResponseItem::Compaction { .. }
-                        | ResponseItem::CompactionTrigger { .. }
-                        | ResponseItem::ContextCompaction { .. }
-                        | ResponseItem::Other => false,
-                    };
-
-                    let output_result =
-                        match handle_output_item_done(&mut ctx, item, previously_streamed_item)
-                            .instrument(handle_responses)
-                            .await
-                        {
-                            Ok(output_result) => output_result,
-                            Err(err) => break Err(err),
-                        };
-                    if let Some(tool_future) = output_result.tool_future {
+                    if let Some(tool_future) = output.tool_future {
                         in_flight.push_back(tool_future);
                     }
-                    if let Some(agent_message) = output_result.last_agent_message {
+                    if let Some(agent_message) = output.last_agent_message {
                         last_agent_message = Some(agent_message);
                     }
-                    needs_follow_up |= output_result.needs_follow_up;
-                    // todo: remove before stabilizing multi-agent v2
-                    if preempt_for_mailbox_mail
-                        && sess.input_queue.has_pending_mailbox_items().await
-                    {
-                        break Ok(SamplingRequestResult {
-                            needs_follow_up: true,
-                            last_agent_message,
-                        });
-                    }
+                    needs_follow_up |= output.needs_follow_up;
                 }
                 ResponseEvent::OutputItemAdded(mut item) => {
                     assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
@@ -2904,7 +3024,7 @@ async fn try_run_sampling_request(
                     }
                     break Ok(SamplingRequestResult {
                         needs_follow_up,
-                        last_agent_message,
+                        last_agent_message: last_agent_message.clone(),
                     });
                 }
                 ResponseEvent::OutputTextDelta(delta) => {
@@ -3063,6 +3183,35 @@ async fn try_run_sampling_request(
                 }
             }
         };
+        let discard_pending_items = matches!(
+            &outcome,
+            Err(err) if can_fallback_rewindable_websocket_attempt(
+                replay_state,
+                err,
+                client_session,
+            )
+        );
+        if !discard_pending_items {
+            match flush_pending_completed_response_items(
+                &mut pending_completed_response_items,
+                &mut handle_output_ctx,
+                &mut plan_mode_state,
+                &mut in_flight,
+                &mut last_agent_message,
+                &mut needs_follow_up,
+            )
+            .await
+            {
+                Ok(true) if !cancellation_token.is_cancelled() => {
+                    outcome = Ok(SamplingRequestResult {
+                        needs_follow_up: true,
+                        last_agent_message: last_agent_message.clone(),
+                    });
+                }
+                Ok(_) => {}
+                Err(err) => outcome = Err(err),
+            }
+        }
         drop(sampling_timing_guard);
 
         flush_assistant_text_segments_all(
@@ -3149,6 +3298,20 @@ mod replay_safety_tests {
             }),
             ResponseEvent::OutputItemAdded(ResponseItem::Reasoning {
                 id: Some(ResponseItemId::new("reasoning")),
+                summary: Vec::new(),
+                content: None,
+                encrypted_content: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            ResponseEvent::OutputItemDone(ResponseItem::Message {
+                id: Some("completed-message".to_string()),
+                role: "assistant".to_string(),
+                content: Vec::new(),
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+            ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
+                id: Some("completed-reasoning".to_string()),
                 summary: Vec::new(),
                 content: None,
                 encrypted_content: None,
