@@ -186,8 +186,7 @@ async fn record_stage1_output_usage_for_memory_citation(
 }
 
 /// Handle a completed output item from the model stream, recording it and
-/// queuing any tool execution futures. This records items immediately so
-/// history and rollout stay in sync even if the turn is later cancelled.
+/// queuing any tool execution futures.
 pub(crate) type InFlightFuture<'f> =
     Pin<Box<dyn Future<Output = Result<ResponseInputItem>> + Send + 'f>>;
 
