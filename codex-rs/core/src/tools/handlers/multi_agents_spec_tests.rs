@@ -122,7 +122,15 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],
-        json!(["task_name", "nickname"])
+        json!([
+            "task_name",
+            "nickname",
+            "agent_type",
+            "model",
+            "reasoning_effort",
+            "route",
+            "fallback_reason"
+        ])
     );
 }
 
@@ -247,6 +255,7 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
         parameters,
+        output_schema,
         ..
     }) = tool
     else {
@@ -263,6 +272,17 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
     assert!(!properties.contains_key("service_tier"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(description.contains("Available model overrides"));
+    assert_eq!(
+        output_schema.expect("spawn_agent output schema")["required"],
+        json!([
+            "task_name",
+            "agent_type",
+            "model",
+            "reasoning_effort",
+            "route",
+            "fallback_reason"
+        ])
+    );
 }
 
 #[test]
@@ -280,6 +300,7 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
         parameters,
+        output_schema,
         ..
     }) = tool
     else {
@@ -295,6 +316,17 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
     }
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(!description.contains("Available model overrides"));
+    assert_eq!(
+        output_schema.expect("spawn_agent output schema")["required"],
+        json!([
+            "task_name",
+            "agent_type",
+            "model",
+            "reasoning_effort",
+            "route",
+            "fallback_reason"
+        ])
+    );
 }
 
 #[test]
@@ -526,7 +558,13 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
     );
     assert_eq!(
         output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status"])
+        json!([
+            "agent_name",
+            "agent_type",
+            "model",
+            "reasoning_effort",
+            "agent_status"
+        ])
     );
 }
 
