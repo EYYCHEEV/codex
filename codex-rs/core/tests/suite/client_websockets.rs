@@ -66,6 +66,7 @@ use core_test_support::responses::ev_exec_command_call;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
+use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_reasoning_item_added;
 use core_test_support::responses::ev_reasoning_summary_text_delta;
 use core_test_support::responses::ev_response_created;
@@ -2235,6 +2236,7 @@ async fn responses_websocket_close_after_completed_tool_does_not_replay() {
 #[derive(Clone, Copy)]
 enum IncompleteOutputTermination {
     Close,
+    Eof,
     IdleTimeout,
 }
 
@@ -2271,6 +2273,14 @@ async fn assert_incomplete_output_replays_once_over_http(
                     code: 4001,
                     reason: "maintenance".to_string(),
                 })],
+                http_responses,
+            )
+            .await
+        }
+        IncompleteOutputTermination::Eof => {
+            start_websocket_server_with_delayed_disconnect_and_http(
+                connections,
+                vec![Some(Duration::from_millis(100))],
                 http_responses,
             )
             .await
@@ -2385,6 +2395,21 @@ async fn responses_websocket_partial_reasoning_is_replaced_over_http() {
             ev_reasoning_summary_text_delta("failed websocket output"),
         ],
         IncompleteOutputTermination::Close,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_websocket_completed_reasoning_is_replaced_over_http() {
+    skip_if_no_network!();
+
+    assert_incomplete_output_replays_once_over_http(
+        vec![ev_reasoning_item(
+            "reasoning-failed",
+            &["failed websocket output"],
+            &[],
+        )],
+        IncompleteOutputTermination::Eof,
     )
     .await;
 }
