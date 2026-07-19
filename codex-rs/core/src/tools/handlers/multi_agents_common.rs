@@ -9,6 +9,7 @@ use crate::session::turn_context::TurnEnvironment;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
@@ -40,6 +41,27 @@ pub(crate) fn model_supports_multi_agent_backend(
 }
 /// Maximum multi-agent v1 wait cycle to avoid blind hour-long parent waits.
 pub(crate) const MAX_WAIT_TIMEOUT_MS_V1: i64 = 180_000;
+
+pub(crate) struct SpawnAgentParentRoute {
+    model: String,
+    model_provider_id: String,
+    model_provider: ModelProviderInfo,
+    reasoning_effort: Option<ReasoningEffort>,
+}
+
+pub(crate) enum SpawnAgentRoute {
+    Preferred,
+    ParentFallback { reason: String },
+}
+
+impl SpawnAgentRoute {
+    pub(crate) fn into_report(self) -> (&'static str, Option<String>) {
+        match self {
+            Self::Preferred => ("preferred", None),
+            Self::ParentFallback { reason } => ("parent_fallback", Some(reason)),
+        }
+    }
+}
 
 pub(crate) fn function_arguments(payload: ToolPayload) -> Result<String, FunctionCallError> {
     match payload {
@@ -221,6 +243,91 @@ fn build_agent_shared_config(
     apply_spawn_agent_runtime_overrides(&mut config, turn, environment)?;
 
     Ok(config)
+}
+
+pub(crate) fn capture_spawn_agent_parent_route(turn: &TurnContext) -> SpawnAgentParentRoute {
+    SpawnAgentParentRoute {
+        model: turn.model_info.slug.clone(),
+        model_provider_id: turn.config.model_provider_id.clone(),
+        model_provider: turn.provider.info().clone(),
+        reasoning_effort: turn
+            .reasoning_effort
+            .clone()
+            .or_else(|| turn.model_info.default_reasoning_level.clone()),
+    }
+}
+
+pub(crate) async fn resolve_typed_spawn_agent_route(
+    session: &Session,
+    config: &mut Config,
+    parent_route: &SpawnAgentParentRoute,
+) -> Result<SpawnAgentRoute, FunctionCallError> {
+    config
+        .model_provider_id
+        .clone_from(&parent_route.model_provider_id);
+    config
+        .model_provider
+        .clone_from(&parent_route.model_provider);
+    let available_models = session
+        .services
+        .models_manager
+        .list_models(RefreshStrategy::Offline, config.http_client_factory())
+        .await;
+
+    let preferred_route_error = spawn_agent_route_error(config, &available_models, "preferred");
+    let Some(preferred_route_error) = preferred_route_error else {
+        return Ok(SpawnAgentRoute::Preferred);
+    };
+
+    config.model = Some(parent_route.model.clone());
+    config
+        .model_reasoning_effort
+        .clone_from(&parent_route.reasoning_effort);
+    if let Some(parent_route_error) =
+        spawn_agent_route_error(config, &available_models, "parent fallback")
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "spawn_agent could not resolve a valid route: {preferred_route_error}; {parent_route_error}"
+        )));
+    }
+
+    Ok(SpawnAgentRoute::ParentFallback {
+        reason: preferred_route_error,
+    })
+}
+
+fn spawn_agent_route_error(
+    config: &Config,
+    available_models: &[codex_protocol::openai_models::ModelPreset],
+    route_label: &str,
+) -> Option<String> {
+    let Some(model) = config.model.as_deref() else {
+        return Some(format!("{route_label} model is unresolved"));
+    };
+    let Some(model_preset) = available_models
+        .iter()
+        .find(|available_model| {
+            available_model.model == model
+                && model_supports_multi_agent_backend(available_model, MultiAgentVersion::V2)
+        })
+    else {
+        return Some(format!(
+            "{route_label} model is unavailable from the active provider catalog"
+        ));
+    };
+
+    let reasoning_effort = config.model_reasoning_effort.as_ref()?;
+    if model_preset
+        .supported_reasoning_efforts
+        .iter()
+        .any(|preset| &preset.effort == reasoning_effort)
+    {
+        return None;
+    }
+
+    Some(format!(
+        "{route_label} reasoning effort is unsupported by the active provider catalog"
+    ))
 }
 
 pub(crate) fn reject_full_fork_agent_type_override(

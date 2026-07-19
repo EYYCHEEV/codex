@@ -2,9 +2,9 @@
 //!
 //! Roles are selected at spawn time and are loaded with the same config machinery as
 //! `config.toml`. This module resolves built-in and user-defined role files, inserts the role as a
-//! high-precedence layer, and preserves the caller's current model, reasoning effort, provider,
-//! and service tier unless the role layer sets them. It does not decide when to spawn a sub-agent
-//! or which role to use; the multi-agent tool handler owns that orchestration.
+//! high-precedence layer, and preserves the caller's current route unless the role layer sets the
+//! corresponding values. It does not decide when to spawn a sub-agent or which role to use; the
+//! multi-agent tool handler owns that orchestration.
 
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
@@ -28,12 +28,13 @@ use toml::Value as TomlValue;
 pub const DEFAULT_ROLE_NAME: &str = "default";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
-/// Applies a named role layer to `config` while preserving caller-owned provider settings.
+/// Applies a named role layer to `config` while preserving caller-owned route settings.
 ///
 /// The role layer is inserted at session-flag precedence so it can override persisted config, but
-/// the caller's current `model_provider` and `service_tier` remain sticky runtime choices unless
-/// the role explicitly sets the corresponding top-level config key. Rebuilding the config without
-/// those overrides would make a spawned agent silently fall back to default settings.
+/// the caller's current model, reasoning effort, provider, and service tier remain sticky runtime
+/// choices unless the role explicitly sets the corresponding top-level config key. Rebuilding the
+/// config without those overrides would make a spawned agent silently fall back to default
+/// settings.
 pub(crate) async fn apply_role_to_config(
     config: &mut Config,
     role_name: Option<&str>,
@@ -274,6 +275,9 @@ mod reload {
 pub(crate) mod spawn_tool_spec {
     use super::*;
 
+    const MAX_DESCRIPTION_BYTES: usize = 8 * 1024;
+    const TRUNCATION_NOTICE: &str = "\n[additional role details omitted]";
+
     /// Builds the spawn-agent tool description text from built-in and configured roles.
     pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
         let built_in_roles = built_in::configs();
@@ -298,7 +302,16 @@ pub(crate) mod spawn_tool_spec {
             }
         }
 
-        format!("Available roles:\n{}", formatted_roles.join("\n"))
+        let mut description = format!("Available roles:\n{}", formatted_roles.join("\n"));
+        if description.len() > MAX_DESCRIPTION_BYTES {
+            let mut end = MAX_DESCRIPTION_BYTES - TRUNCATION_NOTICE.len();
+            while !description.is_char_boundary(end) {
+                end -= 1;
+            }
+            description.truncate(end);
+            description.push_str(TRUNCATION_NOTICE);
+        }
+        description
     }
 
     fn format_role(name: &str, declaration: &AgentRoleConfig) -> String {

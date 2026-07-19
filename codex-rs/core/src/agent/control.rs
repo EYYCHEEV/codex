@@ -27,6 +27,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -80,11 +81,16 @@ pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
+    pub(crate) model: String,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
+    pub(crate) agent_type: String,
+    pub(crate) model: String,
+    pub(crate) reasoning_effort: Option<ReasoningEffort>,
     pub(crate) agent_status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mcp_startup: Option<McpStartupSnapshot>,
@@ -451,8 +457,15 @@ impl AgentControl {
             && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
+            let config_snapshot = root_thread.config_snapshot().await;
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
+                agent_type: config_snapshot
+                    .session_source
+                    .get_agent_role()
+                    .unwrap_or_else(|| DEFAULT_ROLE_NAME.to_string()),
+                model: config_snapshot.model,
+                reasoning_effort: config_snapshot.reasoning_effort,
                 agent_status: root_thread.agent_status().await,
                 mcp_startup: root_thread.mcp_startup_snapshot().await,
             });
@@ -477,8 +490,15 @@ impl AgentControl {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
+            let config_snapshot = thread.config_snapshot().await;
             agents.push(ListedAgent {
                 agent_name,
+                agent_type: config_snapshot
+                    .session_source
+                    .get_agent_role()
+                    .unwrap_or_else(|| DEFAULT_ROLE_NAME.to_string()),
+                model: config_snapshot.model,
+                reasoning_effort: config_snapshot.reasoning_effort,
                 agent_status: thread.agent_status().await,
                 mcp_startup: thread.mcp_startup_snapshot().await,
             });

@@ -1,6 +1,7 @@
 use super::*;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
+use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::config::PermissionProfileSnapshot;
@@ -15,6 +16,7 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
@@ -112,38 +114,39 @@ fn thread_manager() -> ThreadManager {
     )
 }
 
-async fn install_role_with_model_override(turn: &mut TurnContext) -> String {
-    let role_name = "fork-context-role".to_string();
+async fn install_role_config(turn: &mut TurnContext, role_name: &str, contents: &str) {
     tokio::fs::create_dir_all(&turn.config.codex_home)
         .await
         .expect("codex home should be created");
-    let role_config_path = turn
-        .config
-        .codex_home
-        .as_path()
-        .join("fork-context-role.toml");
-    tokio::fs::write(
-        &role_config_path,
-        r#"model = "gpt-5-role-override"
-model_provider = "ollama"
-model_reasoning_effort = "minimal"
-"#,
-    )
-    .await
-    .expect("role config should be written");
+    let role_config_path = turn.config.codex_home.join(format!("{role_name}.toml"));
+    tokio::fs::write(&role_config_path, contents)
+        .await
+        .expect("role config should be written");
 
     let mut config = (*turn.config).clone();
     config.agent_roles.insert(
-        role_name.clone(),
+        role_name.to_string(),
         AgentRoleConfig {
             description: Some("Role with model overrides".to_string()),
-            config_file: Some(role_config_path),
+            config_file: Some(role_config_path.to_path_buf()),
             nickname_candidates: None,
         },
     );
     turn.config = Arc::new(config);
+}
 
-    role_name
+async fn install_role_with_model_override(turn: &mut TurnContext) -> String {
+    let role_name = "fork-context-role";
+    install_role_config(
+        turn,
+        role_name,
+        r#"model = "gpt-5.6-sol"
+model_provider = "ollama"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .await;
+    role_name.to_string()
 }
 
 fn set_turn_config(turn: &mut TurnContext, config: crate::config::Config) {
@@ -185,6 +188,9 @@ struct ListAgentsResult {
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
+    agent_type: String,
+    model: String,
+    reasoning_effort: Option<ReasoningEffort>,
     agent_status: serde_json::Value,
     mcp_startup: Option<codex_protocol::protocol::McpStartupSnapshot>,
 }
@@ -824,6 +830,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
+        agent_type: String,
     }
 
     let (mut session, turn) = make_session_and_context().await;
@@ -843,6 +850,17 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root.thread_id,
+        depth: 1,
+        agent_path: Some(
+            AgentPath::root()
+                .join("typed_parent")
+                .expect("typed parent path"),
+        ),
+        agent_nickname: None,
+        agent_role: Some("slow".to_string()),
+    });
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
@@ -879,6 +897,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
         .config_snapshot()
         .await;
 
+    assert_eq!(result.agent_type, "slow");
     assert_eq!(
         snapshot.service_tier,
         Some(ServiceTier::Fast.request_value().to_string())
@@ -907,6 +926,7 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         ..turn
     };
 
+    let parent_provider_id = turn.config.model_provider_id.clone();
     let output = SpawnAgentHandlerV2::default()
         .handle(invocation(
             Arc::new(session),
@@ -938,9 +958,194 @@ async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
         .config_snapshot()
         .await;
 
-    assert_eq!(snapshot.model, "gpt-5-role-override");
-    assert_eq!(snapshot.model_provider_id, "ollama");
-    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Minimal));
+    assert_eq!(snapshot.model, "gpt-5.6-sol");
+    assert_eq!(snapshot.model_provider_id, parent_provider_id);
+    assert_eq!(snapshot.reasoning_effort, Some(ReasoningEffort::Medium));
+}
+
+#[tokio::test]
+async fn provider_reserved_v2_rejects_hidden_raw_route_fields_for_every_spawn_shape() {
+    let (session, turn) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let handler = SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+        hide_agent_type_model_reasoning: true,
+        ..Default::default()
+    });
+    let expected_error = || {
+        FunctionCallError::RespondToModel(
+            "Provider-reserved spawn_agent callers must omit model, reasoning_effort, and service_tier"
+                .to_string(),
+        )
+    };
+    for args in [
+        json!({"message": "inspect", "task_name": "worker", "model": "gpt-5.4"}),
+        json!({"message": "inspect", "task_name": "worker", "reasoning_effort": "high"}),
+        json!({"message": "inspect", "task_name": "worker", "service_tier": ServiceTier::Fast.request_value()}),
+    ] {
+        let err = handler
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(args),
+            ))
+            .await
+            .err()
+            .expect("provider-reserved spawn should reject hidden route fields");
+        assert_eq!(err, expected_error());
+    }
+}
+
+#[tokio::test]
+async fn multi_agent_v2_typed_spawn_reports_effective_parent_fallback() {
+    let (mut session, turn) = make_session_and_context().await;
+    let mut turn = turn
+        .with_model("gpt-5.6-sol".to_string(), &session.services.models_manager)
+        .await;
+    turn.reasoning_effort = Some(ReasoningEffort::High);
+    let mut config = (*turn.config).clone();
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    install_role_config(
+        &mut turn,
+        "fallback_role",
+        r#"developer_instructions = "Follow the assigned role"
+model = "missing-preferred-model"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .await;
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let parent_provider_id = turn.config.model_provider_id.clone();
+
+    let output = SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+        hide_agent_type_model_reasoning: true,
+        ..Default::default()
+    })
+    .handle(invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "return the assigned result",
+            "task_name": "fallback_worker",
+            "agent_type": "fallback_role"
+        })),
+    ))
+    .await
+    .expect("typed spawn should use the validated parent fallback");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+
+    assert_eq!(
+        result,
+        json!({
+            "task_name": "/root/fallback_worker",
+            "agent_type": "fallback_role",
+            "model": "gpt-5.6-sol",
+            "reasoning_effort": "high",
+            "route": "parent_fallback",
+            "fallback_reason": "preferred model is unavailable from the active provider catalog"
+        })
+    );
+    let agent_id = manager
+        .captured_ops()
+        .into_iter()
+        .map(|(thread_id, _)| thread_id)
+        .find(|thread_id| *thread_id != root.thread_id)
+        .expect("spawned agent should receive an op");
+    let snapshot = manager
+        .get_thread(agent_id)
+        .await
+        .expect("spawned agent thread should exist")
+        .config_snapshot()
+        .await;
+    assert_eq!(
+        (
+            snapshot.session_source.get_agent_role().as_deref(),
+            snapshot.model.as_str(),
+            snapshot.reasoning_effort,
+            snapshot.model_provider_id.as_str(),
+        ),
+        (
+            Some("fallback_role"),
+            "gpt-5.6-sol",
+            Some(ReasoningEffort::High),
+            parent_provider_id.as_str(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_typed_spawn_rejects_both_invalid_routes_before_reservation() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    turn.model_info.slug = "missing-parent-model".to_string();
+    turn.reasoning_effort = Some(ReasoningEffort::High);
+    let mut config = (*turn.config).clone();
+    config.model = Some("missing-parent-model".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    install_role_config(
+        &mut turn,
+        "invalid_preferred_route",
+        r#"developer_instructions = "Follow the assigned role"
+model = "missing-preferred-model"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .await;
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let thread_ids_before = manager.list_thread_ids().await;
+
+    let result = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "invalid_worker",
+                "agent_type": "invalid_preferred_route"
+            })),
+        ))
+        .await;
+    let Err(err) = result else {
+        panic!("spawn should fail when preferred and parent routes are invalid");
+    };
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "spawn_agent could not resolve a valid route: preferred model is unavailable from the active provider catalog; parent fallback model is unavailable from the active provider catalog"
+                .to_string()
+        )
+    );
+    assert_eq!(manager.list_thread_ids().await, thread_ids_before);
+    assert_eq!(manager.captured_ops(), Vec::new());
 }
 
 #[tokio::test]
@@ -1529,6 +1734,8 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
     let mut config = (*turn.config).clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
     set_turn_config(&mut turn, config.clone());
+    let expected_model = turn.model_info.slug.clone();
+    let expected_reasoning_effort = turn.reasoning_effort.clone();
     let root = manager
         .start_thread((*turn.config).clone())
         .await
@@ -1587,6 +1794,9 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
         complete: None,
     };
     assert_eq!(worker.mcp_startup, Some(expected));
+    assert_eq!(worker.agent_type, DEFAULT_ROLE_NAME);
+    assert_eq!(worker.model, expected_model);
+    assert_eq!(worker.reasoning_effort, expected_reasoning_effort);
     assert_eq!(success, Some(true));
 
     let _ = root
