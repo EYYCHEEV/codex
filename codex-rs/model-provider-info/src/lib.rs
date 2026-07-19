@@ -401,7 +401,7 @@ impl ModelProviderInfo {
     }
 
     pub fn is_openai(&self) -> bool {
-        self.name == OPENAI_PROVIDER_NAME
+        self.name == OPENAI_PROVIDER_NAME || self.requires_openai_auth
     }
 
     pub fn uses_openai_actor_authorization(&self) -> bool {
