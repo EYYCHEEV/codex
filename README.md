@@ -1,6 +1,4 @@
-<p align="center">
-  <strong>Stronk Codex</strong>
-</p>
+<h1 align="center">Stronk Codex</h1>
 
 <p align="center">
   A focused fork of <a href="https://github.com/openai/codex">OpenAI Codex CLI</a> for reliable multi-agent work, managed ChatGPT accounts, safer hooks, and resilient automation.
