@@ -9,6 +9,7 @@ use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::FileUpdateChange as ApiFileUpdateChange;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::McpServerStartupFailureReason;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::McpToolCallError;
@@ -178,6 +179,7 @@ fn mcp_startup_status_updated_emits_update_event() {
             name: "smoke".to_string(),
             status: McpServerStartupState::Starting,
             error: None,
+            failure_reason: None,
         },
     ));
 
@@ -205,6 +207,7 @@ fn terminal_mcp_startup_status_emits_aggregate_complete_event() {
             name: "smoke".to_string(),
             status: McpServerStartupState::Failed,
             error: Some("boom".to_string()),
+            failure_reason: Some(McpServerStartupFailureReason::ReauthenticationRequired),
         },
     ));
 
@@ -216,7 +219,7 @@ fn terminal_mcp_startup_status_emits_aggregate_complete_event() {
                     server: "smoke".to_string(),
                     status: protocol::McpStartupStatus::Failed {
                         error: "boom".to_string(),
-                        reason: None,
+                        reason: Some(protocol::McpStartupFailureReason::ReauthenticationRequired),
                     },
                 }),
                 ThreadEvent::McpStartupComplete(protocol::McpStartupCompleteEvent {
