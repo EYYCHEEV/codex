@@ -144,6 +144,26 @@ fn test_supports_remote_compaction_for_openai() {
 }
 
 #[test]
+fn test_custom_openai_authenticated_provider_keeps_openai_behavior() {
+    let custom_openai = ModelProviderInfo {
+        name: "OpenAI HTTPS/SSE".into(),
+        requires_openai_auth: true,
+        supports_websockets: false,
+        ..ModelProviderInfo::default()
+    };
+    let non_openai = ModelProviderInfo {
+        name: "Not OpenAI Proxy".into(),
+        requires_openai_auth: false,
+        ..ModelProviderInfo::default()
+    };
+
+    assert!(custom_openai.is_openai());
+    assert!(custom_openai.supports_remote_compaction());
+    assert!(!custom_openai.supports_websockets);
+    assert!(!non_openai.is_openai());
+}
+
+#[test]
 fn test_personal_access_token_uses_chatgpt_codex_base_url() {
     let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
         .to_api_provider(Some(AuthMode::PersonalAccessToken))
