@@ -524,7 +524,7 @@ impl ModelProviderInfo {
     }
 
     pub fn is_openai(&self) -> bool {
-        self.name == OPENAI_PROVIDER_NAME
+        self.name == OPENAI_PROVIDER_NAME || self.requires_openai_auth
     }
 
     pub fn supports_codex_backend_routes(&self) -> bool {
