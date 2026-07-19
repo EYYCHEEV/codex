@@ -264,6 +264,9 @@ mod role_overrides {
 pub(crate) mod spawn_tool_spec {
     use super::*;
 
+    const MAX_DESCRIPTION_BYTES: usize = 8 * 1024;
+    const TRUNCATION_NOTICE: &str = "\n[additional role details omitted]";
+
     /// Builds the spawn-agent tool description text from built-in and configured roles.
     pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
         let built_in_roles = built_in::configs();
@@ -288,7 +291,16 @@ pub(crate) mod spawn_tool_spec {
             }
         }
 
-        format!("Available roles:\n{}", formatted_roles.join("\n"))
+        let mut description = format!("Available roles:\n{}", formatted_roles.join("\n"));
+        if description.len() > MAX_DESCRIPTION_BYTES {
+            let mut end = MAX_DESCRIPTION_BYTES - TRUNCATION_NOTICE.len();
+            while !description.is_char_boundary(end) {
+                end -= 1;
+            }
+            description.truncate(end);
+            description.push_str(TRUNCATION_NOTICE);
+        }
+        description
     }
 
     fn format_role(name: &str, declaration: &AgentRoleConfig) -> String {

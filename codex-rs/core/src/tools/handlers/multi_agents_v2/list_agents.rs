@@ -59,6 +59,11 @@ impl Handler {
                 .agent_control
                 .get_mcp_startup_snapshot(agent.thread_id)
                 .await;
+            let config_snapshot = session
+                .services
+                .agent_control
+                .get_agent_config_snapshot(agent.thread_id)
+                .await;
             listed.push(ListedAgent {
                 agent_name: agent
                     .metadata
@@ -66,6 +71,9 @@ impl Handler {
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_else(|| agent.thread_id.to_string()),
+                agent_type: config_snapshot.as_ref().and_then(|config| config.session_source.get_agent_role()).unwrap_or_else(|| crate::agent::role::DEFAULT_ROLE_NAME.to_string()),
+                model: config_snapshot.as_ref().map(|config| config.model.clone()).unwrap_or_default(),
+                reasoning_effort: config_snapshot.as_ref().and_then(|config| config.reasoning_effort.clone()),
                 agent_status: agent.status,
                 mcp_startup,
             });
@@ -90,6 +98,9 @@ struct ListAgentsArgs {
 #[derive(Debug, Serialize)]
 struct ListedAgent {
     agent_name: String,
+    agent_type: String,
+    model: String,
+    reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
     agent_status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     mcp_startup: Option<codex_protocol::protocol::McpStartupSnapshot>,
