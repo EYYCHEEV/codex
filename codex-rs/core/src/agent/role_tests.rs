@@ -204,6 +204,67 @@ async fn apply_role_preserves_unspecified_keys() {
 }
 
 #[tokio::test]
+async fn apply_role_preserves_runtime_parent_route_and_allows_explicit_override() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.model = Some("gpt-5.4".to_string());
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+
+    let inheriting_role_path = write_role_config(
+        &home,
+        "inheriting-role.toml",
+        "developer_instructions = \"Stay focused\"",
+    )
+    .await;
+    config.agent_roles.insert(
+        "inheriting".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(inheriting_role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("inheriting"))
+        .await
+        .expect("inheriting role should preserve the runtime parent route");
+
+    assert_eq!(config.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(
+        config.developer_instructions.as_deref(),
+        Some("Stay focused")
+    );
+
+    let overriding_role_path = write_role_config(
+        &home,
+        "overriding-role.toml",
+        r#"developer_instructions = "Take the explicit route"
+model = "explicit-role-model"
+model_reasoning_effort = "medium""#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "overriding".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(overriding_role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("overriding"))
+        .await
+        .expect("explicit role route should apply");
+
+    assert_eq!(config.model.as_deref(), Some("explicit-role-model"));
+    assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::Medium));
+    assert_eq!(
+        config.developer_instructions.as_deref(),
+        Some("Take the explicit route")
+    );
+}
+
+#[tokio::test]
 async fn apply_role_reports_explicit_service_tier() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let role_path = write_role_config(
@@ -515,6 +576,22 @@ fn spawn_tool_spec_lists_user_defined_roles_before_built_ins() {
         .expect("find built-in role");
 
     assert!(user_index < built_in_index);
+}
+
+#[test]
+fn spawn_tool_spec_bounds_model_visible_role_details() {
+    let user_defined_roles = BTreeMap::from([(
+        "oversized".to_string(),
+        AgentRoleConfig {
+            description: Some("🦀".repeat(8 * 1024)),
+            ..Default::default()
+        },
+    )]);
+
+    let spec = spawn_tool_spec::build(&user_defined_roles);
+
+    assert!(spec.len() <= 8 * 1024);
+    assert!(spec.ends_with("\n[additional role details omitted]"));
 }
 
 #[test]

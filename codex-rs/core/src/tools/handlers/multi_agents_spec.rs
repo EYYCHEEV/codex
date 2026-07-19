@@ -91,7 +91,8 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
         properties.remove("agent_type");
     }
     if options.hide_agent_type_model_reasoning {
-        hide_spawn_agent_metadata_options(&mut properties);
+        hide_spawn_agent_route_options(&mut properties);
+        properties.remove("agent_type");
     }
 
     ToolSpec::Namespace(ResponsesApiNamespace {
@@ -114,7 +115,9 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
 }
 
 pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
-    let available_models_description = options.expose_spawn_agent_model_overrides.then(|| {
+    let expose_route_overrides = options.expose_spawn_agent_model_overrides
+        && !options.hide_agent_type_model_reasoning;
+    let available_models_description = expose_route_overrides.then(|| {
         spawn_agent_models_description(&options.available_models, options.multi_agent_version)
     });
     let inherited_model_guidance = (options.expose_spawn_agent_model_overrides
@@ -125,9 +128,8 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         properties.remove("agent_type");
     }
     if options.hide_agent_type_model_reasoning {
-        properties.remove("service_tier");
-    }
-    if !options.expose_spawn_agent_model_overrides {
+        hide_spawn_agent_route_options(&mut properties);
+    } else if !options.expose_spawn_agent_model_overrides {
         properties.remove("model");
         properties.remove("reasoning_effort");
     }
@@ -506,35 +508,48 @@ fn spawn_agent_output_schema_v1() -> Value {
 }
 
 fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
-    if hide_agent_metadata {
-        return json!({
-            "type": "object",
-            "properties": {
-                "task_name": {
-                    "type": "string",
-                    "description": "Canonical task name for the spawned agent."
-                }
-            },
-            "required": ["task_name"],
-            "additionalProperties": false
-        });
-    }
-
-    json!({
+    let mut schema = json!({
         "type": "object",
         "properties": {
             "task_name": {
                 "type": "string",
                 "description": "Canonical task name for the spawned agent."
             },
-            "nickname": {
+            "agent_type": {
+                "type": "string",
+                "description": "Authoritative effective type of the spawned agent."
+            },
+            "model": {
+                "type": "string",
+                "description": "Authoritative effective model of the spawned agent."
+            },
+            "reasoning_effort": {
                 "type": ["string", "null"],
-                "description": "User-facing nickname for the spawned agent when available."
+                "description": "Authoritative effective reasoning effort of the spawned agent."
+            },
+            "route": {
+                "type": "string",
+                "enum": ["preferred", "parent_fallback"],
+                "description": "Whether the preferred route or validated parent fallback was used."
+            },
+            "fallback_reason": {
+                "type": ["string", "null"],
+                "description": "Sanitized preferred-route rejection reason when route is parent_fallback."
             }
         },
-        "required": ["task_name", "nickname"],
+        "required": ["task_name", "agent_type", "model", "reasoning_effort", "route", "fallback_reason"],
         "additionalProperties": false
-    })
+    });
+    if !hide_agent_metadata {
+        schema["properties"]["nickname"] = json!({
+            "type": ["string", "null"],
+            "description": "User-facing nickname for the spawned agent when available."
+        });
+        if let Some(required) = schema["required"].as_array_mut() {
+            required.insert(1, json!("nickname"));
+        }
+    }
+    schema
 }
 
 fn send_input_output_schema() -> Value {
@@ -564,6 +579,18 @@ fn list_agents_output_schema() -> Value {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
                         },
+                        "agent_type": {
+                            "type": "string",
+                            "description": "Authoritative effective type of the agent."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Authoritative effective model of the agent."
+                        },
+                        "reasoning_effort": {
+                            "type": ["string", "null"],
+                            "description": "Authoritative effective reasoning effort of the agent."
+                        },
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
@@ -573,7 +600,7 @@ fn list_agents_output_schema() -> Value {
                             "allOf": [mcp_startup_snapshot_output_schema()]
                         }
                     },
-                    "required": ["agent_name", "agent_status"],
+                    "required": ["agent_name", "agent_type", "model", "reasoning_effort", "agent_status"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."
@@ -759,7 +786,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "fork_turns".to_string(),
             JsonSchema::string(Some(
-                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+                "Optional number of turns to fork. Defaults to `none` when `agent_type` is set and `all` otherwise. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
                     .to_string(),
             )),
         ),
@@ -785,8 +812,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
-fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
-    properties.remove("agent_type");
+fn hide_spawn_agent_route_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("model");
     properties.remove("reasoning_effort");
     properties.remove("service_tier");

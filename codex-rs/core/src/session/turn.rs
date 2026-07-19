@@ -3143,14 +3143,14 @@ mod replay_safety_tests {
                 internal_chat_message_metadata_passthrough: None,
             }),
             ResponseEvent::OutputItemDone(ResponseItem::Message {
-                id: Some("completed-message".to_string()),
+                id: Some(ResponseItemId::new("completed-message")),
                 role: "assistant".to_string(),
                 content: Vec::new(),
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
             }),
             ResponseEvent::OutputItemDone(ResponseItem::Reasoning {
-                id: Some("completed-reasoning".to_string()),
+                id: Some(ResponseItemId::new("completed-reasoning")),
                 summary: Vec::new(),
                 content: None,
                 encrypted_content: None,

@@ -474,6 +474,8 @@ impl AgentControl {
             }
             (None, _, _) => Box::pin(state.spawn_new_thread(config.clone(), self.clone())).await?,
         };
+        let model = new_thread.session_configured.model.clone();
+        let reasoning_effort = new_thread.session_configured.reasoning_effort.clone();
         agent_metadata.agent_id = Some(new_thread.thread_id);
         reservation.commit(agent_metadata.clone());
         if let Some(residency_slot) = residency_slot {
@@ -558,6 +560,8 @@ impl AgentControl {
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
+            model,
+            reasoning_effort,
         })
     }
 
