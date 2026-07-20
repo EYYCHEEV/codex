@@ -289,19 +289,16 @@ fn spawn_agent_tool_caps_reasoning_effort_value_length() {
 }
 
 #[test]
-fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
-    let tool = create_spawn_agent_tool_v2(
-        SpawnAgentToolOptions {
-            available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
-            agent_type_description: "role help".to_string(),
-            expose_agent_type: false,
-            hide_agent_type_model_reasoning: true,
-            expose_spawn_agent_model_overrides: true,
-            multi_agent_version: MultiAgentVersion::V2,
-            usage_hint_text: None,
-        },
-        /*description_override*/ None,
-    );
+fn spawn_agent_tool_hides_route_controls_when_spawn_metadata_is_hidden() {
+    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+        available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
+        agent_type_description: "role help".to_string(),
+        expose_agent_type: false,
+        hide_agent_type_model_reasoning: true,
+        expose_spawn_agent_model_overrides: true,
+        multi_agent_version: MultiAgentVersion::V2,
+        usage_hint_text: None,
+    }, /*description_override*/ None);
 
     let ToolSpec::Function(ResponsesApiTool {
         description,
@@ -318,11 +315,11 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
         .expect("spawn_agent should use object params");
 
     assert!(!properties.contains_key("agent_type"));
-    assert!(properties.contains_key("model"));
-    assert!(properties.contains_key("reasoning_effort"));
+    assert!(!properties.contains_key("model"));
+    assert!(!properties.contains_key("reasoning_effort"));
     assert!(!properties.contains_key("service_tier"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
-    assert!(description.contains("Available model overrides"));
+    assert!(!description.contains("Available model overrides"));
     assert_eq!(
         output_schema.expect("spawn_agent output schema").to_value()["required"],
         json!([
