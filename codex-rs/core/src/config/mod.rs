@@ -907,6 +907,9 @@ pub struct Config {
     /// Maximum token budget allowed for a goal and default budget for new goals.
     pub max_goal_token_budget: Option<i64>,
 
+    /// Whether explicitly typed agents are limited to configured definitions.
+    pub agent_roles_configured_only: bool,
+
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
 
@@ -3834,6 +3837,11 @@ impl Config {
             .as_ref()
             .and_then(|agents| agents.interrupt_message)
             .unwrap_or(true);
+        let agent_roles_configured_only = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.configured_only)
+            .unwrap_or(false);
         let background_terminal_max_timeout = cfg
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
@@ -4285,6 +4293,7 @@ impl Config {
                     })
                 })
                 .transpose()?,
+            agent_roles_configured_only,
             memories: memories_config,
             agent_interrupt_message_enabled,
             codex_home,
