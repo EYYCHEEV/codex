@@ -40,9 +40,17 @@ pub(crate) async fn apply_role_to_config(
     config: &mut Config,
     role_name: Option<&str>,
 ) -> Result<(), String> {
-    let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
+    let requested_role_name = role_name;
+    let role_name = requested_role_name.unwrap_or(DEFAULT_ROLE_NAME);
 
-    let role = resolve_role_config(config, role_name)
+    let role = config
+        .agent_roles
+        .get(role_name)
+        .or_else(|| {
+            (requested_role_name.is_none() || !config.agent_roles_configured_only)
+                .then(|| built_in::configs().get(role_name))
+                .flatten()
+        })
         .cloned()
         .ok_or_else(|| format!("unknown agent_type '{role_name}'"))?;
 
@@ -121,10 +129,11 @@ pub(crate) fn resolve_role_config<'a>(
     config: &'a Config,
     role_name: &str,
 ) -> Option<&'a AgentRoleConfig> {
-    config
-        .agent_roles
-        .get(role_name)
-        .or_else(|| built_in::configs().get(role_name))
+    config.agent_roles.get(role_name).or_else(|| {
+        (!config.agent_roles_configured_only)
+            .then(|| built_in::configs().get(role_name))
+            .flatten()
+    })
 }
 
 mod reload {
@@ -234,16 +243,36 @@ pub(crate) mod spawn_tool_spec {
     const MAX_DESCRIPTION_BYTES: usize = 8 * 1024;
     const TRUNCATION_NOTICE: &str = "\n[additional role details omitted]";
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum AgentTypeCatalog {
+        ConfiguredOnly,
+        ConfiguredAndBuiltIns,
+    }
+
     /// Builds the spawn-agent tool description text from built-in and configured roles.
-    pub(crate) fn build(user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>) -> String {
-        let built_in_roles = built_in::configs();
-        build_from_configs(built_in_roles, user_defined_agent_roles)
+    pub(crate) fn build(
+        user_defined_agent_roles: &BTreeMap<String, AgentRoleConfig>,
+        catalog: AgentTypeCatalog,
+    ) -> String {
+        match catalog {
+            AgentTypeCatalog::ConfiguredOnly => build_from_configs(
+                &BTreeMap::new(),
+                user_defined_agent_roles,
+                "If omitted, the internal default agent is used.",
+            ),
+            AgentTypeCatalog::ConfiguredAndBuiltIns => build_from_configs(
+                built_in::configs(),
+                user_defined_agent_roles,
+                &format!("If omitted, `{DEFAULT_ROLE_NAME}` is used."),
+            ),
+        }
     }
 
     // This function is not inlined for testing purpose.
     fn build_from_configs(
         built_in_roles: &BTreeMap<String, AgentRoleConfig>,
         user_defined_roles: &BTreeMap<String, AgentRoleConfig>,
+        omitted_type_guidance: &str,
     ) -> String {
         let mut seen = BTreeSet::new();
         let mut formatted_roles = Vec::new();
@@ -258,7 +287,10 @@ pub(crate) mod spawn_tool_spec {
             }
         }
 
-        let mut description = format!("Available roles:\n{}", formatted_roles.join("\n"));
+        let mut description = format!(
+            "Optional type name for the new agent. {omitted_type_guidance}\nAvailable agent types:\n{}",
+            formatted_roles.join("\n"),
+        );
         if description.len() > MAX_DESCRIPTION_BYTES {
             let mut end = MAX_DESCRIPTION_BYTES - TRUNCATION_NOTICE.len();
             while !description.is_char_boundary(end) {

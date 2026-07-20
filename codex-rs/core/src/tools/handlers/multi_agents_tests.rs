@@ -1125,6 +1125,71 @@ model_reasoning_effort = "medium"
 }
 
 #[tokio::test]
+async fn multi_agent_v2_typed_spawn_falls_back_from_unsupported_preferred_effort() {
+    let (mut session, turn) = make_session_and_context().await;
+    let mut turn = turn
+        .with_model("gpt-5.4".to_string(), &session.services.models_manager)
+        .await;
+    turn.reasoning_effort = Some(ReasoningEffort::High);
+    let mut config = (*turn.config).clone();
+    config.model_reasoning_effort = Some(ReasoningEffort::High);
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    install_role_config(
+        &mut turn,
+        "unsupported_effort_role",
+        r#"developer_instructions = "Follow the assigned role"
+model = "gpt-5.4"
+model_reasoning_effort = "max"
+"#,
+    )
+    .await;
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+
+    let output = SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+        hide_agent_type_model_reasoning: true,
+        ..Default::default()
+    })
+    .handle(invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "return the assigned result",
+            "task_name": "unsupported_effort_worker",
+            "agent_type": "unsupported_effort_role"
+        })),
+    ))
+    .await
+    .expect("typed spawn should use the validated parent fallback");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+
+    assert_eq!(
+        result,
+        json!({
+            "task_name": "/root/unsupported_effort_worker",
+            "agent_type": "unsupported_effort_role",
+            "model": "gpt-5.4",
+            "reasoning_effort": "high",
+            "route": "parent_fallback",
+            "fallback_reason": "preferred reasoning effort is unsupported by the active provider catalog"
+        })
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_typed_spawn_rejects_both_invalid_routes_before_reservation() {
     let (mut session, mut turn) = make_session_and_context().await;
     turn.model_info.slug = "missing-parent-model".to_string();
@@ -1178,6 +1243,49 @@ model_reasoning_effort = "medium"
             "spawn_agent could not resolve a valid route: preferred model is unavailable from the active provider catalog; parent fallback model is unavailable from the active provider catalog"
                 .to_string()
         )
+    );
+    assert_eq!(manager.list_thread_ids().await, thread_ids_before);
+    assert_eq!(manager.captured_ops(), Vec::new());
+}
+
+#[tokio::test]
+async fn multi_agent_v2_configured_only_rejects_hidden_built_in_before_reservation() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.agent_roles_configured_only = true;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let thread_ids_before = manager.list_thread_ids().await;
+
+    let result = SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "hidden_explorer",
+                "agent_type": "explorer"
+            })),
+        ))
+        .await;
+
+    assert_eq!(
+        result.err(),
+        Some(FunctionCallError::RespondToModel(
+            "unknown agent_type 'explorer'".to_string(),
+        )),
     );
     assert_eq!(manager.list_thread_ids().await, thread_ids_before);
     assert_eq!(manager.captured_ops(), Vec::new());

@@ -884,6 +884,9 @@ pub struct Config {
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
 
+    /// Whether explicitly typed agents are limited to configured definitions.
+    pub agent_roles_configured_only: bool,
+
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
 
@@ -3718,6 +3721,11 @@ impl Config {
             .as_ref()
             .and_then(|agents| agents.interrupt_message)
             .unwrap_or(true);
+        let agent_roles_configured_only = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.configured_only)
+            .unwrap_or(false);
         let background_terminal_max_timeout = cfg
             .background_terminal_max_timeout
             .unwrap_or(DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS)
@@ -4058,6 +4066,7 @@ impl Config {
             agent_default_subagent_reasoning_effort,
             agent_max_depth,
             agent_roles,
+            agent_roles_configured_only,
             memories: memories_config,
             agent_interrupt_message_enabled,
             codex_home,

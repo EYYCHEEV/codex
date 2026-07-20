@@ -36,6 +36,10 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
+        "configured_only": {
+          "description": "Whether explicitly typed agents are limited to configured definitions. An omitted type still uses the internal default agent.",
+          "type": "boolean"
+        },
         "default_subagent_model": {
           "description": "Default model for spawned subagents when the spawn call does not select one.",
           "type": "string"
@@ -1268,7 +1272,7 @@
         {
           "properties": {
             "additionalContextLimit": {
-              "description": "Approximate token threshold for spilling this hook's `additionalContext` to disk. Unset uses 2,500 tokens; `0` disables spilling for this hook. The threshold is evaluated against the original context; a spilled preview also includes recovery metadata.",
+              "description": "Approximate token threshold for spilling this hook's `additionalContext` to disk. Unset uses 2,500 tokens; `0` disables spilling for this hook.",
               "format": "uint",
               "minimum": 0.0,
               "type": "integer"
