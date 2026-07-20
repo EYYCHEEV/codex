@@ -36,6 +36,10 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
+        "configured_only": {
+          "description": "Whether explicitly typed agents are limited to configured definitions. An omitted type still uses the internal default agent.",
+          "type": "boolean"
+        },
         "interrupt_message": {
           "description": "Whether to record a model-visible message when an agent turn is interrupted. Defaults to true.",
           "type": "boolean"

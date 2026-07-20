@@ -7387,6 +7387,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
     let missing_path = codex_home.path().join("agents").join("researcher.toml");
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
+            configured_only: None,
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
@@ -8331,10 +8332,44 @@ async fn load_config_resolves_agent_interrupt_message() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn load_config_resolves_configured_only_agent_catalog() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let default_config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    let configured_only = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            agents: Some(AgentsToml {
+                configured_only: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        (
+            default_config.agent_roles_configured_only,
+            configured_only.agent_roles_configured_only,
+        ),
+        (false, true),
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
+            configured_only: None,
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
@@ -8378,6 +8413,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
+            configured_only: None,
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
@@ -8415,6 +8451,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
+            configured_only: None,
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,
@@ -8452,6 +8489,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         agents: Some(AgentsToml {
+            configured_only: None,
             max_threads: None,
             max_depth: None,
             job_max_runtime_seconds: None,

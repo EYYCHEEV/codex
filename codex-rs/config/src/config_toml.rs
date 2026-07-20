@@ -681,6 +681,9 @@ where
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentsToml {
+    /// Whether explicitly typed agents are limited to configured definitions.
+    /// An omitted type still uses the internal default agent.
+    pub configured_only: Option<bool>,
     /// Maximum number of agent threads that can be open concurrently.
     /// When unset, no limit is enforced.
     #[schemars(range(min = 1))]

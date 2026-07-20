@@ -73,6 +73,24 @@ async fn apply_role_returns_error_for_unknown_role() {
 }
 
 #[tokio::test]
+async fn configured_only_catalog_rejects_explicit_built_ins_but_allows_omitted_default() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_roles_configured_only = true;
+    let before = config.clone();
+
+    for built_in in ["default", "explorer", "worker"] {
+        let err = apply_role_to_config(&mut config, Some(built_in))
+            .await
+            .expect_err("hidden built-in agent type should fail");
+        assert_eq!(err, format!("unknown agent_type '{built_in}'"));
+    }
+    apply_role_to_config(&mut config, /*role_name*/ None)
+        .await
+        .expect("omitted agent type should preserve the internal default");
+    assert_eq!(config, before);
+}
+
+#[tokio::test]
 #[ignore = "No role requiring it for now"]
 async fn apply_explorer_role_sets_model_and_adds_session_flags_layer() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
@@ -560,12 +578,39 @@ fn spawn_tool_spec_build_deduplicates_user_defined_built_in_roles() {
         ("researcher".to_string(), AgentRoleConfig::default()),
     ]);
 
-    let spec = spawn_tool_spec::build(&user_defined_roles);
+    let spec = spawn_tool_spec::build(
+        &user_defined_roles,
+        spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
 
     assert!(spec.contains("researcher: no description"));
     assert!(spec.contains("explorer: {\nuser override\n}"));
     assert!(spec.contains("default: {\nDefault agent.\n}"));
     assert!(!spec.contains("Explorers are fast and authoritative."));
+}
+
+#[test]
+fn configured_only_spawn_tool_spec_lists_only_configured_agent_types() {
+    let configured_roles = BTreeMap::from([(
+        "verifier".to_string(),
+        AgentRoleConfig {
+            description: Some("Verify acceptance evidence.".to_string()),
+            ..Default::default()
+        },
+    )]);
+
+    let spec = spawn_tool_spec::build(
+        &configured_roles,
+        spawn_tool_spec::AgentTypeCatalog::ConfiguredOnly,
+    );
+
+    assert!(spec.contains("If omitted, the internal default agent is used."));
+    assert!(spec.contains("Available agent types:"));
+    assert!(spec.contains("verifier: {\nVerify acceptance evidence.\n}"));
+    assert!(!spec.contains("`default`"));
+    assert!(!spec.contains("default: {"));
+    assert!(!spec.contains("explorer: {"));
+    assert!(!spec.contains("worker: {"));
 }
 
 #[test]
@@ -579,7 +624,10 @@ fn spawn_tool_spec_lists_user_defined_roles_before_built_ins() {
         },
     )]);
 
-    let spec = spawn_tool_spec::build(&user_defined_roles);
+    let spec = spawn_tool_spec::build(
+        &user_defined_roles,
+        spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
     let user_index = spec.find("aaa: {\nfirst\n}").expect("find user role");
     let built_in_index = spec
         .find("default: {\nDefault agent.\n}")
@@ -598,7 +646,10 @@ fn spawn_tool_spec_bounds_model_visible_role_details() {
         },
     )]);
 
-    let spec = spawn_tool_spec::build(&user_defined_roles);
+    let spec = spawn_tool_spec::build(
+        &user_defined_roles,
+        spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
 
     assert!(spec.len() <= 8 * 1024);
     assert!(spec.ends_with("\n[additional role details omitted]"));
@@ -622,7 +673,10 @@ fn spawn_tool_spec_marks_role_locked_model_and_reasoning_effort() {
         },
     )]);
 
-    let spec = spawn_tool_spec::build(&user_defined_roles);
+    let spec = spawn_tool_spec::build(
+        &user_defined_roles,
+        spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
 
     assert!(spec.contains(
             "Research carefully.\n- This role's model is set to `gpt-5` and its reasoning effort is set to `high`. These settings cannot be changed."
@@ -647,7 +701,10 @@ fn spawn_tool_spec_marks_role_locked_reasoning_effort_only() {
         },
     )]);
 
-    let spec = spawn_tool_spec::build(&user_defined_roles);
+    let spec = spawn_tool_spec::build(
+        &user_defined_roles,
+        spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
 
     assert!(spec.contains(
             "Review carefully.\n- This role's reasoning effort is set to `medium` and cannot be changed."
@@ -672,7 +729,10 @@ fn spawn_tool_spec_marks_role_locked_service_tier() {
         },
     )]);
 
-    let spec = spawn_tool_spec::build(&user_defined_roles);
+    let spec = spawn_tool_spec::build(
+        &user_defined_roles,
+        spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
 
     assert!(spec.contains(
         "Stay fast.\n- This role's service tier is set to `priority`. If it is supported by the resolved model, it takes precedence over a valid spawn request service tier."
