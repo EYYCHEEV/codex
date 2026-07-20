@@ -170,8 +170,10 @@ fn build_tool_specs_and_registry(
         extension_tool_executors,
         dynamic_tools,
     } = params;
-    let default_agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
+    let default_agent_type_description = crate::agent::role::spawn_tool_spec::build(
+        &std::collections::BTreeMap::new(),
+        crate::agent::role::spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
     let context = CoreToolPlanContext {
         step_context,
         tool_runtimes: &tool_runtimes,
@@ -388,8 +390,13 @@ fn agent_type_description(
     turn_context: &TurnContext,
     default_agent_type_description: &str,
 ) -> String {
+    let catalog = if turn_context.config.agent_roles_configured_only {
+        crate::agent::role::spawn_tool_spec::AgentTypeCatalog::ConfiguredOnly
+    } else {
+        crate::agent::role::spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns
+    };
     let agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&turn_context.config.agent_roles);
+        crate::agent::role::spawn_tool_spec::build(&turn_context.config.agent_roles, catalog);
     if agent_type_description.is_empty() {
         default_agent_type_description.to_string()
     } else {
