@@ -116,7 +116,9 @@ pub fn create_spawn_agent_tool_v2(
     options: SpawnAgentToolOptions,
     description_override: Option<&str>,
 ) -> ToolSpec {
-    let available_models_description = options.expose_spawn_agent_model_overrides.then(|| {
+    let expose_route_overrides =
+        options.expose_spawn_agent_model_overrides && !options.hide_agent_type_model_reasoning;
+    let available_models_description = expose_route_overrides.then(|| {
         spawn_agent_models_description(&options.available_models, options.multi_agent_version)
     });
     let inherited_model_guidance = (options.expose_spawn_agent_model_overrides
@@ -126,7 +128,9 @@ pub fn create_spawn_agent_tool_v2(
     if !options.expose_agent_type {
         properties.remove("agent_type");
     }
-    if !options.expose_spawn_agent_model_overrides {
+    if options.hide_agent_type_model_reasoning {
+        hide_spawn_agent_route_options(&mut properties);
+    } else if !options.expose_spawn_agent_model_overrides {
         properties.remove("model");
         properties.remove("reasoning_effort");
     }
