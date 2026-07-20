@@ -121,8 +121,10 @@ pub(crate) fn build_tool_router(
     step_store: &ExtensionData,
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
 ) -> CodexResult<ToolRouter> {
-    let default_agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
+    let default_agent_type_description = crate::agent::role::spawn_tool_spec::build(
+        &std::collections::BTreeMap::new(),
+        crate::agent::role::spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
     let wait_for_environment_tool_config = session
         .services
         .thread_extension_data
@@ -251,8 +253,10 @@ pub(crate) fn build_core_tool_registry(
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
     wait_for_environment_tool_config: Option<&Arc<crate::WaitForEnvironmentToolConfig>>,
 ) -> ToolRegistry {
-    let default_agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
+    let default_agent_type_description = crate::agent::role::spawn_tool_spec::build(
+        &std::collections::BTreeMap::new(),
+        crate::agent::role::spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns,
+    );
     let context = CoreToolPlanContext {
         turn_context,
         environments,
@@ -599,8 +603,13 @@ fn agent_type_description(
     turn_context: &TurnContext,
     default_agent_type_description: &str,
 ) -> String {
+    let catalog = if turn_context.config.agent_roles_configured_only {
+        crate::agent::role::spawn_tool_spec::AgentTypeCatalog::ConfiguredOnly
+    } else {
+        crate::agent::role::spawn_tool_spec::AgentTypeCatalog::ConfiguredAndBuiltIns
+    };
     let agent_type_description =
-        crate::agent::role::spawn_tool_spec::build(&turn_context.config.agent_roles);
+        crate::agent::role::spawn_tool_spec::build(&turn_context.config.agent_roles, catalog);
     if agent_type_description.is_empty() {
         default_agent_type_description.to_string()
     } else {

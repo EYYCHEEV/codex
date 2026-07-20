@@ -23,11 +23,9 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::ev_tool_search_call;
 use core_test_support::responses::mount_response_once_match;
+use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
-use core_test_support::responses::mount_sse_sequence;
-use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
@@ -1987,31 +1985,17 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<()> {
+async fn configured_only_spawn_agent_tool_description_mentions_role_locked_settings() -> Result<()>
+{
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let call_id = "tool-search-spawn-agent";
-    let resp_mock = mount_sse_sequence(
+    let response = mount_sse_once(
         &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-turn1-1"),
-                ev_tool_search_call(
-                    call_id,
-                    &json!({
-                        "query": "spawn agent custom role",
-                        "limit": 1,
-                    }),
-                ),
-                ev_completed("resp-turn1-1"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-turn1-2"),
-                ev_assistant_message("msg-turn1-2", "done"),
-                ev_completed("resp-turn1-2"),
-            ]),
-        ],
+        sse(vec![
+            ev_response_created("resp-turn1-1"),
+            ev_completed("resp-turn1-1"),
+        ]),
     )
     .await;
 
@@ -2020,7 +2004,12 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
             .features
             .enable(Feature::Collab)
             .expect("test config should allow feature update");
-        config.multi_agent_v2.hide_spawn_agent_metadata = false;
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        config.multi_agent_v2.hide_spawn_agent_metadata = true;
+        config.agent_roles_configured_only = true;
         let role_path = config.codex_home.join("custom-role.toml");
         std::fs::write(
             &role_path,
@@ -2042,12 +2031,11 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    let requests = resp_mock.requests();
-    assert_eq!(requests.len(), 2);
-    let output = requests[1].tool_search_output(call_id);
-    let spawn_agent = namespace_child_tool(&output, "multi_agent_v1", "spawn_agent")
-        .expect("tool_search should return multi_agent_v1.spawn_agent");
-    let agent_type_description = tool_parameter_description(spawn_agent, "agent_type")
+    let spawn_agent = response
+        .single_request()
+        .tool_by_name("collaboration", "spawn_agent")
+        .expect("request should include collaboration.spawn_agent");
+    let agent_type_description = tool_parameter_description(&spawn_agent, "agent_type")
         .expect("spawn_agent agent_type description");
     let custom_role_description =
         role_block(&agent_type_description, "custom").expect("custom role description");
@@ -2055,6 +2043,20 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
         custom_role_description,
         "custom: {\nCustom role\n- This role's model is set to `gpt-5.4` and its reasoning effort is set to `high`. These settings cannot be changed.\n}"
     );
+    assert!(agent_type_description.contains("If omitted, the internal default agent is used."));
+    assert!(agent_type_description.contains("Available agent types:"));
+    assert!(!agent_type_description.contains("`default`"));
+    assert!(!agent_type_description.contains("default: {"));
+    assert!(!agent_type_description.contains("explorer: {"));
+    assert!(!agent_type_description.contains("worker: {"));
+    for hidden_route_field in ["model", "reasoning_effort", "service_tier"] {
+        assert!(
+            spawn_agent["parameters"]["properties"]
+                .get(hidden_route_field)
+                .is_none(),
+            "provider-reserved V2 must hide {hidden_route_field}",
+        );
+    }
 
     Ok(())
 }

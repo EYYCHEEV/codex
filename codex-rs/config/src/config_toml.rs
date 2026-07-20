@@ -684,6 +684,9 @@ pub struct AgentsToml {
     /// Whether multi-agent tools are enabled. Defaults to true.
     /// An enabled `features.multi_agent_v2` setting takes precedence.
     pub enabled: Option<bool>,
+    /// Whether explicitly typed agents are limited to configured definitions.
+    /// An omitted type still uses the internal default agent.
+    pub configured_only: Option<bool>,
     /// Maximum number of spawned agent threads that can be open concurrently per session.
     /// When unset, the selected multi-agent backend uses its default.
     #[serde(alias = "max_threads")]

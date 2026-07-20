@@ -115,8 +115,8 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
 }
 
 pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
-    let expose_route_overrides = options.expose_spawn_agent_model_overrides
-        && !options.hide_agent_type_model_reasoning;
+    let expose_route_overrides =
+        options.expose_spawn_agent_model_overrides && !options.hide_agent_type_model_reasoning;
     let available_models_description = expose_route_overrides.then(|| {
         spawn_agent_models_description(&options.available_models, options.multi_agent_version)
     });
