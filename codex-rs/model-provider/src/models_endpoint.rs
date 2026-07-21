@@ -639,7 +639,7 @@ mod tests {
     #[tokio::test]
     async fn static_provider_token_authorizes_models_refresh_without_auth_manager() {
         let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-        provider_info.experimental_bearer_token = Some("provider-token".to_string());
+        provider_info.experimental_bearer_token = Some("provider-token".to_string().into());
         let endpoint = OpenAiModelsEndpoint::new(provider_info, /*auth_manager*/ None);
 
         assert!(endpoint.uses_codex_backend().await);

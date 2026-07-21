@@ -179,7 +179,27 @@ pub(crate) fn thread_items_to_transcript_cells(
                     cells.push(Arc::new(cell));
                 }
             }
-            item @ ThreadItem::CommandExecution { .. } => {
+            ThreadItem::SubAgentActivity {
+            kind,
+            agent_path,
+            agent_type,
+            model,
+            reasoning_effort,
+            ..
+        } => {
+            cells.push(Arc::new(PlainHistoryCell::new(vec![
+                crate::multi_agents::sub_agent_activity_summary(
+                    *kind,
+                    agent_path,
+                    agent_type.as_deref(),
+                    model.as_deref(),
+                    reasoning_effort.as_ref(),
+                )
+                .dim()
+                .into(),
+            ])));
+        }
+        item @ ThreadItem::CommandExecution { .. } => {
                 if matches!(pending, Some(PendingActivity::Computer(_))) {
                     PendingActivity::flush(&mut pending, &mut cells);
                 }

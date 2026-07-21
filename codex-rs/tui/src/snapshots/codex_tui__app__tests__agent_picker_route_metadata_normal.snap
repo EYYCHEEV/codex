@@ -5,6 +5,7 @@ expression: "render_bottom_popup(&app.chat_widget, 80)"
   Agents
   Select an agent to watch. ⌥ + ← previous, ⌥ + → next.
 
-› 1. • /root/worker  running
+› 1. • Main [default] (current)      idle
+  2. • /root/reload_scout_canary_01  [scout] gpt-5.6-terra medium  running
 
-  enter select · esc back
+  Press enter to confirm or esc to go back
