@@ -26,30 +26,18 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use std::collections::HashSet;
 
+mod picker;
+
+pub(crate) use picker::AgentPickerThreadEntry;
+pub(crate) use picker::SubAgentActivityDisplay;
+pub(crate) use picker::agent_picker_status_dot_spans;
+pub(crate) use picker::format_agent_picker_entry_name;
+pub(crate) use picker::format_agent_picker_item_description;
+pub(crate) use picker::format_agent_picker_item_name;
+
 const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES: usize = 240;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentPickerThreadEntry {
-    /// Human-friendly nickname shown in picker rows and footer labels.
-    pub(crate) agent_nickname: Option<String>,
-    /// Agent type shown in brackets when present, for example `worker`.
-    pub(crate) agent_role: Option<String>,
-    /// Canonical v2 agent path, when the thread was observed through v2 activity.
-    pub(crate) agent_path: Option<String>,
-    /// Whether the latest liveness refresh says the agent thread is actively working.
-    pub(crate) is_running: bool,
-    /// Whether the thread has emitted a close event and should render dimmed.
-    pub(crate) is_closed: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SubAgentActivityDisplay {
-    pub(crate) thread_id: ThreadId,
-    pub(crate) agent_path: String,
-    pub(crate) is_running_hint: bool,
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AgentMetadata {
@@ -70,36 +58,6 @@ struct AgentLabel<'a> {
 pub(crate) struct SpawnRequestSummary {
     pub(crate) model: String,
     pub(crate) reasoning_effort: ReasoningEffortConfig,
-}
-
-pub(crate) fn agent_picker_status_dot_spans(is_closed: bool) -> Vec<Span<'static>> {
-    let dot = if is_closed {
-        "•".into()
-    } else {
-        "•".green()
-    };
-    vec![dot, " ".into()]
-}
-
-pub(crate) fn format_agent_picker_item_name(
-    agent_nickname: Option<&str>,
-    agent_role: Option<&str>,
-    is_primary: bool,
-) -> String {
-    if is_primary {
-        return "Main [default]".to_string();
-    }
-
-    let agent_nickname = agent_nickname
-        .map(str::trim)
-        .filter(|nickname| !nickname.is_empty());
-    let agent_role = agent_role.map(str::trim).filter(|role| !role.is_empty());
-    match (agent_nickname, agent_role) {
-        (Some(agent_nickname), Some(agent_role)) => format!("{agent_nickname} [{agent_role}]"),
-        (Some(agent_nickname), None) => agent_nickname.to_string(),
-        (None, Some(agent_role)) => format!("[{agent_role}]"),
-        (None, None) => "Agent".to_string(),
-    }
 }
 
 pub(crate) fn previous_agent_shortcut() -> crate::key_hint::KeyBinding {
@@ -283,6 +241,9 @@ pub(crate) fn sub_agent_activity_display(item: &ThreadItem) -> Option<SubAgentAc
         kind,
         agent_thread_id,
         agent_path,
+        agent_type,
+        model,
+        reasoning_effort,
         ..
     } = item
     else {
@@ -296,41 +257,120 @@ pub(crate) fn sub_agent_activity_display(item: &ThreadItem) -> Option<SubAgentAc
     Some(SubAgentActivityDisplay {
         thread_id: parse_thread_id(agent_thread_id)?,
         agent_path: agent_path.clone(),
+        agent_type: agent_type.clone(),
+        model: model.clone(),
+        reasoning_effort: reasoning_effort.clone(),
         is_running_hint,
     })
 }
 
 pub(crate) fn sub_agent_activity_history_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
     let ThreadItem::SubAgentActivity {
-        kind, agent_path, ..
+        kind,
+        agent_path,
+        agent_type,
+        model,
+        reasoning_effort,
+        ..
     } = item
     else {
         return None;
     };
     Some(collab_event(
-        sub_agent_activity_title(*kind, agent_path),
+        sub_agent_activity_title(
+            *kind,
+            agent_path,
+            agent_type.as_deref(),
+            model.as_deref(),
+            reasoning_effort.as_ref(),
+        ),
         Vec::new(),
     ))
 }
 
-pub(crate) fn sub_agent_activity_summary(kind: SubAgentActivityKind, agent_path: &str) -> String {
-    match kind {
+pub(crate) fn sub_agent_activity_summary(
+    kind: SubAgentActivityKind,
+    agent_path: &str,
+    agent_type: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&ReasoningEffortConfig>,
+) -> String {
+    let summary = match kind {
         SubAgentActivityKind::Started => format!("Started `{agent_path}`"),
         SubAgentActivityKind::Interacted => format!("Interacted with `{agent_path}`"),
         SubAgentActivityKind::Interrupted => format!("Interrupted `{agent_path}`"),
+    };
+    if matches!(kind, SubAgentActivityKind::Started) {
+        format!(
+            "{summary}{}",
+            sub_agent_route_suffix(agent_type, model, reasoning_effort)
+        )
+    } else {
+        summary
     }
 }
 
-fn sub_agent_activity_title(kind: SubAgentActivityKind, agent_path: &str) -> Line<'static> {
+fn sub_agent_activity_title(
+    kind: SubAgentActivityKind,
+    agent_path: &str,
+    agent_type: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&ReasoningEffortConfig>,
+) -> Line<'static> {
     let (prefix, path) = match kind {
         SubAgentActivityKind::Started => ("Started ", agent_path),
         SubAgentActivityKind::Interacted => ("Interacted with ", agent_path),
         SubAgentActivityKind::Interrupted => ("Interrupted ", agent_path),
     };
-    title_spans_line(vec![
+    let mut spans = vec![
         Span::from(prefix).bold(),
         Span::from(format!("`{path}`")).cyan(),
-    ])
+    ];
+    if matches!(kind, SubAgentActivityKind::Started) {
+        if let Some(agent_type) = agent_type
+            .map(str::trim)
+            .filter(|agent_type| !agent_type.is_empty())
+        {
+            spans.push(Span::from(format!(" [{agent_type}]")));
+        }
+        let route = [
+            model.map(str::trim).filter(|model| !model.is_empty()),
+            reasoning_effort.map(ReasoningEffortConfig::as_str),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        if !route.is_empty() {
+            spans.push(Span::from(format!(" ({route})")).magenta());
+        }
+    }
+    title_spans_line(spans)
+}
+
+fn sub_agent_route_suffix(
+    agent_type: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&ReasoningEffortConfig>,
+) -> String {
+    let agent_type = agent_type
+        .map(str::trim)
+        .filter(|agent_type| !agent_type.is_empty())
+        .map(|agent_type| format!(" [{agent_type}]"))
+        .unwrap_or_default();
+    let route = [
+        model.map(str::trim).filter(|model| !model.is_empty()),
+        reasoning_effort.map(ReasoningEffortConfig::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
+    if route.is_empty() {
+        agent_type
+    } else {
+        format!("{agent_type} ({route})")
+    }
 }
 
 fn spawn_end(
@@ -686,6 +726,9 @@ mod tests {
             kind: SubAgentActivityKind::Interacted,
             agent_thread_id: ThreadId::new().to_string(),
             agent_path: "/root/child".to_string(),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
         };
 
         assert_eq!(sub_agent_activity_display(&item), None);
@@ -814,6 +857,35 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n\n");
         assert_snapshot!("collab_agent_transcript", snapshot);
+    }
+
+    #[test]
+    fn started_activity_exposes_effective_route_metadata() {
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000004").expect("valid thread");
+        let item = ThreadItem::SubAgentActivity {
+            id: "activity-started".to_string(),
+            kind: SubAgentActivityKind::Started,
+            agent_thread_id: thread_id.to_string(),
+            agent_path: "/root/reload_scout_canary_01".to_string(),
+            agent_type: Some("scout".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::Medium),
+        };
+
+        assert_eq!(
+            sub_agent_activity_display(&item),
+            Some(SubAgentActivityDisplay {
+                thread_id,
+                agent_path: "/root/reload_scout_canary_01".to_string(),
+                agent_type: Some("scout".to_string()),
+                model: Some("gpt-5.6-terra".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Medium),
+                is_running_hint: true,
+            })
+        );
+        let cell = sub_agent_activity_history_cell(&item).expect("activity item renders");
+        assert_snapshot!("sub_agent_started_with_route", cell_to_text(&cell));
     }
 
     #[cfg(target_os = "macos")]

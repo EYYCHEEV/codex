@@ -457,7 +457,13 @@ pub(crate) async fn run_post_compact_hooks(
     if outcome.should_stop {
         PostCompactHookOutcome::Stopped
     } else {
-        PostCompactHookOutcome::Continue
+        sess.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact)
+            .await;
+        if run_pending_session_start_hooks(sess, turn_context).await {
+            PostCompactHookOutcome::Stopped
+        } else {
+            PostCompactHookOutcome::Continue
+        }
     }
 }
 

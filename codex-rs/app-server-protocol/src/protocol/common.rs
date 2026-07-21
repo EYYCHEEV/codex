@@ -3246,6 +3246,7 @@ mod tests {
             secondary: None,
             credits: None,
             individual_limit: None,
+            spend_control_reached: None,
             plan_type: None,
             rate_limit_reached_type: None,
         };
@@ -3269,6 +3270,7 @@ mod tests {
                         "secondary": null,
                         "credits": null,
                         "individualLimit": null,
+                        "spendControlReached": null,
                         "planType": null,
                         "rateLimitReachedType": null
                     }

@@ -581,6 +581,18 @@ impl McpConnectionManager {
         }
     }
 
+    /// Cancels non-lazy server startups that are still in progress.
+    ///
+    /// Lazy Codex Apps startup remains available for a later tool discovery request, and the
+    /// manager-level token remains reusable for reconnects and refreshes.
+    pub fn cancel_active_startups(&self) {
+        for client in self.clients.values() {
+            if !client.lazy_startup && !client.startup_complete.load(Ordering::Acquire) {
+                client.cancel_token.cancel();
+            }
+        }
+    }
+
     /// Returns all tools with model-visible names normalized.
     #[instrument(level = "trace", skip_all, fields(mcp_server_count = self.clients.len()))]
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
