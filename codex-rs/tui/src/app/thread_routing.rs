@@ -1237,6 +1237,7 @@ impl App {
         } else {
             None
         };
+        self.cache_collab_receiver_threads_for_notification(&notification);
         let is_turn_started = matches!(notification, ServerNotification::TurnStarted(_));
         let is_thread_closed = matches!(notification, ServerNotification::ThreadClosed(_));
         let notification_status_change = SideParentStatusChange::for_notification(&notification);
@@ -1364,10 +1365,8 @@ impl App {
         &mut self,
         notification: &ServerNotification,
     ) {
-        if let Some(activity) =
-            sub_agent_activity_item(notification).and_then(sub_agent_activity_display)
-        {
-            self.agent_navigation.record_sub_agent_activity(activity);
+        if let Some(item) = sub_agent_activity_item(notification) {
+            self.cache_sub_agent_activity_item(item);
             self.sync_active_agent_label();
             return;
         }
@@ -1397,6 +1396,12 @@ impl App {
                 thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
                 /*is_closed*/ false,
             );
+        }
+    }
+
+    fn cache_sub_agent_activity_item(&mut self, item: &ThreadItem) {
+        if let Some(activity) = sub_agent_activity_display(item) {
+            self.agent_navigation.record_sub_agent_activity(activity);
         }
     }
 
@@ -1568,6 +1573,10 @@ impl App {
             thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
             /*is_closed*/ false,
         );
+        for item in turns.iter().flat_map(|turn| &turn.items) {
+            self.cache_sub_agent_activity_item(item);
+        }
+        self.sync_active_agent_label();
         let channel = self.ensure_thread_channel(thread_id);
         {
             let mut store = channel.store.lock().await;
@@ -2022,7 +2031,6 @@ impl App {
         );
         match event {
             ThreadBufferedEvent::Notification(notification) => {
-                self.cache_collab_receiver_threads_for_notification(notification.as_ref());
                 let tip_ready = self.turn_tips.observe(&notification, Instant::now());
                 self.chat_widget
                     .handle_server_notification(*notification, /*replay_kind*/ None);
@@ -2063,9 +2071,11 @@ impl App {
     pub(super) fn handle_thread_event_replay(&mut self, event: ThreadBufferedEvent) {
         self.turn_tips.dismiss();
         match event {
-            ThreadBufferedEvent::Notification(notification) => self
-                .chat_widget
-                .handle_server_notification(*notification, Some(ReplayKind::ThreadSnapshot)),
+            ThreadBufferedEvent::Notification(notification) => {
+                self.cache_collab_receiver_threads_for_notification(notification.as_ref());
+                self.chat_widget
+                    .handle_server_notification(*notification, Some(ReplayKind::ThreadSnapshot));
+            }
             ThreadBufferedEvent::Request(request) => {
                 let may_open_protected_view =
                     self.startup_request_may_open_protected_view(request.as_ref());

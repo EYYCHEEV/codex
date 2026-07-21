@@ -4414,10 +4414,6 @@ impl Session {
                 .executed_tool_calls
                 .mark_mcp_attribution_persisted(revision);
         }
-        {
-            let mut state = self.state.lock().await;
-            state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
-        }
     }
 
     pub fn enabled(&self, feature: Feature) -> bool {
@@ -5321,11 +5317,8 @@ impl Session {
 
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
-        let had_active_turn = self.active_turn.lock().await.is_some();
         self.abort_all_tasks(TurnAbortReason::Interrupted).await;
-        if !had_active_turn {
-            self.cancel_mcp_startup();
-        }
+        self.cancel_mcp_startup();
     }
 
     pub(crate) fn hooks(&self) -> Arc<Hooks> {
@@ -5362,6 +5355,14 @@ impl Session {
     ) -> Option<codex_hooks::SessionStartSource> {
         let mut state = self.state.lock().await;
         state.take_pending_session_start_source()
+    }
+
+    pub(crate) async fn queue_pending_session_start_source(
+        &self,
+        source: codex_hooks::SessionStartSource,
+    ) {
+        let mut state = self.state.lock().await;
+        state.queue_pending_session_start_source(source);
     }
 
     fn show_raw_agent_reasoning(&self) -> bool {

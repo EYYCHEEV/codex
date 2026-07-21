@@ -117,13 +117,15 @@ pub(crate) fn find_builtin_command(name: &str, flags: BuiltinCommandFlags) -> Op
         (!repeated_os.is_empty() && repeated_os.bytes().all(|byte| byte == b'o'))
             .then_some(SlashCommand::Goal)
     })?;
-    builtins_for_input(BuiltinCommandFlags {
-        token_activity_command_enabled: true,
-        side_conversation_active: false,
-        ..flags
-    })
-    .into_iter()
-    .any(|(_, visible_cmd)| visible_cmd == cmd)
+    let is_hidden_compatibility_command = cmd == SlashCommand::Agents;
+    (is_hidden_compatibility_command
+        || builtins_for_input(BuiltinCommandFlags {
+            token_activity_command_enabled: true,
+            side_conversation_active: false,
+            ..flags
+        })
+        .into_iter()
+        .any(|(_, visible_cmd)| visible_cmd == cmd))
     .then_some(cmd)
 }
 
@@ -325,7 +327,7 @@ mod tests {
             commands,
             vec![
                 SlashCommand::Ide,
-                SlashCommand::Agents,
+                SlashCommand::Agent,
                 SlashCommand::Copy,
                 SlashCommand::Export,
                 SlashCommand::Raw,
@@ -337,6 +339,20 @@ mod tests {
                 SlashCommand::Pwd,
                 SlashCommand::Usage,
             ]
+        );
+    }
+
+    #[test]
+    fn hidden_agents_overview_command_still_resolves_when_typed() {
+        let flags = all_enabled_flags();
+        assert!(
+            builtins_for_input(flags)
+                .into_iter()
+                .all(|(_, command)| command != SlashCommand::Agents)
+        );
+        assert_eq!(
+            find_builtin_command("agents", flags),
+            Some(SlashCommand::Agents)
         );
     }
 

@@ -1,5 +1,4 @@
 use super::*;
-use crate::CodexAppsToolsCache;
 use crate::CodexAppsToolsCacheKey;
 use crate::McpBinding;
 use crate::client_tool_catalog::ClientToolCatalog;
@@ -36,6 +35,7 @@ use codex_config::McpServerToolConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_connectors::ConnectorRuntimeContext;
+use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeFetchSource;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_exec_server::ExecServerError;
@@ -191,7 +191,6 @@ fn test_apps_cache_key(
     is_workspace_account: bool,
 ) -> CodexAppsToolsCacheKey {
     let identity_key = chatgpt_user_id
-        .clone()
         .or_else(|| account_id.clone())
         .unwrap_or_else(|| "test-account".to_string());
     CodexAppsToolsCacheKey::from_transport_binding(
@@ -4021,6 +4020,89 @@ async fn shutdown_cancels_pending_tool_listing() {
 }
 
 #[tokio::test]
+async fn cancel_active_startups_preserves_lazy_and_completed_clients() {
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    let active_token = CancellationToken::new();
+    let lazy_token = CancellationToken::new();
+    let completed_token = CancellationToken::new();
+    let active_client = {
+        let active_token = active_token.clone();
+        async move {
+            active_token.cancelled().await;
+            Err(StartupOutcomeError::Cancelled)
+        }
+        .boxed()
+        .shared()
+    };
+    let pending_client = || {
+        futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+            .boxed()
+            .shared()
+    };
+    for (name, lazy_startup, startup_complete, client, cancel_token) in [
+        ("active", false, false, active_client, active_token.clone()),
+        (
+            CODEX_APPS_MCP_SERVER_NAME,
+            true,
+            false,
+            pending_client(),
+            lazy_token.clone(),
+        ),
+        (
+            "completed",
+            false,
+            true,
+            pending_client(),
+            completed_token.clone(),
+        ),
+    ] {
+        manager.insert_test_client(
+            name,
+            AsyncManagedClient {
+                client,
+                is_codex_apps_mcp_server: lazy_startup,
+                cached_server_info: None,
+                codex_apps_tools_cache_context: None,
+                tool_catalog_cache_context: None,
+                lazy_startup,
+                startup_complete: Arc::new(AtomicBool::new(startup_complete)),
+                startup_reconnect: None,
+                cancel_token,
+            },
+        );
+    }
+    let (lazy_startup_trigger, _lazy_startup_requested) = watch::channel(false);
+    Arc::get_mut(
+        &mut manager
+            .servers
+            .get_mut(CODEX_APPS_MCP_SERVER_NAME)
+            .expect("lazy Apps server")
+            .connection,
+    )
+    .expect("test owns lazy connection")
+    .startup_trigger = Some(lazy_startup_trigger);
+
+    manager.cancel_startup();
+
+    assert!(active_token.is_cancelled());
+    assert!(!lazy_token.is_cancelled());
+    assert!(!completed_token.is_cancelled());
+    let active_result = tokio::time::timeout(
+        Duration::from_secs(1),
+        manager.test_client("active").client(),
+    )
+    .await
+    .expect("active startup terminalized");
+    assert!(matches!(active_result, Err(StartupOutcomeError::Cancelled)));
+}
+
+#[tokio::test]
 async fn shutdown_continues_after_caller_is_aborted() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
@@ -4971,6 +5053,117 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
         "local stdio MCP server `stdio` requires a local environment"
     );
     cancel_token.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
+    let command = codex_utils_cargo_bin::cargo_bin("test_stdio_server")
+        .expect("test stdio server binary")
+        .to_string_lossy()
+        .to_string();
+    let config = McpServerConfig {
+        auth: Default::default(),
+        transport: McpServerTransportConfig::Stdio {
+            command,
+            args: Vec::new(),
+            env: Some(HashMap::from([(
+                "MCP_TEST_INITIALIZE_DELAY_MS".to_string(),
+                "10000".to_string(),
+            )])),
+            env_vars: Vec::new(),
+            cwd: None,
+        },
+        environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+        enabled: true,
+        required: false,
+        supports_parallel_tool_calls: false,
+        omit_tools_from: None,
+        disabled_reason: None,
+        startup_timeout_sec: Some(Duration::from_secs(1)),
+        tool_timeout_sec: None,
+        default_tools_approval_mode: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        scopes: None,
+        oauth: None,
+        oauth_resource: None,
+        tools: HashMap::new(),
+    };
+    let mcp_servers = HashMap::from([("slow".to_string(), EffectiveMcpServer::configured(config))]);
+    let (tx_event, rx_event) = async_channel::unbounded();
+    let codex_home = tempdir().expect("tempdir");
+    let cancel_token = CancellationToken::new();
+    let _manager = McpConnectionSet::new(
+        /*previous*/ None,
+        McpPublicationGate::already_published(),
+        McpRuntimeInput {
+            startup_policy: McpStartupPolicy::Eager,
+            config: Arc::new(crate::mcp::tests::test_mcp_config(
+                codex_home.path().to_path_buf(),
+            )),
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            mcp_servers,
+            submit_id: "submit-id".to_string(),
+            tx_event: Some(tx_event),
+            startup_cancellation_token: cancel_token,
+            runtime_context: McpRuntimeContext::new(
+                Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+                PathBuf::from("/tmp"),
+            ),
+            codex_apps_tools_cache: ConnectorRuntimeManager::default(),
+            tool_catalog_cache: McpToolCatalogCache::default(),
+            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::from_runtime_binding(
+                TransportAuthBinding::for_nonmanaged_auth(/*auth*/ None),
+                /*credential_revision*/ None,
+                "https://chatgpt.com",
+                /*is_workspace_account*/ false,
+            ),
+            client_mcp_extensions: ClientMcpExtensions::default(),
+            auth: None,
+            auth_manager: None,
+            elicitation_reviewer: None,
+            elicitation_lifecycle: None,
+        },
+        ElicitationRequestRouter::default(),
+    )
+    .await;
+
+    let starting = tokio::time::timeout(Duration::from_secs(1), rx_event.recv())
+        .await
+        .expect("starting event deadline")
+        .expect("starting event");
+    assert!(matches!(
+        starting.msg,
+        EventMsg::McpStartupUpdate(McpStartupUpdateEvent {
+            ref server,
+            status: McpStartupStatus::Starting,
+        }) if server == "slow"
+    ));
+    let failed = tokio::time::timeout(Duration::from_secs(2), rx_event.recv())
+        .await
+        .expect("failed event deadline")
+        .expect("failed event");
+    assert!(matches!(
+        failed.msg,
+        EventMsg::McpStartupUpdate(McpStartupUpdateEvent {
+            ref server,
+            status: McpStartupStatus::Failed { ref error, .. },
+        }) if server == "slow" && error.contains("timed out after 1 seconds")
+    ));
+
+    let complete = tokio::time::timeout(Duration::from_secs(1), rx_event.recv())
+        .await
+        .expect("completion event deadline")
+        .expect("completion event");
+    let EventMsg::McpStartupComplete(summary) = complete.msg else {
+        panic!("expected MCP startup completion");
+    };
+    assert!(summary.ready.is_empty());
+    assert!(summary.cancelled.is_empty());
+    assert_eq!(summary.failed.len(), 1);
+    assert_eq!(summary.failed[0].server, "slow");
+    assert!(summary.failed[0].error.contains("timed out"));
 }
 
 #[tokio::test]

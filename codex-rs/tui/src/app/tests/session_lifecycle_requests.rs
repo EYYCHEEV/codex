@@ -4349,6 +4349,8 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                         agent_nickname: Some("worker".to_string()),
                         agent_role: Some("worker".to_string()),
                         agent_path: Some("/root/worker".to_string()),
+                        model: None,
+                        reasoning_effort: None,
                         is_running: false,
                         is_closed: false,
                     })
@@ -4369,12 +4371,11 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                         .replace(&root_thread_id.to_string(), "[root]")
                         .replace(&child_thread_id.to_string(), "[child]"),
                     @r###"
-                      Subagents
-                      Select an agent to watch. ⌥+← previous, ⌥+→ next.
+                      Agents
+                      Select an agent to watch. ⌥ + ← previous, ⌥ + → next.
 
-
-                    › 1. • Main [default] (current)  [root]
-                      2. • /root/worker              [child]
+                    › 1. • Main [default] (current)  idle
+                      2. • /root/worker              [worker]  idle
 
                       enter select · esc back
                     "###

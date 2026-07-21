@@ -4,6 +4,7 @@
 //! state, and resetting transcript-related app state after `/clear` or Ctrl-L. Owned-screen sessions
 //! keep committed cells as the render source and never enqueue terminal-scrollback rows here.
 
+use super::resize_reflow::trailing_run_start;
 use super::*;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use std::sync::Weak;
@@ -52,6 +53,26 @@ impl App {
         }
         let is_session_header = cell.as_any().is::<history_cell::SessionInfoCell>();
         let cell: Arc<dyn HistoryCell> = cell.into();
+        if cell.as_any().is::<history_cell::ReasoningSummaryCell>() {
+            let answer_start =
+                trailing_run_start::<history_cell::AgentMessageCell>(&self.transcript_cells);
+            if answer_start < self.transcript_cells.len() {
+                self.transcript_cells.insert(answer_start, cell);
+                if let Some(Overlay::Transcript(transcript)) = &mut self.overlay {
+                    transcript.replace_cells(self.transcript_cells.clone());
+                    tui.frame_requester().schedule_frame();
+                }
+                let terminal_width = tui.terminal.last_known_screen_size.into();
+                if let Err(err) = self.rebuild_transcript_after_history_rewrite(tui, terminal_width)
+                {
+                    tracing::error!(
+                        "failed to rebuild transcript after reasoning insertion: {err}"
+                    );
+                }
+                self.chat_widget.request_pending_usage_output_insertion();
+                return;
+            }
+        }
         if let Some(Overlay::Transcript(t)) = &mut self.overlay {
             t.insert_cell(cell.clone());
             tui.frame_requester().schedule_frame();

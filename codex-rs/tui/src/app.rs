@@ -67,6 +67,8 @@ use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_models;
 use crate::model_migration::run_model_migration_prompt;
 use crate::multi_agents::agent_picker_status_dot_spans;
+use crate::multi_agents::format_agent_picker_entry_name;
+use crate::multi_agents::format_agent_picker_item_description;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
@@ -198,7 +200,6 @@ use uuid::Uuid;
 mod agent_message_consolidation;
 mod agent_navigation;
 mod agent_picker;
-mod agent_status_feed;
 #[cfg(any(unix, windows))]
 mod agents_overview;
 mod agents_overview_actions;
