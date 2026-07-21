@@ -11455,6 +11455,17 @@ async fn idle_interrupt_does_not_wake_queued_next_turn_items() {
 }
 
 #[tokio::test]
+async fn interrupt_keeps_mcp_manager_token_reusable() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let startup_token = sess.mcp_startup_cancellation_token().await;
+    *sess.active_turn.lock().await = Some(ActiveTurn::default());
+
+    sess.interrupt_task().await;
+
+    assert!(!startup_token.is_cancelled());
+}
+
+#[tokio::test]
 async fn abort_empty_active_turn_preserves_pending_input() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
     let pending_item = ResponseItem::Message {

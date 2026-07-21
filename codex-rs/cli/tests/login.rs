@@ -236,6 +236,8 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
     const HEALTHY_ACCESS_TOKEN: &str = "healthy-access-secret";
     const HEALTHY_REFRESHED_ACCESS_TOKEN: &str = "healthy-refreshed-access-secret";
     const HEALTHY_REFRESHED_TOKEN: &str = "healthy-refreshed-secret";
+    const ZERO_RESET_ACCESS_TOKEN: &str = "zero-reset-access-secret";
+    const RESET_CREDIT_ID: &str = "reset-credit-id-secret";
 
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
@@ -276,6 +278,16 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
     manager
         .upsert_managed_chatgpt_oauth(healthy_credentials)
         .await?;
+    let mut zero_reset_credentials = managed_credentials(
+        "zero-reset@example.com",
+        "zero-reset-workspace",
+        ZERO_RESET_ACCESS_TOKEN,
+        "zero-reset-refresh-secret",
+    )?;
+    zero_reset_credentials.last_refresh = chrono::Utc::now();
+    manager
+        .upsert_managed_chatgpt_oauth(zero_reset_credentials)
+        .await?;
 
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
@@ -293,6 +305,35 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
         .expect(1)
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage"))
+        .and(header(
+            "authorization",
+            format!("Bearer {ZERO_RESET_ACCESS_TOKEN}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                    "used_percent": 10,
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 18000,
+                    "reset_at": 1_774_000_000,
+                },
+                "secondary_window": {
+                    "used_percent": 20,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 604800,
+                    "reset_at": 1_774_400_000,
+                }
+            },
+            "rate_limit_reset_credits": { "available_count": 0 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .and(body_string_contains(format!(
@@ -306,12 +347,60 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits"))
+        .and(header(
+            "authorization",
+            format!("Bearer {ZERO_RESET_ACCESS_TOKEN}"),
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
         .and(path("/backend-api/wham/usage"))
         .and(header(
             "authorization",
             format!("Bearer {HEALTHY_REFRESHED_ACCESS_TOKEN}"),
         ))
-        .respond_with(ResponseTemplate::new(503))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "plan_type": "pro",
+            "rate_limit": {
+                "allowed": true,
+                "limit_reached": false,
+                "primary_window": {
+                    "used_percent": 25,
+                    "limit_window_seconds": 18000,
+                    "reset_after_seconds": 18000,
+                    "reset_at": 1_774_000_000,
+                },
+                "secondary_window": {
+                    "used_percent": 50,
+                    "limit_window_seconds": 604800,
+                    "reset_after_seconds": 604800,
+                    "reset_at": 1_774_400_000,
+                }
+            },
+            "rate_limit_reset_credits": { "available_count": 1 }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/rate-limit-reset-credits"))
+        .and(header(
+            "authorization",
+            format!("Bearer {HEALTHY_REFRESHED_ACCESS_TOKEN}"),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "credits": [{
+                "id": RESET_CREDIT_ID,
+                "reset_type": "codex_rate_limits",
+                "status": "available",
+                "granted_at": "2026-07-20T00:00:00Z",
+                "expires_at": "2026-07-28T00:00:00Z"
+            }],
+            "available_count": 1
+        })))
         .expect(1)
         .mount(&server)
         .await;
@@ -331,7 +420,17 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
                 "daily_usage_buckets": null
             }
         })))
-        .expect(1)
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/profiles/me"))
+        .and(header(
+            "authorization",
+            format!("Bearer {ZERO_RESET_ACCESS_TOKEN}"),
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
         .mount(&server)
         .await;
 
@@ -342,6 +441,7 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
             format!("{}/oauth/token", server.uri()),
         )
         .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost")
         .env_remove(OPENAI_API_KEY_ENV_VAR)
         .env_remove(CODEX_ACCESS_TOKEN_ENV_VAR)
         .args(["login", "status"])
@@ -353,25 +453,41 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
     assert!(elapsed < Duration::from_secs(10), "{elapsed:?}");
     let stdout = String::from_utf8(output.stdout)?;
     let stderr = String::from_utf8(output.stderr)?;
+    let request_paths = server
+        .received_requests()
+        .await
+        .context("failed to read managed status requests")?
+        .iter()
+        .map(|request| format!("{} {}", request.method, request.url.path()))
+        .collect::<Vec<_>>();
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("stalled@example.com"), "{stdout}");
     assert!(
-        stdout.contains("refresh: temporarily unavailable"),
+        stdout.contains("refresh temporarily unavailable"),
         "{stdout}"
     );
     assert!(stdout.contains("healthy@example.com"), "{stdout}");
-    assert!(stdout.contains("refresh: healthy"), "{stdout}");
-    assert!(stdout.contains("lifetime 123"), "{stdout}");
+    assert!(
+        stdout.contains("1 saved reset"),
+        "{stdout}\nrequests: {request_paths:?}"
+    );
+    assert!(stdout.contains("zero-reset@example.com"), "{stdout}");
+    assert!(stdout.contains("0 saved resets"), "{stdout}");
+    assert!(!stdout.contains("profiles/me"), "{stdout}");
+    assert!(!stdout.contains("lifetime 123"), "{stdout}");
     for secret in [
         STALLED_REFRESH_TOKEN,
         HEALTHY_REFRESH_TOKEN,
         HEALTHY_ACCESS_TOKEN,
         HEALTHY_REFRESHED_ACCESS_TOKEN,
         HEALTHY_REFRESHED_TOKEN,
+        ZERO_RESET_ACCESS_TOKEN,
+        "zero-reset-refresh-secret",
         "stalled-access-secret",
         "stalled-refreshed-secret",
         "stalled-rotated-secret",
         "refresh_token",
+        RESET_CREDIT_ID,
     ] {
         assert!(!stdout.contains(secret), "stdout leaked {secret}: {stdout}");
         assert!(!stderr.contains(secret), "stderr leaked {secret}: {stderr}");

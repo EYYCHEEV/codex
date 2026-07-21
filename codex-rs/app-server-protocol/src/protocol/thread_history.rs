@@ -1054,6 +1054,9 @@ impl ThreadHistoryBuilder {
             kind: payload.kind.into(),
             agent_thread_id: payload.agent_thread_id.to_string(),
             agent_path: String::from(payload.agent_path.clone()),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
         });
     }
 
@@ -1637,11 +1640,34 @@ fn convert_dynamic_tool_content_items(
         .collect()
 }
 
-fn upsert_turn_item(items: &mut Vec<ThreadItem>, item: ThreadItem) -> &ThreadItem {
+fn upsert_turn_item(items: &mut Vec<ThreadItem>, mut item: ThreadItem) -> &ThreadItem {
     if let Some(existing_item_index) = items
         .iter()
         .position(|existing_item| existing_item.id() == item.id())
     {
+        if let ThreadItem::SubAgentActivity {
+            agent_type: existing_agent_type,
+            model: existing_model,
+            reasoning_effort: existing_reasoning_effort,
+            ..
+        } = &items[existing_item_index]
+            && let ThreadItem::SubAgentActivity {
+                agent_type,
+                model,
+                reasoning_effort,
+                ..
+            } = &mut item
+        {
+            if agent_type.is_none() {
+                *agent_type = existing_agent_type.clone();
+            }
+            if model.is_none() {
+                *model = existing_model.clone();
+            }
+            if reasoning_effort.is_none() {
+                *reasoning_effort = existing_reasoning_effort.clone();
+            }
+        }
         items[existing_item_index] = item;
         return &items[existing_item_index];
     }
@@ -1923,6 +1949,67 @@ mod tests {
                     review: REVIEW_FALLBACK_MESSAGE.into(),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn legacy_sub_agent_activity_does_not_erase_canonical_route_metadata() {
+        let thread_id = ThreadId::new();
+        let agent_thread_id = ThreadId::new();
+        let agent_path = codex_protocol::AgentPath::root()
+            .join("scout")
+            .expect("valid agent path");
+        let canonical =
+            CoreTurnItem::SubAgentActivity(codex_protocol::items::SubAgentActivityItem {
+                id: "activity-1".to_string(),
+                kind: codex_protocol::protocol::SubAgentActivityKind::Started,
+                agent_thread_id,
+                agent_path: agent_path.clone(),
+                agent_type: Some("scout".to_string()),
+                model: Some("gpt-5.6-terra".to_string()),
+                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+            });
+        let events = vec![
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "turn-1".to_string(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+                started_at: None,
+                trace_id: None,
+            }),
+            EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id,
+                turn_id: "turn-1".to_string(),
+                item: canonical,
+                started_at_ms: Some(0),
+                completed_at_ms: 0,
+            }),
+            EventMsg::SubAgentActivity(codex_protocol::protocol::SubAgentActivityEvent {
+                event_id: "activity-1".to_string(),
+                occurred_at_ms: 0,
+                agent_thread_id,
+                agent_path,
+                kind: codex_protocol::protocol::SubAgentActivityKind::Started,
+            }),
+        ];
+
+        let mut builder = ThreadHistoryBuilder::new();
+        for event in &events {
+            builder.handle_event(event);
+        }
+        let turns = builder.finish();
+
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::SubAgentActivity {
+                id: "activity-1".to_string(),
+                kind: crate::protocol::v2::SubAgentActivityKind::Started,
+                agent_thread_id: agent_thread_id.to_string(),
+                agent_path: "/root/scout".to_string(),
+                agent_type: Some("scout".to_string()),
+                model: Some("gpt-5.6-terra".to_string()),
+                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium,),
+            }]
         );
     }
 

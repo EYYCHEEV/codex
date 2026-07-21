@@ -1,6 +1,4 @@
 use chrono::Utc;
-use codex_backend_client::TokenUsageProfile;
-use codex_backend_client::TokenUsageProfileStats;
 use codex_login::ManagedChatgptEligibility;
 use codex_login::ManagedChatgptLimitKind;
 use codex_login::ManagedChatgptOauthCredentials;
@@ -15,24 +13,27 @@ use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use pretty_assertions::assert_eq;
 use std::io::Cursor;
+use std::sync::Arc;
 use tempfile::tempdir;
+use tokio::sync::Notify;
 
 use super::AMBIGUOUS_LOGOUT_GUIDANCE;
 use super::AuthMode;
 use super::CodexAuth;
 use super::ManagedChatgptAccountView;
+use super::ResetCreditPresentation;
 use super::UnscopedLogoutTarget;
-use super::format_managed_login_status;
+use super::format_managed_login_status_at;
 use super::is_managed_api_auth_mode;
 use super::logout_all_auth;
 use super::non_pooled_login_status;
 use super::pick_logout_account;
 use super::rate_windows_from_backend;
+use super::run_bounded;
 use super::safe_format_key;
 use super::select_persistent_unscoped_logout_target;
 use super::select_unscoped_logout_target;
 use super::singular_login_status;
-use super::token_usage_summary;
 
 fn account(identity_key: &str, email: &str) -> ManagedChatgptAccountView {
     ManagedChatgptAccountView {
@@ -127,28 +128,6 @@ fn multi_account_picker_rejects_invalid_input() {
 }
 
 #[test]
-fn backend_token_usage_maps_to_owner_summary() {
-    let profile = TokenUsageProfile {
-        stats: TokenUsageProfileStats {
-            lifetime_tokens: Some(100),
-            peak_daily_tokens: Some(20),
-            longest_running_turn_sec: Some(30),
-            current_streak_days: Some(4),
-            longest_streak_days: Some(5),
-            daily_usage_buckets: None,
-        },
-    };
-
-    let summary = token_usage_summary(&profile);
-
-    assert_eq!(summary.lifetime_tokens, Some(100));
-    assert_eq!(summary.peak_daily_tokens, Some(20));
-    assert_eq!(summary.longest_running_turn_sec, Some(30));
-    assert_eq!(summary.current_streak_days, Some(4));
-    assert_eq!(summary.longest_streak_days, Some(5));
-}
-
-#[test]
 fn backend_rate_windows_preserve_duration_and_additional_identity() {
     let snapshots = vec![
         RateLimitSnapshot {
@@ -211,167 +190,156 @@ fn backend_rate_windows_preserve_duration_and_additional_identity() {
 }
 
 #[test]
-fn managed_status_formats_two_accounts_and_usage_freshness() {
-    let retained_observed_at = chrono::DateTime::parse_from_rfc3339("2026-07-13T10:00:00Z")
+fn managed_status_renders_compact_usage_without_internal_identifiers() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-21T12:00:01.100Z")
         .expect("valid timestamp")
         .with_timezone(&Utc);
-    let unavailable_observed_at = chrono::DateTime::parse_from_rfc3339("2026-07-14T11:00:00Z")
+    let observed_at = chrono::DateTime::parse_from_rfc3339("2026-07-21T12:00:00Z")
         .expect("valid timestamp")
         .with_timezone(&Utc);
-    let mut first = account("email:first@example.com", "first@example.com");
-    first.chatgpt_account_id = Some("workspace-first".to_string());
-    first.usage_state = ManagedChatgptUsageState::Fresh;
-    first.usage = Some(ManagedChatgptUsageView {
-        observed_at: Utc::now(),
-
-        stale: false,
-        token_usage: None,
-        rate_windows: vec![ManagedChatgptRateWindowView {
-            limit_id: "codex".to_string(),
-            kind: ManagedChatgptLimitKind::Primary,
-            remaining_percent: Some(75.0),
-            window_duration_mins: Some(300),
-            reset_at: None,
-        }],
-    });
-    let mut second = account("email:second@example.com", "second@example.com");
-    second.usage_state = ManagedChatgptUsageState::Unavailable;
-    second.usage_unavailable_reason = Some("rate limit usage unavailable".to_string());
-    second.usage_unavailable_observed_at = Some(unavailable_observed_at);
-    second.token_state = ManagedChatgptTokenState::Unavailable;
-    second.token_unavailable_reason = Some("token usage unavailable".to_string());
-    second.token_unavailable_observed_at = Some(unavailable_observed_at);
-    second.usage = Some(ManagedChatgptUsageView {
-        observed_at: retained_observed_at,
-        stale: true,
-        token_usage: None,
-        rate_windows: vec![ManagedChatgptRateWindowView {
-            limit_id: "codex".to_string(),
-            kind: ManagedChatgptLimitKind::Secondary,
-            remaining_percent: Some(25.0),
-            window_duration_mins: Some(10_080),
-            reset_at: None,
-        }],
-    });
-
-    let output = format_managed_login_status(&[first, second], Some("email:first@example.com"));
-
-    assert!(output.contains("* first@example.com (email:first@example.com)"));
-    assert!(output.contains("  account: workspace-first"));
-    assert!(output.contains("  usage: fresh"));
-    assert!(output.contains("  primary 5h: 75% remaining"));
-    assert!(output.contains("  second@example.com (email:second@example.com)"));
-    assert!(output.contains("  usage: stale (refresh unavailable)"));
-    assert!(output.contains("  secondary weekly: 25% remaining"));
-    assert!(output.contains(&format!(
-        "  observed: {}",
-        retained_observed_at.to_rfc3339()
-    )));
-    assert!(output.contains(&format!(
-        "  usage unavailable observed: {}",
-        unavailable_observed_at.to_rfc3339()
-    )));
-    assert!(output.contains("  usage unavailable reason: rate limit usage unavailable"));
-    assert!(output.contains(&format!(
-        "  token unavailable observed: {}",
-        unavailable_observed_at.to_rfc3339()
-    )));
-    assert!(output.contains("  token unavailable reason: token usage unavailable"));
-}
-
-#[test]
-fn managed_status_uses_duration_for_primary_window_label() {
-    let mut account = account("email:first@example.com", "first@example.com");
+    let reset_at = chrono::DateTime::parse_from_rfc3339("2026-07-26T03:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+    let expires_at = chrono::DateTime::parse_from_rfc3339("2026-07-28T00:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+    let mut account = account("internal-identity-secret", "account@example.com");
+    account.plan = Some("pro".to_string());
     account.usage_state = ManagedChatgptUsageState::Fresh;
     account.usage = Some(ManagedChatgptUsageView {
-        observed_at: Utc::now(),
-        stale: false,
-        token_usage: None,
-        rate_windows: vec![ManagedChatgptRateWindowView {
-            limit_id: "codex".to_string(),
-            kind: ManagedChatgptLimitKind::Primary,
-            remaining_percent: Some(95.0),
-            window_duration_mins: Some(10_080),
-            reset_at: None,
-        }],
-    });
-
-    let output = format_managed_login_status(&[account], None);
-
-    assert!(output.contains("  primary weekly: 95% remaining"));
-    assert!(!output.contains("  5-hour:"));
-}
-
-#[test]
-fn managed_status_labels_unknown_usage_without_exhaustion() {
-    let account = account("email:first@example.com", "first@example.com");
-
-    let output = format_managed_login_status(&[account], None);
-
-    assert!(output.contains("  usage: unknown"));
-    assert!(output.contains("  block: none"));
-}
-
-#[test]
-fn managed_status_labels_first_usage_failure_unavailable() {
-    let mut account = account("email:first@example.com", "first@example.com");
-    account.usage_state = ManagedChatgptUsageState::Unavailable;
-    account.usage_unavailable_reason = Some("rate limit usage unavailable".to_string());
-    let unavailable_observed_at = Utc::now();
-    account.usage_unavailable_observed_at = Some(unavailable_observed_at);
-    account.usage = Some(ManagedChatgptUsageView {
-        observed_at: Utc::now(),
-        stale: false,
-        token_usage: None,
-        rate_windows: Vec::new(),
-    });
-
-    let output = format_managed_login_status(&[account], None);
-
-    assert!(output.contains("  usage: unavailable"));
-    assert!(!output.contains("  usage: fresh (refresh unavailable)"));
-    assert!(!output.contains("  observed:"));
-    assert!(output.contains(&format!(
-        "  usage unavailable observed: {}",
-        unavailable_observed_at.to_rfc3339()
-    )));
-    assert!(output.contains("  usage unavailable reason: rate limit usage unavailable"));
-}
-
-#[test]
-fn managed_status_surfaces_transient_refresh_failure() {
-    let observed_at = Utc::now();
-    let mut account = account("email:first@example.com", "first@example.com");
-    account.usage_state = ManagedChatgptUsageState::Fresh;
-    account.refresh_status =
-        codex_login::ManagedChatgptRefreshStatus::TransientUnavailable { observed_at };
-
-    let output = format_managed_login_status(&[account], None);
-
-    assert!(output.contains(&format!(
-        "  refresh: temporarily unavailable, observed {}",
-        observed_at.to_rfc3339()
-    )));
-    assert!(output.contains("  usage: fresh (refresh unavailable)"));
-}
-
-#[test]
-fn managed_status_surfaces_permanent_refresh_failure() {
-    let observed_at = Utc::now();
-    let mut account = account("email:first@example.com", "first@example.com");
-    account.usage_state = ManagedChatgptUsageState::Stale;
-    account.refresh_status = codex_login::ManagedChatgptRefreshStatus::ReloginRequired {
         observed_at,
-        reason_code: None,
+        stale: false,
+        token_usage: None,
+        rate_windows: vec![
+            ManagedChatgptRateWindowView {
+                limit_id: "codex".to_string(),
+                kind: ManagedChatgptLimitKind::Secondary,
+                remaining_percent: Some(19.0),
+                window_duration_mins: Some(10_080),
+                reset_at: Some(reset_at),
+            },
+            ManagedChatgptRateWindowView {
+                limit_id: "codex_bengalfox:secondary".to_string(),
+                kind: ManagedChatgptLimitKind::Additional,
+                remaining_percent: Some(100.0),
+                window_duration_mins: Some(10_080),
+                reset_at: Some(expires_at),
+            },
+        ],
+    });
+    let reset_credits = std::collections::HashMap::from([(
+        account.identity_key.clone(),
+        ResetCreditPresentation {
+            available_count: 4,
+            soonest_expiry: Some(expires_at),
+        },
+    )]);
+
+    let output = format_managed_login_status_at(
+        &[account],
+        Some("internal-identity-secret"),
+        &reset_credits,
+        now,
+    );
+
+    assert_eq!(
+        output,
+        concat!(
+            "Usage - fetched 1.1s ago\n\n",
+            "OpenAI Codex - 1 account\n",
+            "● account@example.com - plan: pro - selected - 4 saved resets - soonest expires in 6d11h\n",
+            "  ● 7 days          ███████████████████████░░░░░  81.0% used - resets in 4d14h\n",
+            "  ● 7 days (Spark)  ░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0.0% used - resets in 6d11h\n",
+            "capacity: 7d -> 0.81/1 account used (0.19x quota left)\n",
+        )
+    );
+    assert!(!output.contains("internal-identity-secret"));
+    assert!(!output.contains("credit"));
+    assert!(!output.contains("token"));
+}
+
+#[test]
+fn managed_status_capacity_uses_only_clamped_reporting_account_maxima() {
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-21T12:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+    let make_account = |identity: &str, remaining: Vec<Option<f64>>| {
+        let mut account = account(identity, identity);
+        account.usage_state = ManagedChatgptUsageState::Fresh;
+        account.usage = Some(ManagedChatgptUsageView {
+            observed_at: now,
+            stale: false,
+            token_usage: None,
+            rate_windows: remaining
+                .into_iter()
+                .map(|remaining_percent| ManagedChatgptRateWindowView {
+                    limit_id: "codex".to_string(),
+                    kind: ManagedChatgptLimitKind::Secondary,
+                    remaining_percent,
+                    window_duration_mins: Some(10_080),
+                    reset_at: None,
+                })
+                .collect(),
+        });
+        account
     };
+    let accounts = [
+        make_account("duplicate@example.com", vec![Some(80.0), Some(40.0)]),
+        make_account("over@example.com", vec![Some(120.0)]),
+        make_account("under@example.com", vec![Some(-20.0)]),
+        make_account("unknown@example.com", vec![None]),
+    ];
 
-    let output = format_managed_login_status(&[account], None);
+    let output = format_managed_login_status_at(&accounts, None, &Default::default(), now);
 
-    assert!(output.contains(&format!(
-        "  refresh: relogin required, observed {}",
-        observed_at.to_rfc3339()
-    )));
-    assert!(output.contains("  usage: stale (refresh unavailable)"));
+    assert!(output.contains("capacity: 7d -> 1.60/3 accounts used (1.40x quota left)"));
+    assert!(output.contains("????????????????????????????  unknown used"));
+    assert!(output.contains("  0.0% used"));
+    assert!(output.contains("100.0% used"));
+    let unknown = output
+        .split("● unknown@example.com")
+        .nth(1)
+        .expect("unknown account section");
+    assert!(unknown.contains("unknown used"));
+    assert!(!unknown.contains("% used"));
+}
+
+#[tokio::test]
+async fn bounded_runner_starts_only_up_to_the_limit_and_preserves_order() {
+    let gates = Arc::new((0..4).map(|_| Arc::new(Notify::new())).collect::<Vec<_>>());
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let runner = tokio::spawn(run_bounded(0..4, 2, {
+        let gates = Arc::clone(&gates);
+        move |index| {
+            let gates = Arc::clone(&gates);
+            let started_tx = started_tx.clone();
+            async move {
+                started_tx.send(index).expect("observe task start");
+                gates[index].notified().await;
+                index
+            }
+        }
+    }));
+
+    let mut first_batch = [
+        started_rx.recv().await.expect("first task starts"),
+        started_rx.recv().await.expect("second task starts"),
+    ];
+    first_batch.sort_unstable();
+    assert_eq!(first_batch, [0, 1]);
+    assert!(started_rx.try_recv().is_err());
+
+    gates[1].notify_one();
+    assert_eq!(started_rx.recv().await, Some(2));
+    for gate in gates.iter() {
+        gate.notify_waiters();
+        gate.notify_one();
+    }
+
+    assert_eq!(
+        runner.await.expect("bounded runner completes"),
+        vec![0, 1, 2, 3]
+    );
 }
 
 #[test]

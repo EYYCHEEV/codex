@@ -629,8 +629,10 @@ impl McpConnectionSet {
     }
 
     pub(crate) fn cancel_startup(&self) {
-        for view in self.servers.values() {
-            view.connection.cancel_startup();
+        for (server_name, view) in &self.servers {
+            if server_name != CODEX_APPS_MCP_SERVER_NAME {
+                view.connection.cancel_startup();
+            }
         }
     }
 

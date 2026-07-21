@@ -35,6 +35,7 @@ use crate::history_cell::AgentMarkdownCell;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::PlainHistoryCell;
+use crate::history_cell::ReasoningSummaryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
 use crate::multi_agents::AgentPickerThreadEntry;
@@ -104,6 +105,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::EventMsg;
@@ -1365,14 +1367,16 @@ async fn token_usage_update_refreshes_status_line_with_runtime_context_window() 
 }
 
 #[tokio::test]
-async fn collab_receiver_notification_caches_thread_without_app_server_read() {
+async fn collab_receiver_notification_caches_thread_without_app_server_read() -> Result<()> {
     let mut app = make_test_app().await;
+    let source_thread_id = ThreadId::new();
     let receiver_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000123").expect("valid thread id");
 
-    app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
+    app.enqueue_thread_notification(
+        source_thread_id,
         ServerNotification::ItemStarted(ItemStartedNotification {
-            thread_id: ThreadId::new().to_string(),
+            thread_id: source_thread_id.to_string(),
             turn_id: "turn-1".to_string(),
             started_at_ms: 0,
             item: ThreadItem::CollabAgentToolCall {
@@ -1388,7 +1392,8 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 agents_metadata: HashMap::new(),
             },
         }),
-    )));
+    )
+    .await?;
 
     assert_eq!(
         app.agent_navigation.get(&receiver_thread_id),
@@ -1396,21 +1401,26 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: false,
         })
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn collab_receiver_notification_does_not_cache_not_found_thread() {
+async fn collab_receiver_notification_does_not_cache_not_found_thread() -> Result<()> {
     let mut app = make_test_app().await;
+    let source_thread_id = ThreadId::new();
     let receiver_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000124").expect("valid thread id");
 
-    app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
+    app.enqueue_thread_notification(
+        source_thread_id,
         ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
-            thread_id: ThreadId::new().to_string(),
+            thread_id: source_thread_id.to_string(),
             turn_id: "turn-1".to_string(),
             completed_at_ms: 0,
             item: ThreadItem::CollabAgentToolCall {
@@ -1432,9 +1442,93 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                 agents_metadata: HashMap::new(),
             },
         }),
-    )));
+    )
+    .await?;
 
     assert_eq!(app.agent_navigation.get(&receiver_thread_id), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn inactive_thread_activity_caches_effective_route_before_replay() -> Result<()> {
+    let mut app = make_test_app().await;
+    let source_thread_id = ThreadId::new();
+    let receiver_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
+
+    app.enqueue_thread_notification(
+        source_thread_id,
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: source_thread_id.to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 0,
+            item: ThreadItem::SubAgentActivity {
+                id: "activity-1".to_string(),
+                kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+                agent_thread_id: receiver_thread_id.to_string(),
+                agent_path: "/root/sibling".to_string(),
+                agent_type: Some("scout".to_string()),
+                model: Some("gpt-5.6-terra".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            },
+        }),
+    )
+    .await?;
+
+    assert_eq!(
+        app.agent_navigation.get(&receiver_thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: None,
+            agent_role: Some("scout".to_string()),
+            agent_path: Some("/root/sibling".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            is_running: true,
+            is_closed: false,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_activity_seeds_effective_route_metadata() -> Result<()> {
+    let mut app = make_test_app().await;
+    let primary_thread_id = ThreadId::new();
+    let child_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000126").expect("valid thread id");
+    let turn = test_turn(
+        "turn-1",
+        TurnStatus::Completed,
+        vec![ThreadItem::SubAgentActivity {
+            id: "activity-1".to_string(),
+            kind: codex_app_server_protocol::SubAgentActivityKind::Started,
+            agent_thread_id: child_thread_id.to_string(),
+            agent_path: "/root/replayed".to_string(),
+            agent_type: Some("task".to_string()),
+            model: Some("gpt-5.6-sol".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+        }],
+    );
+
+    app.enqueue_primary_thread_session(
+        test_thread_session(primary_thread_id, PathBuf::from("/tmp")),
+        vec![turn],
+    )
+    .await?;
+
+    assert_eq!(
+        app.agent_navigation.get(&child_thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: None,
+            agent_role: Some("task".to_string()),
+            agent_path: Some("/root/replayed".to_string()),
+            model: Some("gpt-5.6-sol".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::High),
+            is_running: true,
+            is_closed: false,
+        })
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -1458,6 +1552,8 @@ async fn open_agent_picker_keeps_missing_threads_for_replay() -> Result<()> {
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: true,
         })
@@ -1493,6 +1589,8 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
             agent_nickname: Some("Robie".to_string()),
             agent_role: Some("explorer".to_string()),
             agent_path: None,
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: true,
         })
@@ -1515,6 +1613,9 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
         .record_sub_agent_activity(SubAgentActivityDisplay {
             thread_id,
             agent_path: "/root/child".to_string(),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
             is_running_hint: true,
         });
 
@@ -1524,6 +1625,8 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
         agent_nickname: None,
         agent_role: None,
         agent_path: Some("/root/child".to_string()),
+        model: None,
+        reasoning_effort: None,
         is_running: true,
         is_closed: false,
     };
@@ -1570,6 +1673,9 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
         .record_sub_agent_activity(SubAgentActivityDisplay {
             thread_id,
             agent_path: "/root/child".to_string(),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
             is_running_hint: true,
         });
 
@@ -1608,6 +1714,9 @@ async fn open_agent_picker_clears_running_hint_from_completed_snapshot() -> Resu
         .record_sub_agent_activity(SubAgentActivityDisplay {
             thread_id,
             agent_path: "/root/child".to_string(),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
             is_running_hint: true,
         });
     assert!(!app.agent_navigation.is_parent_owned(thread_id));
@@ -1620,6 +1729,8 @@ async fn open_agent_picker_clears_running_hint_from_completed_snapshot() -> Resu
             agent_nickname: None,
             agent_role: None,
             agent_path: Some("/root/child".to_string()),
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: false,
         })
@@ -1643,6 +1754,9 @@ async fn open_agent_picker_selects_path_backed_agent() -> Result<()> {
         .record_sub_agent_activity(SubAgentActivityDisplay {
             thread_id,
             agent_path: "/root/worker".to_string(),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
             is_running_hint: true,
         });
 
@@ -1682,6 +1796,9 @@ async fn open_agent_picker_refreshes_replay_only_path_backed_liveness() -> Resul
         .record_sub_agent_activity(SubAgentActivityDisplay {
             thread_id,
             agent_path: "/root/child".to_string(),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
             is_running_hint: true,
         });
 
@@ -1693,6 +1810,8 @@ async fn open_agent_picker_refreshes_replay_only_path_backed_liveness() -> Resul
             agent_nickname: None,
             agent_role: None,
             agent_path: Some("/root/child".to_string()),
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: true,
         })
@@ -1749,6 +1868,8 @@ async fn open_agent_picker_marks_terminal_read_errors_closed() -> Result<()> {
             agent_nickname: Some("Robie".to_string()),
             agent_role: Some("explorer".to_string()),
             agent_path: None,
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: true,
         })
@@ -1789,6 +1910,8 @@ fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
                 agent_nickname: None,
                 agent_role: None,
                 agent_path: None,
+                model: None,
+                reasoning_effort: None,
                 is_running: false,
                 is_closed: false,
             })
@@ -1878,6 +2001,9 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
             .record_sub_agent_activity(SubAgentActivityDisplay {
                 thread_id: child_thread_ids[0],
                 agent_path: "/root/child-0".to_string(),
+                agent_type: None,
+                model: None,
+                reasoning_effort: None,
                 is_running_hint: true,
             });
         app.thread_event_channels.remove(&child_thread_ids[1]);
@@ -1893,6 +2019,8 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                 agent_nickname: Some("child-0".to_string()),
                 agent_role: Some("worker".to_string()),
                 agent_path: Some("/root/child-0".to_string()),
+                model: None,
+                reasoning_effort: None,
                 is_running: true,
                 is_closed: false,
             })
@@ -2784,6 +2912,126 @@ async fn open_agent_picker_allows_existing_agent_threads_when_feature_is_disable
 }
 
 #[tokio::test]
+async fn agent_picker_selects_path_backed_child_and_main() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
+    let main_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.agent_navigation.upsert(
+        main_thread_id,
+        /*agent_nickname*/ None,
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.thread_event_channels.insert(
+        main_thread_id,
+        ThreadEventChannel::new_with_session(
+            /*capacity*/ 1,
+            test_thread_session(main_thread_id, PathBuf::from("/tmp")),
+            Vec::new(),
+        ),
+    );
+    app.activate_thread_channel(main_thread_id).await;
+    app.thread_event_channels.insert(
+        child_thread_id,
+        ThreadEventChannel::new_with_session(
+            /*capacity*/ 1,
+            test_thread_session(child_thread_id, PathBuf::from("/tmp")),
+            Vec::new(),
+        ),
+    );
+    app.agent_navigation
+        .record_sub_agent_activity(SubAgentActivityDisplay {
+            thread_id: child_thread_id,
+            agent_path: "/root/worker".to_string(),
+            agent_type: Some("task".to_string()),
+            model: Some("gpt-5.6-sol".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            is_running_hint: true,
+        });
+
+    app.show_agent_picker();
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    assert!(rendered.contains("/root/worker"), "{rendered}");
+    assert!(rendered.contains("task"), "{rendered}");
+    assert!(rendered.contains("gpt-5.6-sol"), "{rendered}");
+    assert!(rendered.contains("medium"), "{rendered}");
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    let Ok(AppEvent::SelectAgentThread(selected_thread_id)) = app_event_rx.try_recv() else {
+        panic!("child selection event not emitted");
+    };
+    assert_eq!(selected_thread_id, child_thread_id);
+    app.active_thread_id = Some(child_thread_id);
+
+    app.show_agent_picker();
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let selected_thread_id = (0..64)
+        .find_map(|_| match app_event_rx.try_recv() {
+            Ok(AppEvent::SelectAgentThread(thread_id)) => Some(thread_id),
+            Ok(_) | Err(_) => None,
+        })
+        .expect("Main selection event not emitted");
+    assert_eq!(selected_thread_id, main_thread_id);
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_picker_route_metadata_normal_and_narrow_snapshots() -> Result<()> {
+    let mut app = Box::pin(make_test_app()).await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000201").expect("valid thread");
+    let child_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000202").expect("valid thread");
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.agent_navigation.upsert(
+        main_thread_id,
+        /*agent_nickname*/ None,
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.thread_event_channels
+        .insert(main_thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    let child_channel = ThreadEventChannel::new(/*capacity*/ 2);
+    child_channel
+        .store
+        .lock()
+        .await
+        .push_notification(turn_started_notification(child_thread_id, "turn-child"));
+    app.thread_event_channels
+        .insert(child_thread_id, child_channel);
+    app.agent_navigation
+        .record_sub_agent_activity(SubAgentActivityDisplay {
+            thread_id: child_thread_id,
+            agent_path: "/root/reload_scout_canary_01".to_string(),
+            agent_type: Some("scout".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
+            reasoning_effort: Some(ReasoningEffortConfig::Medium),
+            is_running_hint: true,
+        });
+
+    app.show_agent_picker();
+
+    assert_app_snapshot!(
+        "agent_picker_route_metadata_normal",
+        render_bottom_popup(&app.chat_widget, /*width*/ 80)
+    );
+    assert_app_snapshot!(
+        "agent_picker_route_metadata_narrow",
+        render_bottom_popup(&app.chat_widget, /*width*/ 40)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn refresh_pending_thread_approvals_only_lists_inactive_threads() {
     let mut app = make_test_app().await;
     let main_thread_id =
@@ -3541,6 +3789,8 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
             agent_nickname: Some("Robie".to_string()),
             agent_role: Some("explorer".to_string()),
             agent_path: None,
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: false,
         })
@@ -5168,6 +5418,131 @@ async fn response_attempt_reset_removes_failed_stream_before_replacement() -> Re
         .join("\n");
     assert!(!rendered.contains("failed websocket output"));
     assert_app_snapshot!("response_attempt_reset_replacement", rendered);
+    Ok(())
+}
+
+#[tokio::test]
+async fn late_reasoning_summary_precedes_one_consolidated_answer() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.chat_widget.handle_server_notification(
+        ServerNotification::ReasoningSummaryTextDelta(
+            codex_app_server_protocol::ReasoningSummaryTextDeltaNotification {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                item_id: "reasoning-1".to_string(),
+                delta: "**Considered**\nLate summary".to_string(),
+                summary_index: 0,
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+    app.chat_widget.handle_server_notification(
+        agent_message_delta_notification(
+            ThreadId::new(),
+            "turn-1",
+            "message-1",
+            "first answer line\nsecond answer line\n",
+        ),
+        /*replay_kind*/ None,
+    );
+    app.chat_widget.on_commit_tick();
+    app.chat_widget.handle_server_notification(
+        ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: ThreadItem::Reasoning {
+                id: "reasoning-1".to_string(),
+                summary: vec!["**Considered**\nLate summary".to_string()],
+                content: Vec::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    app.chat_widget.handle_server_notification(
+        ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: ThreadItem::AgentMessage {
+                id: "message-1".to_string(),
+                text: "first answer line\nsecond answer line\n".to_string(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    while let Ok(event) = app_event_rx.try_recv() {
+        match event {
+            AppEvent::InsertHistoryCell(cell) => app.insert_history_cell(&mut tui, cell),
+            AppEvent::ConsolidateAgentMessage {
+                source,
+                cwd,
+                inline_visualization_context,
+                scrollback_reflow,
+                deferred_history_cell,
+            } => app.handle_consolidate_agent_message(
+                &mut tui,
+                source,
+                cwd,
+                inline_visualization_context,
+                scrollback_reflow,
+                deferred_history_cell,
+            )?,
+            _ => {}
+        }
+    }
+
+    assert!(
+        app.transcript_cells[0]
+            .as_any()
+            .is::<ReasoningSummaryCell>()
+    );
+    assert!(app.transcript_cells[1].as_any().is::<AgentMarkdownCell>());
+    let rendered = app
+        .render_transcript_lines_for_reflow(/*width*/ 80)
+        .lines
+        .iter()
+        .map(rendered_line_text)
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(rendered.matches("first answer line").count(), 1);
+    assert_eq!(rendered.matches("second answer line").count(), 1);
+    assert_app_snapshot!(
+        "late_reasoning_summary_before_consolidated_answer",
+        rendered
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn reasoning_summary_without_provisional_tail_preserves_receipt_order() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(PlainHistoryCell::new(vec![Line::from("answer")])),
+    );
+    app.insert_history_cell(
+        &mut tui,
+        Box::new(ReasoningSummaryCell::new(
+            "summary".to_string(),
+            "late summary".to_string(),
+            Path::new("/tmp"),
+            /*transcript_only*/ false,
+        )),
+    );
+
+    assert!(app.transcript_cells[0].as_any().is::<PlainHistoryCell>());
+    assert!(
+        app.transcript_cells[1]
+            .as_any()
+            .is::<ReasoningSummaryCell>()
+    );
     Ok(())
 }
 

@@ -470,6 +470,12 @@ impl ServerHandler for TestToolServer {
                 sleep(Duration::from_millis(10)).await;
             }
         }
+        if let Some(delay_ms) = std::env::var("MCP_TEST_INITIALIZE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            sleep(Duration::from_millis(delay_ms)).await;
+        }
         self.supports_openai_form_elicitation.store(
             request
                 .capabilities

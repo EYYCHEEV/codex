@@ -25,6 +25,9 @@ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHa
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
+use codex_config::McpServerConfig;
+use codex_config::McpServerTransportConfig;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
@@ -36,6 +39,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::items::SubAgentActivityItem;
+use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -180,12 +185,30 @@ where
     }
 }
 
+async fn list_agents_v2_for_test(
+    session: Arc<crate::session::session::Session>,
+    turn: Arc<TurnContext>,
+) -> ListAgentsResult {
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (content, success) = expect_text_output(output);
+    assert_eq!(success, Some(true));
+    serde_json::from_str(&content).expect("list_agents result should be json")
+}
+
 #[derive(Debug, Deserialize)]
 struct ListAgentsResult {
     agents: Vec<ListedAgentResult>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
     agent_type: String,
@@ -193,6 +216,87 @@ struct ListedAgentResult {
     reasoning_effort: Option<ReasoningEffort>,
     agent_status: serde_json::Value,
     mcp_startup: Option<codex_protocol::protocol::McpStartupSnapshot>,
+}
+
+async fn wait_for_started_activity(
+    rx_event: &async_channel::Receiver<codex_protocol::protocol::Event>,
+    agent_path: &str,
+) -> SubAgentActivityItem {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx_event.recv().await.expect("session event channel open");
+            if let EventMsg::ItemCompleted(completed) = event.msg
+                && let TurnItem::SubAgentActivity(activity) = completed.item
+                && activity.kind == codex_protocol::protocol::SubAgentActivityKind::Started
+                && activity.agent_path.as_str() == agent_path
+            {
+                break activity;
+            }
+        }
+    })
+    .await
+    .expect("Started activity should be emitted")
+}
+
+async fn wait_for_listed_agent(
+    session: &Arc<crate::session::session::Session>,
+    turn: &Arc<TurnContext>,
+    agent_name: &str,
+    predicate: impl Fn(&ListedAgentResult) -> bool,
+) -> ListedAgentResult {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let result = list_agents_v2_for_test(Arc::clone(session), Arc::clone(turn)).await;
+            if let Some(agent) = result
+                .agents
+                .iter()
+                .find(|agent| agent.agent_name == agent_name)
+                && predicate(agent)
+            {
+                break agent.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("list_agents should expose the expected child state")
+}
+
+async fn wait_for_mcp_startup_snapshot(
+    agent_control: &crate::agent::control::AgentControl,
+    agent_id: ThreadId,
+    predicate: impl Fn(&codex_protocol::protocol::McpStartupSnapshot) -> bool,
+) -> codex_protocol::protocol::McpStartupSnapshot {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(snapshot) = agent_control.get_mcp_startup_snapshot(agent_id).await
+                && predicate(&snapshot)
+            {
+                break snapshot;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the managed child should expose the expected MCP startup state")
+}
+
+async fn wait_for_agent_status(
+    agent_control: &crate::agent::control::AgentControl,
+    agent_id: ThreadId,
+    predicate: impl Fn(&AgentStatus) -> bool,
+) -> AgentStatus {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let status = agent_control.get_status(agent_id).await;
+            if predicate(&status) {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the managed child should expose the expected agent status")
 }
 
 #[derive(Debug, Deserialize)]
@@ -1089,9 +1193,195 @@ model_reasoning_effort = "medium"
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
+    let (mut session, turn, rx_event) = make_session_and_context_with_rx().await;
+    if let Some(startup_prewarm) = session.take_session_startup_prewarm().await {
+        startup_prewarm.abort().await;
+    }
+    let mut turn = turn
+        .with_model("gpt-5.6-sol".to_string(), &session.services.models_manager)
+        .await;
+    turn.reasoning_effort = Some(ReasoningEffort::High);
+    let mut root_config = (*turn.config).clone();
+    root_config.ephemeral = true;
+    root_config.model_reasoning_effort = Some(ReasoningEffort::High);
+    root_config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, root_config.clone());
+
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(root_config)
+        .await
+        .expect("root thread should start");
+    if let Some(startup_prewarm) = root.thread.session.take_session_startup_prewarm().await {
+        startup_prewarm.abort().await;
+    }
+    root.thread.session.new_default_turn().await;
+    {
+        let session_mut = Arc::get_mut(&mut session).expect("session should be uniquely owned");
+        session_mut.services.agent_control = manager.agent_control();
+        session_mut.thread_id = root.thread_id;
+    }
+
+    let ready_command = codex_utils_cargo_bin::cargo_bin("test_stdio_server")
+        .expect("test stdio server binary")
+        .to_string_lossy()
+        .to_string();
+    let server_config =
+        |transport: McpServerTransportConfig, startup_timeout_sec: Duration| McpServerConfig {
+            auth: Default::default(),
+            transport,
+            environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+            enabled: true,
+            required: false,
+            supports_parallel_tool_calls: false,
+            disabled_reason: None,
+            startup_timeout_sec: Some(startup_timeout_sec),
+            tool_timeout_sec: None,
+            default_tools_approval_mode: None,
+            enabled_tools: None,
+            disabled_tools: None,
+            scopes: None,
+            oauth: None,
+            oauth_resource: None,
+            tools: HashMap::new(),
+        };
+    let mut child_config = (*turn.config).clone();
+    child_config
+        .mcp_servers
+        .set(HashMap::from([
+            (
+                "ready".to_string(),
+                server_config(
+                    McpServerTransportConfig::Stdio {
+                        command: ready_command.clone(),
+                        args: Vec::new(),
+                        env: None,
+                        env_vars: Vec::new(),
+                        cwd: None,
+                    },
+                    Duration::from_secs(5),
+                ),
+            ),
+            (
+                "slow".to_string(),
+                server_config(
+                    McpServerTransportConfig::Stdio {
+                        command: ready_command,
+                        args: Vec::new(),
+                        env: Some(HashMap::from([(
+                            "MCP_TEST_INITIALIZE_DELAY_MS".to_string(),
+                            "10000".to_string(),
+                        )])),
+                        env_vars: Vec::new(),
+                        cwd: None,
+                    },
+                    Duration::from_secs(3),
+                ),
+            ),
+        ]))
+        .expect("test MCP config should satisfy constraints");
+    set_turn_config(&mut turn, child_config);
+    let turn = Arc::new(turn);
+
+    let spawn_worker = |task_name: &'static str| {
+        let session = Arc::clone(&session);
+        let turn = Arc::clone(&turn);
+        async move {
+            SpawnAgentHandlerV2::default()
+                .handle(invocation(
+                    session,
+                    turn,
+                    "spawn_agent",
+                    function_payload(json!({
+                        "message": "return the assigned result",
+                        "task_name": task_name,
+                        "fork_turns": "none"
+                    })),
+                ))
+                .await
+                .expect("native V2 child should spawn")
+        }
+    };
+
+    let output = spawn_worker("worker").await;
+    let (content, success) = expect_text_output(output);
+    assert_eq!(success, Some(true));
+    let spawn_result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(spawn_result["task_name"], "/root/worker");
+    assert_eq!(spawn_result["agent_type"], DEFAULT_ROLE_NAME);
+    assert_eq!(spawn_result["model"], "gpt-5.6-sol");
+    assert_eq!(spawn_result["reasoning_effort"], "high");
+    assert_eq!(spawn_result["route"], "preferred");
+    let activity = wait_for_started_activity(&rx_event, "/root/worker").await;
+    assert_eq!(activity.agent_type.as_deref(), Some(DEFAULT_ROLE_NAME));
+    assert_eq!(activity.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(activity.reasoning_effort, Some(ReasoningEffort::High));
+    let worker_id = activity.agent_thread_id;
+    let starting = wait_for_listed_agent(&session, &turn, "/root/worker", |agent| {
+        agent.mcp_startup.as_ref().is_some_and(|mcp| {
+            matches!(
+                mcp.statuses.get("ready"),
+                Some(codex_protocol::protocol::McpStartupStatus::Ready)
+            ) && matches!(
+                mcp.statuses.get("slow"),
+                Some(codex_protocol::protocol::McpStartupStatus::Starting)
+            ) && mcp.complete.is_none()
+        })
+    })
+    .await;
+    assert_eq!(starting.agent_type, DEFAULT_ROLE_NAME);
+    assert_eq!(starting.model, "gpt-5.6-sol");
+    assert_eq!(starting.reasoning_effort, Some(ReasoningEffort::High));
+    InterruptAgentHandler
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "interrupt_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
+        .await
+        .expect("interrupt_agent should interrupt MCP startup");
+    let interrupted =
+        wait_for_mcp_startup_snapshot(&session.services.agent_control, worker_id, |mcp| {
+            matches!(
+                mcp.statuses.get("slow"),
+                Some(codex_protocol::protocol::McpStartupStatus::Cancelled)
+            ) && mcp.complete.as_ref().is_some_and(|complete| {
+                complete.cancelled == vec!["slow"] && complete.ready == vec!["ready"]
+            }) && mcp.statuses.values().all(|status| {
+                !matches!(status, codex_protocol::protocol::McpStartupStatus::Starting)
+            })
+        })
+        .await;
+    let _ = wait_for_agent_status(&session.services.agent_control, worker_id, |status| {
+        matches!(status, AgentStatus::Interrupted)
+    })
+    .await;
+    let listed_interrupted = wait_for_listed_agent(&session, &turn, "/root/worker", |agent| {
+        agent.mcp_startup.as_ref() == Some(&interrupted)
+    })
+    .await;
+    assert_eq!(listed_interrupted.mcp_startup, Some(interrupted));
+
+    let shutdown_report = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    assert!(shutdown_report.submit_failed.is_empty());
+    assert!(shutdown_report.timed_out.is_empty());
+}
+
 #[tokio::test]
 async fn multi_agent_v2_typed_spawn_falls_back_from_unsupported_preferred_effort() {
-    let (mut session, turn) = make_session_and_context().await;
+    let (mut session, turn, rx_event) = make_session_and_context_with_rx().await;
+    if let Some(startup_prewarm) = session.take_session_startup_prewarm().await {
+        startup_prewarm.abort().await;
+    }
     let mut turn = turn
         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
         .await;
@@ -1118,16 +1408,22 @@ model_reasoning_effort = "max"
         .start_thread((*turn.config).clone())
         .await
         .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
-    session.thread_id = root.thread_id;
+    if let Some(startup_prewarm) = root.thread.session.take_session_startup_prewarm().await {
+        startup_prewarm.abort().await;
+    }
+    root.thread.session.new_default_turn().await;
+    let session_mut = Arc::get_mut(&mut session).expect("session should be uniquely owned");
+    session_mut.services.agent_control = manager.agent_control();
+    session_mut.thread_id = root.thread_id;
+    let turn = Arc::new(turn);
 
     let output = SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
         hide_agent_type_model_reasoning: true,
         ..Default::default()
     })
     .handle(invocation(
-        Arc::new(session),
-        Arc::new(turn),
+        Arc::clone(&session),
+        Arc::clone(&turn),
         "spawn_agent",
         function_payload(json!({
             "message": "return the assigned result",
@@ -1152,6 +1448,24 @@ model_reasoning_effort = "max"
             "fallback_reason": "preferred reasoning effort is unsupported by the active provider catalog"
         })
     );
+    let activity = wait_for_started_activity(&rx_event, "/root/unsupported_effort_worker").await;
+    assert_eq!(
+        (
+            activity.agent_type.as_deref(),
+            activity.model.as_deref(),
+            activity.reasoning_effort,
+        ),
+        (
+            Some("unsupported_effort_role"),
+            Some("gpt-5.4"),
+            Some(ReasoningEffort::High),
+        )
+    );
+    let shutdown_report = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    assert!(shutdown_report.submit_failed.is_empty());
+    assert!(shutdown_report.timed_out.is_empty());
 }
 
 #[tokio::test]
