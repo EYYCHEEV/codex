@@ -274,6 +274,13 @@ async fn handle_spawn_agent(
         .as_ref()
         .and_then(|snapshot| snapshot.session_source.get_nickname())
         .or(spawned_agent.metadata.agent_nickname);
+    let agent_type = spawned_agent
+        .metadata
+        .agent_role
+        .clone()
+        .unwrap_or_else(|| DEFAULT_ROLE_NAME.to_string());
+    let model = spawned_agent.model.clone();
+    let reasoning_effort = spawned_agent.reasoning_effort;
     emit_sub_agent_activity(
         &session,
         turn,
@@ -282,6 +289,9 @@ async fn handle_spawn_agent(
             agent_thread_id: new_thread_id,
             agent_path: new_agent_path.clone(),
             kind: SubAgentActivityKind::Started,
+            agent_type: Some(agent_type.clone()),
+            model: Some(model.clone()),
+            reasoning_effort: reasoning_effort.clone(),
         },
     )
     .await;
@@ -292,12 +302,6 @@ async fn handle_spawn_agent(
         &[("role", role_tag), ("version", "v2")],
     );
     let task_name = String::from(new_agent_path);
-    let agent_type = spawned_agent
-        .metadata
-        .agent_role
-        .unwrap_or_else(|| DEFAULT_ROLE_NAME.to_string());
-    let model = spawned_agent.model;
-    let reasoning_effort = spawned_agent.reasoning_effort;
     let (route, fallback_reason) = route.into_report();
 
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;

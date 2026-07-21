@@ -1,7 +1,7 @@
 //! Multi-agent picker navigation and labeling state for the TUI app.
 //!
 //! This module exists to keep the pure parts of multi-agent navigation out of [`crate::app::App`].
-//! It owns the stable spawn-order cache used by the `/subagents` picker, keyboard next/previous
+//! It owns the stable spawn-order cache used by the `/agent` picker, keyboard next/previous
 //! navigation, and the contextual footer label for the thread currently being watched.
 //!
 //! Responsibilities here are intentionally narrow:
@@ -21,7 +21,7 @@
 
 use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::SubAgentActivityDisplay;
-use crate::multi_agents::format_agent_picker_item_name;
+use crate::multi_agents::format_agent_picker_entry_name;
 use crate::multi_agents::next_agent_shortcut;
 use crate::multi_agents::previous_agent_shortcut;
 use codex_protocol::ThreadId;
@@ -122,21 +122,26 @@ impl AgentNavigationState {
         if !self.threads.contains_key(&thread_id) {
             self.order.push(thread_id);
         }
-        let (previous_agent_path, previous_is_running) = self
+        let entry = self
             .threads
-            .get(&thread_id)
-            .map(|entry| (entry.agent_path.clone(), entry.is_running))
-            .unwrap_or((None, false));
-        self.threads.insert(
-            thread_id,
-            AgentPickerThreadEntry {
-                agent_nickname,
-                agent_role,
-                agent_path: previous_agent_path,
-                is_running: previous_is_running && !is_closed,
-                is_closed,
-            },
-        );
+            .entry(thread_id)
+            .or_insert_with(|| AgentPickerThreadEntry {
+                agent_nickname: None,
+                agent_role: None,
+                agent_path: None,
+                model: None,
+                reasoning_effort: None,
+                is_running: false,
+                is_closed: false,
+            });
+        if agent_nickname.is_some() {
+            entry.agent_nickname = agent_nickname;
+        }
+        if agent_role.is_some() {
+            entry.agent_role = agent_role;
+        }
+        entry.is_running = entry.is_running && !is_closed;
+        entry.is_closed = is_closed;
     }
 
     pub(crate) fn record_sub_agent_activity(&mut self, activity: SubAgentActivityDisplay) {
@@ -150,10 +155,21 @@ impl AgentNavigationState {
                     agent_nickname: None,
                     agent_role: None,
                     agent_path: None,
+                    model: None,
+                    reasoning_effort: None,
                     is_running: false,
                     is_closed: false,
                 });
         entry.agent_path = Some(activity.agent_path);
+        if activity.agent_type.is_some() {
+            entry.agent_role = activity.agent_type;
+        }
+        if activity.model.is_some() {
+            entry.model = activity.model;
+        }
+        if activity.reasoning_effort.is_some() {
+            entry.reasoning_effort = activity.reasoning_effort;
+        }
         if activity.is_running_hint
             && !entry.is_closed
             && !self.stopped_threads.contains(&activity.thread_id)
@@ -230,7 +246,7 @@ impl AgentNavigationState {
     ///
     /// This is reserved for entries that were only discovered opportunistically and never became
     /// replayable local threads. Keeping those around after the backend confirms they are gone
-    /// would leave ghost rows in `/subagents`.
+    /// would leave ghost rows in `/agent`.
     pub(crate) fn remove(&mut self, thread_id: ThreadId) {
         self.threads.remove(&thread_id);
         self.order.retain(|candidate| *candidate != thread_id);
@@ -339,29 +355,23 @@ impl AgentNavigationState {
             self.threads
                 .get(&thread_id)
                 .map(|entry| {
-                    if !is_primary
-                        && let Some(agent_path) = entry
-                            .agent_path
-                            .as_deref()
-                            .filter(|agent_path| !agent_path.trim().is_empty())
-                    {
-                        return format!("`{agent_path}`");
-                    }
-                    format_agent_picker_item_name(
+                    format_agent_picker_entry_name(
+                        entry.agent_path.as_deref(),
                         entry.agent_nickname.as_deref(),
                         entry.agent_role.as_deref(),
                         is_primary,
                     )
                 })
                 .unwrap_or_else(|| {
-                    format_agent_picker_item_name(
-                        /*agent_nickname*/ None, /*agent_role*/ None, is_primary,
+                    format_agent_picker_entry_name(
+                        /*agent_path*/ None, /*agent_nickname*/ None,
+                        /*agent_role*/ None, is_primary,
                     )
                 }),
         )
     }
 
-    /// Builds the `/subagents` picker subtitle from the same canonical bindings used by key handling.
+    /// Builds the `/agent` picker subtitle from the same canonical bindings used by key handling.
     ///
     /// Keeping this text derived from the actual shortcut helpers prevents the picker copy from
     /// drifting if the bindings ever change on one platform.
@@ -498,6 +508,42 @@ mod tests {
 
         assert!(subtitle.contains(previous.content.as_ref()));
         assert!(subtitle.contains(next.content.as_ref()));
+    }
+
+    #[test]
+    fn metadata_free_activity_preserves_observed_effective_route() {
+        let mut state = AgentNavigationState::default();
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000104").expect("valid thread");
+        state.record_sub_agent_activity(SubAgentActivityDisplay {
+            thread_id,
+            agent_path: "/root/scout".to_string(),
+            agent_type: Some("scout".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
+            reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+            is_running_hint: true,
+        });
+        state.record_sub_agent_activity(SubAgentActivityDisplay {
+            thread_id,
+            agent_path: "/root/scout".to_string(),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
+            is_running_hint: false,
+        });
+
+        assert_eq!(
+            state.get(&thread_id),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: None,
+                agent_role: Some("scout".to_string()),
+                agent_path: Some("/root/scout".to_string()),
+                model: Some("gpt-5.6-terra".to_string()),
+                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium,),
+                is_running: false,
+                is_closed: false,
+            })
+        );
     }
 
     #[test]

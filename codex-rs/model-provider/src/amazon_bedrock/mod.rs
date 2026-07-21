@@ -317,12 +317,34 @@ impl ModelProvider for AmazonBedrockModelProvider {
         _scope: ProviderAuthScope,
     ) -> ModelProviderFuture<'_, Result<ProviderRequestSetup>> {
         Box::pin(async move {
+            if self.info.has_command_auth() {
+                let effective_auth = self.auth().await;
+                return Ok(ProviderRequestSetup {
+                    api_provider: self.api_provider().await?,
+                    api_auth: self.api_auth().await?,
+                    transport_auth_binding: transport_binding_for_auth(effective_auth.as_ref()),
+                    effective_auth,
+                    agent_identity_telemetry: None,
+                    managed_snapshot: None,
+                    managed_id: None,
+                    credential_revision: None,
+                    account_state_revision: None,
+                    selection_revision: None,
+                });
+            }
+            let source = self.auth_source();
             let managed_auth = self.managed_auth();
-            let effective_auth = managed_auth.clone().map(CodexAuth::BedrockApiKey);
+            let effective_auth = managed_auth.clone();
             let mut api_provider_info = self.info.clone();
             api_provider_info.base_url = self.runtime_base_url().await?;
             let api_provider = api_provider_info.to_api_provider(/*auth_mode*/ None)?;
-            let api_auth = resolve_bedrock_provider_auth(managed_auth.as_ref(), &self.aws).await?;
+            let api_auth = resolve_bedrock_provider_auth(
+                source,
+                managed_auth.as_ref(),
+                &self.aws,
+                self.endpoint,
+            )
+            .await?;
             let transport_auth_binding = transport_binding_for_auth(effective_auth.as_ref());
             Ok(ProviderRequestSetup {
                 effective_auth,

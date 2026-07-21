@@ -3841,6 +3841,7 @@ mod tests {
                         "secondary": null,
                         "credits": null,
                         "individualLimit": null,
+                        "spendControlReached": null,
                         "planType": null,
                         "rateLimitReachedType": null
                     }

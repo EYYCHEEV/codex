@@ -416,7 +416,7 @@ fn parent_owned_command_is_allowed(command: SlashCommand, args: &str) -> bool {
                 | SlashCommand::Side
                 | SlashCommand::Btw
                 | SlashCommand::Agents
-                | SlashCommand::MultiAgents
+                | SlashCommand::Agent
                 | SlashCommand::Vim
                 | SlashCommand::Keymap
                 | SlashCommand::ElevateSandbox
@@ -5160,7 +5160,8 @@ mod tests {
     fn parent_owned_thread_allows_bare_navigation_commands() {
         for (command, expected) in [
             ("/agents", SlashCommand::Agents),
-            ("/subagents", SlashCommand::MultiAgents),
+            ("/agent", SlashCommand::Agent),
+            ("/subagents", SlashCommand::Agent),
             ("/side", SlashCommand::Side),
             ("/btw", SlashCommand::Btw),
             ("/diff ", SlashCommand::Diff),

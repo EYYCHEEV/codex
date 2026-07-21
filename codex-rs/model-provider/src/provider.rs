@@ -873,7 +873,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let managed_id = auth_manager
@@ -931,7 +931,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let identity = auth_manager
@@ -982,7 +982,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let identity = auth_manager
@@ -1038,7 +1038,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let first_id = pool_manager
@@ -1185,7 +1185,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         pool_manager
@@ -1239,7 +1239,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         auth_manager
@@ -1314,7 +1314,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         auth_manager
@@ -1362,7 +1362,7 @@ mod tests {
     #[tokio::test]
     async fn request_setup_gives_explicit_provider_bearer_precedence_over_managed_auth() {
         let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
-        provider_info.experimental_bearer_token = Some("provider-token".to_string());
+        provider_info.experimental_bearer_token = Some("provider-token".to_string().into());
         let provider = create_model_provider(
             provider_info,
             Some(AuthManager::from_auth_for_testing(
