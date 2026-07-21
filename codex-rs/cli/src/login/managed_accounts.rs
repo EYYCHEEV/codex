@@ -1,8 +1,10 @@
 use super::load_config_or_exit;
 use super::safe_format_key;
 use crate::load_cli_auth_projection;
+#[path = "managed_accounts_status.rs"]
+mod status;
+
 use codex_backend_client::Client as BackendClient;
-use codex_backend_client::TokenUsageProfile;
 #[cfg(test)]
 use codex_config::types::AuthCredentialsStoreMode;
 #[cfg(test)]
@@ -10,23 +12,26 @@ use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::ManagedChatgptAccountView;
-use codex_login::ManagedChatgptBlockKindView;
-use codex_login::ManagedChatgptEligibility;
 use codex_login::ManagedChatgptLimitKind;
 use codex_login::ManagedChatgptRateObservation;
 use codex_login::ManagedChatgptRateWindowView;
 use codex_login::ManagedChatgptSelectionScope;
 use codex_login::ManagedChatgptStatusObservation;
 use codex_login::ManagedChatgptTokenObservation;
-use codex_login::ManagedChatgptTokenState;
-use codex_login::ManagedChatgptTokenUsageSummary;
-use codex_login::ManagedChatgptUsageState;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_utils_cli::CliConfigOverrides;
+use status::ResetCreditPresentation;
+use status::format_managed_login_status;
+#[cfg(test)]
+use status::format_managed_login_status_at;
+use std::collections::HashMap;
+use std::future::Future;
 use std::io::BufRead;
 use std::io::IsTerminal;
 use std::io::Write;
+use std::sync::Arc;
+use tokio::task::JoinSet;
 
 fn rate_windows_from_backend(
     snapshots: Vec<RateLimitSnapshot>,
@@ -76,305 +81,195 @@ fn rate_windows_from_backend(
     windows
 }
 
-fn token_usage_summary(profile: &TokenUsageProfile) -> ManagedChatgptTokenUsageSummary {
-    ManagedChatgptTokenUsageSummary {
-        lifetime_tokens: profile.stats.lifetime_tokens,
-        peak_daily_tokens: profile.stats.peak_daily_tokens,
-        longest_running_turn_sec: profile.stats.longest_running_turn_sec,
-        current_streak_days: profile.stats.current_streak_days,
-        longest_streak_days: profile.stats.longest_streak_days,
+struct ManagedStatusFetch {
+    identity: String,
+    credential_revision: u64,
+    state_revision: u64,
+    observation: ManagedChatgptStatusObservation,
+    reset_credits: Option<ResetCreditPresentation>,
+}
+
+async fn run_bounded<I, F, Fut, T>(items: I, limit: usize, mut task: F) -> Vec<T>
+where
+    I: IntoIterator,
+    I::Item: Send + 'static,
+    F: FnMut(I::Item) -> Fut,
+    Fut: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut items = items.into_iter().enumerate();
+    let mut tasks = JoinSet::new();
+    for _ in 0..limit.max(1) {
+        let Some((index, item)) = items.next() else {
+            break;
+        };
+        let future = task(item);
+        tasks.spawn(async move { (index, future.await) });
     }
+
+    let mut completed = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        if let Ok(result) = result {
+            completed.push(result);
+        }
+        if let Some((index, item)) = items.next() {
+            let future = task(item);
+            tasks.spawn(async move { (index, future.await) });
+        }
+    }
+    completed.sort_by_key(|(index, _)| *index);
+    completed.into_iter().map(|(_, value)| value).collect()
+}
+
+async fn fetch_managed_login_status_account(
+    auth_manager: Arc<AuthManager>,
+    chatgpt_base_url: &str,
+    account: ManagedChatgptAccountView,
+) -> Option<ManagedStatusFetch> {
+    const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let snapshot = match auth_manager
+        .refresh_managed_chatgpt_account_bounded(&account.identity_key, FETCH_TIMEOUT)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(_) => {
+            let snapshot = auth_manager
+                .managed_chatgpt_auth_snapshot_for_identity(&account.identity_key)
+                .await
+                .ok()
+                .flatten()?;
+            return Some(ManagedStatusFetch {
+                identity: snapshot.identity_key,
+                credential_revision: snapshot.account_revision,
+                state_revision: snapshot.account_state_revision,
+                observation: ManagedChatgptStatusObservation {
+                    observed_at: chrono::Utc::now(),
+                    rate: ManagedChatgptRateObservation::Unavailable {
+                        reason: "managed token refresh failed".to_string(),
+                    },
+                    token: ManagedChatgptTokenObservation::NotObserved,
+                },
+                reset_credits: None,
+            });
+        }
+    };
+    let identity = snapshot.identity_key.clone();
+    let client = match BackendClient::from_auth(chatgpt_base_url.to_string(), &snapshot.auth) {
+        Ok(client) => client,
+        Err(_) => {
+            return Some(ManagedStatusFetch {
+                identity,
+                credential_revision: snapshot.account_revision,
+                state_revision: snapshot.account_state_revision,
+                observation: ManagedChatgptStatusObservation {
+                    observed_at: chrono::Utc::now(),
+                    rate: ManagedChatgptRateObservation::Unavailable {
+                        reason: "backend client unavailable".to_string(),
+                    },
+                    token: ManagedChatgptTokenObservation::NotObserved,
+                },
+                reset_credits: None,
+            });
+        }
+    };
+
+    let (rate, reset_credits) = match tokio::time::timeout(
+        FETCH_TIMEOUT,
+        client.get_rate_limits_with_reset_credits(),
+    )
+    .await
+    {
+        Ok(Ok(response)) => {
+            let windows = rate_windows_from_backend(response.rate_limits);
+            let rate = if windows.is_empty() {
+                ManagedChatgptRateObservation::Unavailable {
+                    reason: "rate limit usage unavailable".to_string(),
+                }
+            } else {
+                ManagedChatgptRateObservation::Available(windows)
+            };
+            let reset_credits =
+                response
+                    .rate_limit_reset_credits
+                    .map(|summary| ResetCreditPresentation {
+                        available_count: summary.available_count.max(0),
+                        soonest_expiry: None,
+                    });
+            let reset_credits = if reset_credits
+                .as_ref()
+                .is_some_and(|summary| summary.available_count > 0)
+            {
+                match tokio::time::timeout(FETCH_TIMEOUT, client.list_rate_limit_reset_credits())
+                    .await
+                {
+                    Ok(Ok(details)) => Some(ResetCreditPresentation {
+                        available_count: reset_credits
+                            .as_ref()
+                            .map_or(0, |summary| summary.available_count),
+                        soonest_expiry: details
+                            .credits
+                            .iter()
+                            .filter(|credit| credit.status.eq_ignore_ascii_case("available"))
+                            .filter_map(|credit| credit.expires_at.as_deref())
+                            .filter_map(|expiry| chrono::DateTime::parse_from_rfc3339(expiry).ok())
+                            .map(|expiry| expiry.with_timezone(&chrono::Utc))
+                            .min(),
+                    }),
+                    Ok(Err(_)) | Err(_) => reset_credits,
+                }
+            } else {
+                reset_credits
+            };
+            (rate, reset_credits)
+        }
+        Ok(Err(_)) | Err(_) => (
+            ManagedChatgptRateObservation::Unavailable {
+                reason: "rate limit usage unavailable".to_string(),
+            },
+            None,
+        ),
+    };
+
+    Some(ManagedStatusFetch {
+        identity,
+        credential_revision: snapshot.account_revision,
+        state_revision: snapshot.account_state_revision,
+        observation: ManagedChatgptStatusObservation {
+            observed_at: chrono::Utc::now(),
+            rate,
+            token: ManagedChatgptTokenObservation::NotObserved,
+        },
+        reset_credits,
+    })
 }
 
 async fn refresh_managed_login_status(
-    auth_manager: &AuthManager,
+    auth_manager: Arc<AuthManager>,
     chatgpt_base_url: &str,
     accounts: &[ManagedChatgptAccountView],
-) {
-    const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    for account in accounts {
-        let snapshot = match auth_manager
-            .refresh_managed_chatgpt_account_bounded(&account.identity_key, FETCH_TIMEOUT)
-            .await
+) -> HashMap<String, ResetCreditPresentation> {
+    const CONCURRENCY_LIMIT: usize = 3;
+    let base_url = chatgpt_base_url.to_string();
+    let task_auth_manager = Arc::clone(&auth_manager);
+    let fetched = run_bounded(accounts.to_vec(), CONCURRENCY_LIMIT, move |account| {
+        let auth_manager = Arc::clone(&task_auth_manager);
+        let base_url = base_url.clone();
+        async move { fetch_managed_login_status_account(auth_manager, &base_url, account).await }
+    })
+    .await;
+    let mut reset_credits = HashMap::new();
+    for fetch in fetched.into_iter().flatten() {
+        if let Ok(Some(updated)) = auth_manager.record_managed_chatgpt_status_observation(
+            &fetch.identity,
+            fetch.credential_revision,
+            fetch.state_revision,
+            fetch.observation,
+        ) && let Some(summary) = fetch.reset_credits
         {
-            Ok(snapshot) => snapshot,
-            Err(_) => {
-                let current_revisions = auth_manager
-                    .managed_chatgpt_auth_snapshot_for_identity(&account.identity_key)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|snapshot| (snapshot.account_revision, snapshot.account_state_revision));
-                if let Some((credential_revision, state_revision)) = current_revisions {
-                    let _ = auth_manager.record_managed_chatgpt_status_observation(
-                        &account.identity_key,
-                        credential_revision,
-                        state_revision,
-                        ManagedChatgptStatusObservation {
-                            observed_at: chrono::Utc::now(),
-                            rate: ManagedChatgptRateObservation::Unavailable {
-                                reason: "managed token refresh failed".to_string(),
-                            },
-                            token: ManagedChatgptTokenObservation::Unavailable {
-                                reason: "managed token refresh failed".to_string(),
-                            },
-                        },
-                    );
-                }
-                continue;
-            }
-        };
-        let identity = snapshot.identity_key.clone();
-        let client = match BackendClient::from_auth(chatgpt_base_url.to_string(), &snapshot.auth) {
-            Ok(client) => client,
-            Err(_) => {
-                let _ = auth_manager.record_managed_chatgpt_status_observation(
-                    &identity,
-                    snapshot.account_revision,
-                    snapshot.account_state_revision,
-                    ManagedChatgptStatusObservation {
-                        observed_at: chrono::Utc::now(),
-                        rate: ManagedChatgptRateObservation::Unavailable {
-                            reason: "backend client unavailable".to_string(),
-                        },
-                        token: ManagedChatgptTokenObservation::Unavailable {
-                            reason: "backend client unavailable".to_string(),
-                        },
-                    },
-                );
-                continue;
-            }
-        };
-
-        let rate = match tokio::time::timeout(FETCH_TIMEOUT, client.get_rate_limits_many()).await {
-            Ok(Ok(snapshots)) => {
-                let windows = rate_windows_from_backend(snapshots);
-                if windows.is_empty() {
-                    ManagedChatgptRateObservation::Unavailable {
-                        reason: "rate limit usage unavailable".to_string(),
-                    }
-                } else {
-                    ManagedChatgptRateObservation::Available(windows)
-                }
-            }
-            Ok(Err(_)) | Err(_) => ManagedChatgptRateObservation::Unavailable {
-                reason: "rate limit usage unavailable".to_string(),
-            },
-        };
-
-        let token =
-            match tokio::time::timeout(FETCH_TIMEOUT, client.get_token_usage_profile()).await {
-                Ok(Ok(profile)) => {
-                    ManagedChatgptTokenObservation::Available(token_usage_summary(&profile))
-                }
-                Ok(Err(_)) | Err(_) => ManagedChatgptTokenObservation::Unavailable {
-                    reason: "token usage unavailable".to_string(),
-                },
-            };
-
-        let _ = auth_manager.record_managed_chatgpt_status_observation(
-            &identity,
-            snapshot.account_revision,
-            snapshot.account_state_revision,
-            ManagedChatgptStatusObservation {
-                observed_at: chrono::Utc::now(),
-                rate,
-                token,
-            },
-        );
-    }
-}
-
-fn format_managed_login_status(
-    accounts: &[ManagedChatgptAccountView],
-    selected_account_id: Option<&str>,
-) -> String {
-    let mut output = String::from("Logged in using managed ChatGPT accounts\n");
-    for account in accounts {
-        let marker = if selected_account_id == Some(account.identity_key.as_str()) {
-            "*"
-        } else {
-            " "
-        };
-        let label = account
-            .normalized_email
-            .as_deref()
-            .or(account.chatgpt_account_id.as_deref())
-            .unwrap_or(&account.identity_key);
-        output.push_str(&format!("{marker} {label} ({})\n", account.identity_key));
-        output.push_str(&format!(
-            "  account: {}\n",
-            account.chatgpt_account_id.as_deref().unwrap_or("unknown")
-        ));
-        output.push_str(&format!(
-            "  plan: {}\n",
-            account.plan.as_deref().unwrap_or("unknown")
-        ));
-        let (eligibility, block) = match &account.eligibility {
-            ManagedChatgptEligibility::Eligible => ("eligible", "none".to_string()),
-            ManagedChatgptEligibility::Blocked => {
-                let kind = match account.block_kind {
-                    Some(ManagedChatgptBlockKindView::AuthInvalid) => "auth invalid",
-                    Some(ManagedChatgptBlockKindView::Quota) => "quota",
-                    Some(ManagedChatgptBlockKindView::Workspace) => "workspace quota",
-                    None => "active",
-                };
-                let reset = account
-                    .block_reset_at
-                    .map(|reset| format!(", resets {}", reset.to_rfc3339()))
-                    .unwrap_or_default();
-                ("ineligible: blocked", format!("{kind}{reset}"))
-            }
-            ManagedChatgptEligibility::ForcedWorkspaceDisallowed => {
-                ("ineligible: workspace not allowed", "none".to_string())
-            }
-            ManagedChatgptEligibility::PendingRemoval => {
-                ("ineligible: pending removal", "pending removal".to_string())
-            }
-        };
-        output.push_str(&format!("  eligibility: {eligibility}\n"));
-        output.push_str(&format!("  block: {block}\n"));
-        let refresh_unavailable = match account.refresh_status {
-            codex_login::ManagedChatgptRefreshStatus::Healthy => {
-                output.push_str("  refresh: healthy\n");
-                false
-            }
-            codex_login::ManagedChatgptRefreshStatus::TransientUnavailable {
-                observed_at, ..
-            } => {
-                output.push_str(&format!(
-                    "  refresh: temporarily unavailable, observed {}\n",
-                    observed_at.to_rfc3339()
-                ));
-                true
-            }
-            codex_login::ManagedChatgptRefreshStatus::ReloginRequired { observed_at, .. } => {
-                output.push_str(&format!(
-                    "  refresh: relogin required, observed {}\n",
-                    observed_at.to_rfc3339()
-                ));
-                true
-            }
-        };
-
-        let usage_label = match account.usage_state {
-            ManagedChatgptUsageState::Unknown if refresh_unavailable => "unavailable",
-            ManagedChatgptUsageState::Unknown => "unknown",
-            ManagedChatgptUsageState::Fresh if refresh_unavailable => "fresh (refresh unavailable)",
-            ManagedChatgptUsageState::Fresh => "fresh",
-            ManagedChatgptUsageState::Stale if refresh_unavailable => "stale (refresh unavailable)",
-            ManagedChatgptUsageState::Stale => "stale",
-            ManagedChatgptUsageState::Unavailable
-                if account
-                    .usage
-                    .as_ref()
-                    .is_some_and(|usage| usage.stale && !usage.rate_windows.is_empty()) =>
-            {
-                "stale (refresh unavailable)"
-            }
-            ManagedChatgptUsageState::Unavailable
-                if account
-                    .usage
-                    .as_ref()
-                    .is_some_and(|usage| !usage.rate_windows.is_empty()) =>
-            {
-                "fresh (refresh unavailable)"
-            }
-            ManagedChatgptUsageState::Unavailable => "unavailable",
-        };
-        if let Some(usage) = account
-            .usage
-            .as_ref()
-            .filter(|usage| !usage.rate_windows.is_empty() || usage.token_usage.is_some())
-        {
-            output.push_str(&format!("  observed: {}\n", usage.observed_at.to_rfc3339()));
-        }
-        output.push_str(&format!("  usage: {usage_label}\n"));
-        if let Some(observed_at) = account.usage_unavailable_observed_at {
-            output.push_str(&format!(
-                "  usage unavailable observed: {}\n",
-                observed_at.to_rfc3339()
-            ));
-        }
-        if let Some(reason) = &account.usage_unavailable_reason {
-            output.push_str(&format!("  usage unavailable reason: {reason}\n"));
-        }
-        if let Some(usage) = &account.usage {
-            for window in &usage.rate_windows {
-                let duration = match window.window_duration_mins {
-                    Some(300) => Some("5h".to_string()),
-                    Some(10_080) => Some("weekly".to_string()),
-                    Some(minutes) if minutes % 1_440 == 0 => Some(format!("{}d", minutes / 1_440)),
-                    Some(minutes) if minutes % 60 == 0 => Some(format!("{}h", minutes / 60)),
-                    Some(minutes) => Some(format!("{minutes}m")),
-                    None => None,
-                };
-                let label = match (window.kind, duration) {
-                    (ManagedChatgptLimitKind::Primary, Some(duration)) => {
-                        format!("primary {duration}")
-                    }
-                    (ManagedChatgptLimitKind::Primary, None) => "primary".to_string(),
-                    (ManagedChatgptLimitKind::Secondary, Some(duration)) => {
-                        format!("secondary {duration}")
-                    }
-                    (ManagedChatgptLimitKind::Secondary, None) => "secondary".to_string(),
-                    (ManagedChatgptLimitKind::Additional, Some(duration)) => {
-                        format!("additional {} {duration}", window.limit_id)
-                    }
-                    (ManagedChatgptLimitKind::Additional, None) => {
-                        format!("additional {}", window.limit_id)
-                    }
-                };
-                let remaining = window
-                    .remaining_percent
-                    .map(|percent| format!("{percent:.0}% remaining"))
-                    .unwrap_or_else(|| "unknown remaining".to_string());
-                let reset = window
-                    .reset_at
-                    .map(|reset| reset.to_rfc3339())
-                    .unwrap_or_else(|| "unknown".to_string());
-                output.push_str(&format!("  {label}: {remaining}, resets {reset}\n"));
-            }
-        }
-        let token_unavailable = account.token_state == ManagedChatgptTokenState::Unavailable;
-        let token_usage = account
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.token_usage.as_ref());
-        if let Some(stats) = token_usage {
-            let value = |value: Option<i64>| {
-                value
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "unknown".to_string())
-            };
-            let status = if token_unavailable {
-                " (refresh unavailable)"
-            } else {
-                ""
-            };
-            output.push_str(&format!(
-                "  tokens: lifetime {}, peak daily {}, longest turn {}s, streak {}d{status}\n",
-                value(stats.lifetime_tokens),
-                value(stats.peak_daily_tokens),
-                value(stats.longest_running_turn_sec),
-                value(stats.longest_streak_days),
-            ));
-        } else if token_unavailable {
-            output.push_str("  tokens: unavailable\n");
-        } else {
-            output.push_str("  tokens: unknown\n");
-        }
-        if let Some(observed_at) = account.token_unavailable_observed_at {
-            output.push_str(&format!(
-                "  token unavailable observed: {}\n",
-                observed_at.to_rfc3339()
-            ));
-        }
-        if let Some(reason) = &account.token_unavailable_reason {
-            output.push_str(&format!("  token unavailable reason: {reason}\n"));
+            reset_credits.insert(updated.identity_key, summary);
         }
     }
-    output
+    reset_credits
 }
 
 fn is_managed_api_auth_mode(mode: AuthMode) -> bool {
@@ -448,7 +343,10 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
                     println!(
                         "External ChatGPT auth is active; preserved managed accounts are inactive."
                     );
-                    print!("{}", format_managed_login_status(&accounts, None));
+                    print!(
+                        "{}",
+                        format_managed_login_status(&accounts, None, &HashMap::new())
+                    );
                 } else {
                     eprintln!("{status}");
                 }
@@ -469,8 +367,12 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
         }
     };
     if !managed.accounts.is_empty() {
-        refresh_managed_login_status(auth_manager, &config.chatgpt_base_url, &managed.accounts)
-            .await;
+        let reset_credits = refresh_managed_login_status(
+            Arc::clone(&auth_projection.auth_manager),
+            &config.chatgpt_base_url,
+            &managed.accounts,
+        )
+        .await;
         let refreshed = auth_manager
             .list_managed_chatgpt_accounts(&scope)
             .await
@@ -480,6 +382,7 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
             format_managed_login_status(
                 &refreshed.accounts,
                 refreshed.selected_account_id.as_deref(),
+                &reset_credits,
             )
         );
         std::process::exit(0);

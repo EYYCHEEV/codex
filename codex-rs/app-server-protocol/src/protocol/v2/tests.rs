@@ -3033,20 +3033,26 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
 
     let sub_agent_activity_item = TurnItem::SubAgentActivity(SubAgentActivityItem {
         id: "activity-1".to_string(),
-        kind: CoreSubAgentActivityKind::Interrupted,
+        kind: CoreSubAgentActivityKind::Started,
         agent_thread_id: receiver_thread_id,
         agent_path: codex_protocol::AgentPath::root()
             .join("worker")
             .expect("worker path"),
+        agent_type: Some("scout".to_string()),
+        model: Some("gpt-5.6-terra".to_string()),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
     });
 
     assert_eq!(
         ThreadItem::from(sub_agent_activity_item),
         ThreadItem::SubAgentActivity {
             id: "activity-1".to_string(),
-            kind: SubAgentActivityKind::Interrupted,
+            kind: SubAgentActivityKind::Started,
             agent_thread_id: receiver_thread_id.to_string(),
             agent_path: "/root/worker".to_string(),
+            agent_type: Some("scout".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
+            reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
         }
     );
 

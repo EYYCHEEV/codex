@@ -39,7 +39,6 @@ fn managed_test_key_with_route(
     base_url: &str,
 ) -> ConnectorRuntimeContextKey {
     let identity_key = chatgpt_user_id
-        .clone()
         .or_else(|| account_id.clone())
         .unwrap_or_else(|| "test-account".to_string());
     ConnectorRuntimeContextKey::from_transport_binding(

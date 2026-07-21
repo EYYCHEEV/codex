@@ -122,6 +122,9 @@ pub(crate) async fn handle_message_string_tool(
             agent_thread_id: receiver_thread_id,
             agent_path: receiver_agent_path,
             kind: SubAgentActivityKind::Interacted,
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
         },
     )
     .await;

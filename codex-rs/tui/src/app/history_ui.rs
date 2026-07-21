@@ -3,6 +3,7 @@
 //! This module owns rendering the fresh session header, clearing inline or alternate-screen UI
 //! state, and resetting transcript-related app state after `/clear` or Ctrl-L.
 
+use super::resize_reflow::trailing_run_start;
 use super::*;
 
 const DESKTOP_THREAD_OPENED_MESSAGE: &str = "Opened this session in the Desktop app.";
@@ -10,6 +11,24 @@ const DESKTOP_THREAD_OPENED_MESSAGE: &str = "Opened this session in the Desktop 
 impl App {
     pub(super) fn insert_history_cell(&mut self, tui: &mut tui::Tui, cell: Box<dyn HistoryCell>) {
         let cell: Arc<dyn HistoryCell> = cell.into();
+        if cell.as_any().is::<history_cell::ReasoningSummaryCell>() {
+            let answer_start =
+                trailing_run_start::<history_cell::AgentMessageCell>(&self.transcript_cells);
+            if answer_start < self.transcript_cells.len() {
+                self.transcript_cells.insert(answer_start, cell);
+                if let Some(Overlay::Transcript(transcript)) = &mut self.overlay {
+                    transcript.replace_cells(self.transcript_cells.clone());
+                    tui.frame_requester().schedule_frame();
+                }
+                if let Err(err) = self.rebuild_transcript_after_history_rewrite(tui) {
+                    tracing::error!(
+                        "failed to rebuild transcript after reasoning insertion: {err}"
+                    );
+                }
+                self.chat_widget.request_pending_usage_output_insertion();
+                return;
+            }
+        }
         if let Some(Overlay::Transcript(t)) = &mut self.overlay {
             t.insert_cell(cell.clone());
             tui.frame_requester().schedule_frame();

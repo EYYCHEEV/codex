@@ -43,4 +43,3 @@ expression: commands
 /stop - stop all background terminals
 /clear - clear the terminal and start a new chat
 /test-approval - test approval request
-/subagents - switch the active agent thread

@@ -40,6 +40,7 @@ pub enum SlashCommand {
     Compact,
     Plan,
     Goal,
+    #[strum(to_string = "agent", serialize = "subagents")]
     Agent,
     Side,
     Btw,
@@ -69,8 +70,6 @@ pub enum SlashCommand {
     Clear,
     Personality,
     TestApproval,
-    #[strum(serialize = "subagents")]
-    MultiAgents,
     // Debugging commands.
     #[strum(serialize = "debug-m-drop")]
     MemoryDrop,
@@ -120,7 +119,7 @@ impl SlashCommand {
             SlashCommand::Personality => "choose a communication style for Codex",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
-            SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
+            SlashCommand::Agent => "switch the active agent thread",
             SlashCommand::Side | SlashCommand::Btw => {
                 "start a side conversation in an ephemeral fork"
             }
@@ -240,7 +239,7 @@ impl SlashCommand {
             | SlashCommand::Btw => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
-            SlashCommand::Agent | SlashCommand::MultiAgents => true,
+            SlashCommand::Agent => true,
             SlashCommand::Theme | SlashCommand::Pets => false,
         }
     }
@@ -270,6 +269,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::SlashCommand;
+    use super::built_in_slash_commands;
 
     #[test]
     fn stop_command_is_canonical_name() {
@@ -285,6 +285,21 @@ mod tests {
     fn pet_alias_parses_to_pets_command() {
         assert_eq!(SlashCommand::Pets.command(), "pets");
         assert_eq!(SlashCommand::from_str("pet"), Ok(SlashCommand::Pets));
+    }
+
+    #[test]
+    fn agent_command_keeps_subagents_as_an_alias() {
+        assert_eq!(SlashCommand::Agent.command(), "agent");
+        assert_eq!(SlashCommand::from_str("agent"), Ok(SlashCommand::Agent));
+        assert_eq!(SlashCommand::from_str("subagents"), Ok(SlashCommand::Agent));
+        assert!(SlashCommand::from_str("agents").is_err());
+        assert_eq!(
+            built_in_slash_commands()
+                .into_iter()
+                .filter_map(|(name, command)| (command == SlashCommand::Agent).then_some(name))
+                .collect::<Vec<_>>(),
+            vec!["agent"]
+        );
     }
 
     #[test]
