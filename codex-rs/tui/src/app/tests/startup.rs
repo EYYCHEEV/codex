@@ -999,6 +999,8 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             agent_nickname: Some("Robie".to_string()),
             agent_role: Some("explorer".to_string()),
             agent_path: None,
+            model: None,
+            reasoning_effort: None,
             is_running: false,
             is_closed: false,
         })

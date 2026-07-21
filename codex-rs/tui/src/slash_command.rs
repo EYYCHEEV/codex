@@ -42,6 +42,8 @@ pub enum SlashCommand {
     Voice,
     Goal,
     Agents,
+    #[strum(to_string = "agent", serialize = "subagents")]
+    Agent,
     Side,
     Btw,
     Copy,
@@ -74,8 +76,6 @@ pub enum SlashCommand {
     Clear,
     Personality,
     TestApproval,
-    #[strum(serialize = "subagents")]
-    MultiAgents,
     // Debugging commands.
     #[strum(serialize = "debug-m-drop")]
     MemoryDrop,
@@ -132,7 +132,7 @@ impl SlashCommand {
             SlashCommand::Voice => "start or stop a live voice conversation",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agents => "view and switch between all active agent sessions",
-            SlashCommand::MultiAgents => "switch between this session's subagents",
+            SlashCommand::Agent => "switch the active agent thread",
             SlashCommand::Side | SlashCommand::Btw => {
                 "start a side conversation in an ephemeral fork"
             }
@@ -191,6 +191,7 @@ impl SlashCommand {
             self,
             SlashCommand::Copy
                 | SlashCommand::Agents
+                | SlashCommand::Agent
                 | SlashCommand::Export
                 | SlashCommand::Raw
                 | SlashCommand::Diff
@@ -261,13 +262,16 @@ impl SlashCommand {
             | SlashCommand::Btw => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
-            SlashCommand::Agents | SlashCommand::MultiAgents => true,
+            SlashCommand::Agents | SlashCommand::Agent => true,
             SlashCommand::Theme | SlashCommand::Pets => false,
         }
     }
 
     fn is_visible(self) -> bool {
         match self {
+            // The full agents overview remains available through its shortcut and as a typed
+            // compatibility command, while `/agent` is the single discoverable agent command.
+            SlashCommand::Agents => false,
             SlashCommand::Copy => !cfg!(target_os = "android"),
             SlashCommand::App => cfg!(any(target_os = "macos", target_os = "windows")),
             SlashCommand::Voice => true,
@@ -291,6 +295,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::SlashCommand;
+    use super::built_in_slash_commands;
 
     #[test]
     fn stop_command_is_canonical_name() {
@@ -306,6 +311,23 @@ mod tests {
     fn pet_alias_parses_to_pets_command() {
         assert_eq!(SlashCommand::Pets.command(), "pets");
         assert_eq!(SlashCommand::from_str("pet"), Ok(SlashCommand::Pets));
+    }
+
+    #[test]
+    fn agent_command_is_the_only_visible_agent_command() {
+        assert_eq!(SlashCommand::Agent.command(), "agent");
+        assert_eq!(SlashCommand::from_str("agent"), Ok(SlashCommand::Agent));
+        assert_eq!(SlashCommand::from_str("subagents"), Ok(SlashCommand::Agent));
+        assert_eq!(SlashCommand::from_str("agents"), Ok(SlashCommand::Agents));
+        assert_eq!(
+            built_in_slash_commands()
+                .into_iter()
+                .filter_map(|(name, command)| {
+                    matches!(command, SlashCommand::Agent | SlashCommand::Agents).then_some(name)
+                })
+                .collect::<Vec<_>>(),
+            vec!["agent"]
+        );
     }
 
     #[test]

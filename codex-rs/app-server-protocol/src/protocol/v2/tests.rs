@@ -3495,6 +3495,9 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         agent_path: codex_protocol::AgentPath::root()
             .join("worker")
             .expect("worker path"),
+        agent_type: Some("scout".to_string()),
+        model: Some("gpt-5.6-terra".to_string()),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
     });
 
     assert_eq!(
@@ -3504,6 +3507,9 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             kind: SubAgentActivityKind::Completed,
             agent_thread_id: receiver_thread_id.to_string(),
             agent_path: "/root/worker".to_string(),
+            agent_type: Some("scout".to_string()),
+            model: Some("gpt-5.6-terra".to_string()),
+            reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
         }
     );
 
