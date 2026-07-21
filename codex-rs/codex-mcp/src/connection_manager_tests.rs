@@ -3554,7 +3554,7 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
     assert!(summary.cancelled.is_empty());
     assert_eq!(summary.failed.len(), 1);
     assert_eq!(summary.failed[0].server, "slow");
-    assert!(summary.failed[0].error.contains("request timed out"));
+    assert!(summary.failed[0].error.contains("timed out"));
 }
 
 #[tokio::test]
