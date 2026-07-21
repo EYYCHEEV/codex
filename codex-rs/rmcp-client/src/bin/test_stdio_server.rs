@@ -445,6 +445,12 @@ impl ServerHandler for TestToolServer {
         request: InitializeRequestParams,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<InitializeResult, McpError> {
+        if let Some(delay_ms) = std::env::var("MCP_TEST_INITIALIZE_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            sleep(Duration::from_millis(delay_ms)).await;
+        }
         self.supports_openai_form_elicitation.store(
             request
                 .capabilities

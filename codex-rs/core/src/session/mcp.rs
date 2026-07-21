@@ -735,11 +735,9 @@ impl Session {
     }
 
     pub(crate) async fn cancel_mcp_startup(&self) {
-        self.services
-            .mcp_startup_cancellation_token
-            .lock()
-            .await
-            .cancel();
+        if let Some(runtime) = self.services.try_latest_mcp_runtime() {
+            runtime.manager().cancel_active_startups();
+        }
     }
 }
 

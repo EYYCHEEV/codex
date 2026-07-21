@@ -36,7 +36,6 @@ fn test_cache_key_with_route(
     base_url: &str,
 ) -> CodexAppsToolsCacheKey {
     let identity_key = chatgpt_user_id
-        .clone()
         .or_else(|| account_id.clone())
         .unwrap_or_else(|| "test-account".to_string());
     CodexAppsToolsCacheKey::from_transport_binding(

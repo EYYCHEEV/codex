@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
@@ -306,7 +307,11 @@ impl ManagedClientStartup {
         let cancel_token_for_fut = cancel_token;
         async move {
             let refresh_start = is_codex_apps_mcp_server.then(Instant::now);
-            let outcome = match async {
+            let startup_timeout = server
+                .configured_config()
+                .and_then(|config| config.startup_timeout_sec)
+                .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
+            let startup = run_with_startup_deadline(startup_timeout, async {
                 if let Err(error) = validate_mcp_server_name(&server_name) {
                     return Err(error.into());
                 }
@@ -327,10 +332,7 @@ impl ManagedClientStartup {
                     client,
                     StartServerTaskParams {
                         is_codex_apps_mcp_server,
-                        startup_timeout: server
-                            .configured_config()
-                            .and_then(|config| config.startup_timeout_sec)
-                            .or(Some(DEFAULT_STARTUP_TIMEOUT)),
+                        startup_timeout: Some(startup_timeout),
                         tool_timeout: server
                             .configured_config()
                             .and_then(|config| config.tool_timeout_sec)
@@ -344,10 +346,8 @@ impl ManagedClientStartup {
                     },
                 )
                 .await
-            }
-            .or_cancel(&cancel_token_for_fut)
-            .await
-            {
+            });
+            let outcome = match startup.or_cancel(&cancel_token_for_fut).await {
                 Ok(result) => result,
                 Err(CancelErr::Cancelled) => Err(StartupOutcomeError::Cancelled),
             };
@@ -368,6 +368,15 @@ impl ManagedClientStartup {
         .boxed()
         .shared()
     }
+}
+
+async fn run_with_startup_deadline<T>(
+    startup_timeout: Duration,
+    startup: impl Future<Output = Result<T, StartupOutcomeError>>,
+) -> Result<T, StartupOutcomeError> {
+    tokio::time::timeout(startup_timeout, startup)
+        .await
+        .map_err(|_| StartupOutcomeError::from(anyhow!("request timed out")))?
 }
 
 #[derive(Clone)]
@@ -1047,6 +1056,22 @@ mod tests {
         let error = StartupOutcomeError::from(error);
 
         assert!(error.is_authentication_required());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_deadline_covers_initialize_and_initial_discovery_together() {
+        let result = run_with_startup_deadline(Duration::from_secs(10), async {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            Ok::<_, StartupOutcomeError>(())
+        })
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(StartupOutcomeError::Failed { ref error, .. })
+                if error.contains("request timed out")
+        ));
     }
 
     #[test]

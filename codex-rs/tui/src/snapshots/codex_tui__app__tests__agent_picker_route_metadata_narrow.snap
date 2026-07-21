@@ -1,0 +1,14 @@
+---
+source: tui/src/app/tests.rs
+expression: "render_bottom_popup(&app.chat_widget, 40)"
+---
+  Agents
+  Select an agent to watch. ⌥ + ← prev
+
+› 1. • Main [default] (c… idle
+  2. • /root/reload_scou… [scout] gpt-
+                          5.6-terra
+                          medium
+                          running
+
+  Press enter to confirm or esc to go ba

@@ -300,25 +300,6 @@ impl AgentControl {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn register_agent_metadata_for_tests(
-        &self,
-        agent_id: ThreadId,
-        agent_path: AgentPath,
-        last_task_message: Option<String>,
-    ) {
-        let reservation = self
-            .state
-            .reserve_spawn_slot(/*max_threads*/ None)
-            .expect("test agent metadata reservation should succeed");
-        reservation.commit(AgentMetadata {
-            agent_id: Some(agent_id),
-            agent_path: Some(agent_path),
-            last_task_message,
-            ..Default::default()
-        });
-    }
-
     pub(crate) fn get_agent_metadata(&self, agent_id: ThreadId) -> Option<AgentMetadata> {
         self.state.agent_metadata_for_thread(agent_id)
     }
