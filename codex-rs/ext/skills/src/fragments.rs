@@ -1,11 +1,15 @@
 use codex_extension_api::ContextualUserFragment;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_CLOSE_TAG;
 use codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG;
+use codex_utils_string::approx_token_count;
 
 use crate::catalog_prompt::SkillPromptKind;
 use crate::catalog_prompt::render_available_skills_body;
 use crate::tools::SkillToolAuthority;
+
+pub(crate) const MAX_SKILL_INSTRUCTION_TOKENS: usize = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AvailableSkillsInstructions {
@@ -71,6 +75,17 @@ pub(crate) struct SkillResourceAccess {
     pub(crate) authority: SkillToolAuthority,
     pub(crate) package: String,
     pub(crate) main_resource: String,
+}
+
+impl SkillInstructions {
+    pub(crate) fn exceeds_model_visible_token_limit(&self) -> bool {
+        let item = ResponseItem::from(self.render_fragment());
+        serde_json::to_string(&item)
+            .map(|serialized| {
+                approx_token_count(&serialized) > MAX_SKILL_INSTRUCTION_TOKENS
+            })
+            .unwrap_or(true)
+    }
 }
 
 impl ContextualUserFragment for SkillInstructions {
