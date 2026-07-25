@@ -55,7 +55,7 @@ fn assert_wall_time_header(output: &str) {
 // Verifies that a standard tool call (exec_command) exceeding the model formatting
 // limits is truncated before being sent back to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
+async fn tool_call_output_configured_limit_cannot_exceed_model_visible_cap() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -113,21 +113,20 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
         .context("function_call_output present for shell call")?;
     let output = output.replace("\r\n", "\n");
 
-    // Expect plain text (not JSON) containing the entire shell output.
+    // Expect plain text (not JSON) bounded by the model-visible item ceiling.
     assert!(
         serde_json::from_str::<Value>(&output).is_err(),
         "expected truncated shell output to be plain text"
     );
 
     assert!(
-        (400_000..=401_000).contains(&output.len()),
-        "expected output near the configured 100k-token budget, got {} bytes",
-        output.len()
+        output.len() <= 40_000,
+        "shell output should remain within the 10k-token ceiling"
     );
 
     assert!(
-        output.contains("chars truncated"),
-        "unified exec should preserve the model's byte-based truncation policy"
+        output.contains("truncated"),
+        "shell output should contain a truncation marker: {output}"
     );
 
     Ok(())
@@ -818,7 +817,6 @@ async fn call_mcp_echo(
 }
 
 #[test_case(3_000, 13_000; "serialization allowance")]
-#[test_case(30_000, 116_000; "large override")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_tool_output_limit_preserves_output_that_fits(
     output_token_limit: usize,
@@ -837,7 +835,7 @@ async fn mcp_tool_output_limit_preserves_output_that_fits(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_tool_output_limit_truncates_oversized_output() -> Result<()> {
+async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(Ok(()), "requires a Windows test_stdio_server binary");
 
@@ -852,8 +850,7 @@ async fn mcp_tool_output_limit_truncates_oversized_output() -> Result<()> {
     .await?;
 
     assert!(output.contains("truncated"));
-    // 30k tokens plus the serialization allowance leaves about 144k bytes.
-    assert!((140_000..145_000).contains(&output.len()));
+    assert!(output.len() <= 40_000);
     Ok(())
 }
 
