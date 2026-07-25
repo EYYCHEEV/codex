@@ -1637,6 +1637,9 @@ fn should_process_notification(
                     .is_none_or(|candidate| candidate == turn_id)
         }
         ServerNotification::McpServerStatusUpdated(_) => true,
+        ServerNotification::McpServerStartupComplete(notification) => {
+            notification.thread_id == thread_id
+        }
         ServerNotification::ItemCompleted(notification) => {
             notification.thread_id == thread_id && notification.turn_id == turn_id
         }

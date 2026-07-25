@@ -531,21 +531,16 @@ async fn try_start_turn_if_idle_injects_skill_mentioned_by_trusted_goal_input() 
     test.codex
         .inject_response_items(vec![user_message_item(RAW_QUEUED_INPUT)])
         .await?;
-    let goal_input: ResponseItem = ContextualUserFragment::into(
-        InternalModelContextFragment::new(
-            InternalContextSource::from_static("goal"),
-            GOAL_BODY,
-        ),
-    );
+    let goal_input: ResponseItem = ContextualUserFragment::into(InternalModelContextFragment::new(
+        InternalContextSource::from_static("goal"),
+        GOAL_BODY,
+    ));
 
     let submission = test
         .codex
         .start_turn_if_idle(TurnInputRequest::new(TurnInput::ResponseItem(goal_input)))
         .await?;
-    assert!(matches!(
-        submission,
-        StartIfIdleSubmission::Started { .. }
-    ));
+    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
 
     core_test_support::wait_for_event(test.codex.as_ref(), |event| {
         matches!(event, codex_protocol::protocol::EventMsg::TurnComplete(_))
@@ -607,17 +602,15 @@ async fn try_start_turn_if_idle_omits_oversized_skill_mentioned_by_trusted_goal_
     )
     .await;
 
-    let goal_input: ResponseItem = ContextualUserFragment::into(
-        InternalModelContextFragment::new(InternalContextSource::from_static("goal"), GOAL_BODY),
-    );
+    let goal_input: ResponseItem = ContextualUserFragment::into(InternalModelContextFragment::new(
+        InternalContextSource::from_static("goal"),
+        GOAL_BODY,
+    ));
     let submission = test
         .codex
         .start_turn_if_idle(TurnInputRequest::new(TurnInput::ResponseItem(goal_input)))
         .await?;
-    assert!(matches!(
-        submission,
-        StartIfIdleSubmission::Started { .. }
-    ));
+    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
 
     let warning = core_test_support::wait_for_event(test.codex.as_ref(), |event| {
         matches!(event, EventMsg::Warning(_))

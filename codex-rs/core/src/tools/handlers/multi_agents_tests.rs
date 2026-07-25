@@ -2277,6 +2277,8 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
             },
         )]),
         complete: None,
+        omitted_updates: 0,
+        omitted_server_names: Default::default(),
     };
     assert_eq!(worker.mcp_startup, Some(expected));
     assert_eq!(worker.agent_type, DEFAULT_ROLE_NAME);

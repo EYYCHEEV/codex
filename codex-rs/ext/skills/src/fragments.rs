@@ -81,9 +81,7 @@ impl SkillInstructions {
     pub(crate) fn exceeds_model_visible_token_limit(&self) -> bool {
         let item = ResponseItem::from(self.render_fragment());
         serde_json::to_string(&item)
-            .map(|serialized| {
-                approx_token_count(&serialized) > MAX_SKILL_INSTRUCTION_TOKENS
-            })
+            .map(|serialized| approx_token_count(&serialized) > MAX_SKILL_INSTRUCTION_TOKENS)
             .unwrap_or(true)
     }
 }

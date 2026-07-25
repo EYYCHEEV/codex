@@ -236,6 +236,7 @@ macro_rules! serialization_scope_expr {
     };
 }
 
+#[cfg(test)]
 macro_rules! export_client_param_schema {
     ($out_dir:ident, $params:ty) => {
         write_json_schema::<$params>($out_dir, stringify!($params))
@@ -469,6 +470,7 @@ macro_rules! client_request_definitions {
             Ok(())
         }
 
+        #[cfg(test)]
         pub fn export_client_schema_param_types(
             out_dir: &::std::path::Path,
         ) -> ::std::result::Result<(), ::ts_rs::ExportError> {
@@ -492,6 +494,7 @@ macro_rules! client_request_definitions {
             )*
         }
 
+        #[cfg(test)]
         #[allow(clippy::vec_init_then_push)]
         pub fn export_client_response_schemas(
             out_dir: &::std::path::Path,
@@ -2039,6 +2042,7 @@ server_notification_definitions! {
     McpToolCallProgress => "item/mcpToolCall/progress" (v2::McpToolCallProgressNotification),
     McpServerOauthLoginCompleted => "mcpServer/oauthLogin/completed" (v2::McpServerOauthLoginCompletedNotification),
     McpServerStatusUpdated => "mcpServer/startupStatus/updated" (v2::McpServerStatusUpdatedNotification),
+    McpServerStartupComplete => "mcpServer/startupStatus/completed" (v2::McpServerStartupCompleteNotification),
     #[experimental("mcpServer/event/stream/notification")]
     McpServerEventStream => "mcpServer/event/stream/notification" (v2::McpServerEventStreamNotification),
     AccountUpdated => "account/updated" (v2::AccountUpdatedNotification),
@@ -3898,6 +3902,7 @@ mod tests {
                     "rateLimits": {
                         "limitId": null,
                         "limitName": null,
+                        "normalModelSlug": null,
                         "primary": null,
                         "secondary": null,
                         "credits": null,
@@ -5084,6 +5089,42 @@ mod tests {
         );
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&notification);
         assert_eq!(reason, Some("thread/realtime/outputAudio/delta"));
+    }
+
+    #[test]
+    fn mcp_server_startup_complete_notification_serializes_terminal_summary() -> Result<()> {
+        let notification = ServerNotification::McpServerStartupComplete(
+            v2::McpServerStartupCompleteNotification {
+                thread_id: "thread-1".to_string(),
+                ready: vec!["ready".to_string()],
+                failed: vec![v2::McpServerStartupFailure {
+                    name: "failed".to_string(),
+                    error: "authentication required".to_string(),
+                    failure_reason: Some(
+                        v2::McpServerStartupFailureReason::ReauthenticationRequired,
+                    ),
+                }],
+                cancelled: vec!["cancelled".to_string()],
+            },
+        );
+
+        assert_eq!(
+            serde_json::to_value(notification)?,
+            json!({
+                "method": "mcpServer/startupStatus/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "ready": ["ready"],
+                    "failed": [{
+                        "name": "failed",
+                        "error": "authentication required",
+                        "failureReason": "reauthenticationRequired"
+                    }],
+                    "cancelled": ["cancelled"]
+                }
+            })
+        );
+        Ok(())
     }
 
     #[test]

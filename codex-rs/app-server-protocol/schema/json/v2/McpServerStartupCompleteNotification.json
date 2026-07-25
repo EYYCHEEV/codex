@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "McpServerStartupFailure": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "failureReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpServerStartupFailureReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "name"
+      ],
+      "type": "object"
+    },
+    "McpServerStartupFailureReason": {
+      "enum": [
+        "reauthenticationRequired"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "cancelled": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "failed": {
+      "items": {
+        "$ref": "#/definitions/McpServerStartupFailure"
+      },
+      "type": "array"
+    },
+    "ready": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "cancelled",
+    "failed",
+    "ready",
+    "threadId"
+  ],
+  "title": "McpServerStartupCompleteNotification",
+  "type": "object"
+}
