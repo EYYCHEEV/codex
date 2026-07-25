@@ -5491,6 +5491,26 @@
           "properties": {
             "method": {
               "enum": [
+                "mcpServer/startupStatus/completed"
+              ],
+              "title": "McpServer/startupStatus/completedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/McpServerStartupCompleteNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "McpServer/startupStatus/completedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "mcpServer/event/stream/notification"
               ],
               "title": "McpServer/event/stream/notificationNotificationMethod",
@@ -15213,6 +15233,65 @@
       "McpServerRefreshResponse": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "McpServerRefreshResponse",
+        "type": "object"
+      },
+      "McpServerStartupCompleteNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "cancelled": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "failed": {
+            "items": {
+              "$ref": "#/definitions/v2/McpServerStartupFailure"
+            },
+            "type": "array"
+          },
+          "ready": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "cancelled",
+          "failed",
+          "ready",
+          "threadId"
+        ],
+        "title": "McpServerStartupCompleteNotification",
+        "type": "object"
+      },
+      "McpServerStartupFailure": {
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "failureReason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/McpServerStartupFailureReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error",
+          "name"
+        ],
         "type": "object"
       },
       "McpServerStartupFailureReason": {

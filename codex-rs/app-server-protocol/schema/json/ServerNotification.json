@@ -3120,6 +3120,63 @@
       ],
       "type": "object"
     },
+    "McpServerStartupCompleteNotification": {
+      "properties": {
+        "cancelled": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "failed": {
+          "items": {
+            "$ref": "#/definitions/McpServerStartupFailure"
+          },
+          "type": "array"
+        },
+        "ready": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cancelled",
+        "failed",
+        "ready",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "McpServerStartupFailure": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "failureReason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/McpServerStartupFailureReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error",
+        "name"
+      ],
+      "type": "object"
+    },
     "McpServerStartupFailureReason": {
       "enum": [
         "reauthenticationRequired"
@@ -8120,6 +8177,26 @@
         "params"
       ],
       "title": "McpServer/startupStatus/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "mcpServer/startupStatus/completed"
+          ],
+          "title": "McpServer/startupStatus/completedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/McpServerStartupCompleteNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "McpServer/startupStatus/completedNotification",
       "type": "object"
     },
     {

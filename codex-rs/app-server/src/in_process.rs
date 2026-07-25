@@ -112,6 +112,7 @@ fn server_notification_requires_delivery(notification: &ServerNotification) -> b
     matches!(
         notification,
         ServerNotification::TurnCompleted(_)
+            | ServerNotification::McpServerStartupComplete(_)
             | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadSettingsUpdated(_)
             | ServerNotification::ThreadAttachmentUpdated(_)
@@ -803,6 +804,7 @@ mod tests {
     use codex_app_server_protocol::ClientInfo;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
+    use codex_app_server_protocol::McpServerStartupCompleteNotification;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadAttachmentOperation;
     use codex_app_server_protocol::ThreadAttachmentUpdatedNotification;
@@ -1023,6 +1025,14 @@ mod tests {
                 },
             })
         ));
+        let mcp_startup_complete =
+            ServerNotification::McpServerStartupComplete(McpServerStartupCompleteNotification {
+                thread_id: "thread-1".to_string(),
+                ready: Vec::new(),
+                failed: Vec::new(),
+                cancelled: Vec::new(),
+            });
+        assert!(server_notification_requires_delivery(&mcp_startup_complete));
         assert!(server_notification_requires_delivery(
             &ServerNotification::ThreadQueueChanged(ThreadQueueChangedNotification {
                 thread_id: "thread-1".to_string(),
