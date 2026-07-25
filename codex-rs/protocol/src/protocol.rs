@@ -4,8 +4,12 @@
 //! between user and agent.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::fmt;
+use std::hash::Hash;
+use std::hash::Hasher;
 use std::ops::Mul;
 use std::path::Path;
 use std::path::PathBuf;
@@ -58,6 +62,7 @@ use crate::request_user_input::RequestUserInputResponse;
 use crate::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
+use codex_utils_string::approx_bytes_for_tokens;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -3917,6 +3922,9 @@ pub struct McpStartupCompleteEvent {
 pub struct McpStartupFailure {
     pub server: String,
     pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional = nullable)]
+    pub reason: Option<McpStartupFailureReason>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, TS, PartialEq, Eq)]
@@ -3924,46 +3932,198 @@ pub struct McpStartupSnapshot {
     /// Latest startup status keyed by MCP server name.
     #[serde(default)]
     pub statuses: BTreeMap<String, McpStartupStatus>,
-    /// Most recent aggregate completion summary, when startup has completed.
+    /// Bounded aggregate completion summary, when startup has completed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub complete: Option<McpStartupCompleteEvent>,
+    /// Number of MCP servers omitted to keep this model-visible snapshot bounded.
+    #[serde(default)]
+    pub omitted_updates: usize,
+    #[doc(hidden)]
+    #[serde(default, skip_serializing, skip_deserializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    pub omitted_server_names: BTreeSet<String>,
 }
+
+const MCP_STARTUP_SNAPSHOT_MAX_SERVERS: usize = 16;
+const MCP_STARTUP_SERVER_NAME_MAX_BYTES: usize = 128;
+const MCP_STARTUP_ERROR_MAX_BYTES: usize = 512;
+const MCP_STARTUP_SNAPSHOT_MAX_TOKENS: usize = 1_000;
 
 impl McpStartupSnapshot {
     pub fn is_empty(&self) -> bool {
-        self.statuses.is_empty() && self.complete.is_none()
+        self.statuses.is_empty() && self.complete.is_none() && self.omitted_updates == 0
     }
 
     pub fn record_update(&mut self, update: &McpStartupUpdateEvent) {
-        self.statuses
-            .insert(update.server.clone(), update.status.clone());
+        self.complete = None;
+        let server = bounded_mcp_startup_server_name(&update.server);
+        self.omitted_server_names.remove(&server);
+        self.omitted_updates = self.omitted_server_names.len();
+        let status = match &update.status {
+            McpStartupStatus::Failed { error, reason } => McpStartupStatus::Failed {
+                error: truncate_mcp_startup_text(error, MCP_STARTUP_ERROR_MAX_BYTES),
+                reason: *reason,
+            },
+            status => status.clone(),
+        };
+        let preserve = matches!(status, McpStartupStatus::Failed { .. }).then_some(server.clone());
+        self.statuses.insert(server, status);
+        self.trim_statuses(preserve.as_deref());
     }
 
     pub fn record_complete(&mut self, complete: &McpStartupCompleteEvent) {
-        for server in &complete.ready {
-            self.statuses
-                .insert(server.clone(), McpStartupStatus::Ready);
-        }
-        for failure in &complete.failed {
-            let reason = match self.statuses.get(&failure.server) {
-                Some(McpStartupStatus::Failed { reason, .. }) => *reason,
-                _ => None,
+        let mut summary = McpStartupCompleteEvent {
+            ready: complete
+                .ready
+                .iter()
+                .map(|server| bounded_mcp_startup_server_name(server))
+                .collect(),
+            failed: complete
+                .failed
+                .iter()
+                .map(|failure| {
+                    let server = bounded_mcp_startup_server_name(&failure.server);
+                    let reason = failure.reason.or_else(|| match self.statuses.get(&server) {
+                        Some(McpStartupStatus::Failed { reason, .. }) => *reason,
+                        _ => None,
+                    });
+                    McpStartupFailure {
+                        server,
+                        error: truncate_mcp_startup_text(
+                            &failure.error,
+                            MCP_STARTUP_ERROR_MAX_BYTES,
+                        ),
+                        reason,
+                    }
+                })
+                .collect(),
+            cancelled: complete
+                .cancelled
+                .iter()
+                .map(|server| bounded_mcp_startup_server_name(server))
+                .collect(),
+        };
+        self.statuses = summary
+            .ready
+            .iter()
+            .map(|server| (server.clone(), McpStartupStatus::Ready))
+            .chain(summary.failed.iter().map(|failure| {
+                (
+                    failure.server.clone(),
+                    McpStartupStatus::Failed {
+                        error: failure.error.clone(),
+                        reason: failure.reason,
+                    },
+                )
+            }))
+            .chain(
+                summary
+                    .cancelled
+                    .iter()
+                    .map(|server| (server.clone(), McpStartupStatus::Cancelled)),
+            )
+            .collect();
+        self.omitted_updates = 0;
+        self.omitted_server_names.clear();
+        self.complete = Some(summary.clone());
+        while summary.ready.len() + summary.failed.len() + summary.cancelled.len()
+            > MCP_STARTUP_SNAPSHOT_MAX_SERVERS
+            || self.exceeds_model_visible_budget()
+        {
+            if summary.ready.is_empty() && summary.cancelled.is_empty() && summary.failed.len() == 1
+            {
+                let failure = &mut summary.failed[0];
+                if failure.error.is_empty() {
+                    break;
+                }
+                failure.error = truncate_mcp_startup_text(&failure.error, failure.error.len() / 2);
+                if let Some(McpStartupStatus::Failed { error, .. }) =
+                    self.statuses.get_mut(&failure.server)
+                {
+                    *error = failure.error.clone();
+                }
+                self.complete = Some(summary.clone());
+                continue;
+            }
+            let omitted_server = summary
+                .ready
+                .pop()
+                .or_else(|| summary.cancelled.pop())
+                .or_else(|| {
+                    if summary.failed.len() <= 1 {
+                        return None;
+                    }
+                    let index = summary
+                        .failed
+                        .iter()
+                        .rposition(|failure| failure.reason.is_none())
+                        .unwrap_or(summary.failed.len() - 1);
+                    Some(summary.failed.remove(index).server)
+                });
+            let Some(omitted_server) = omitted_server else {
+                break;
             };
-            self.statuses.insert(
-                failure.server.clone(),
-                McpStartupStatus::Failed {
-                    error: failure.error.clone(),
-                    reason,
-                },
-            );
+            self.statuses.remove(&omitted_server);
+            self.omitted_server_names.insert(omitted_server);
+            self.omitted_updates = self.omitted_server_names.len();
+            self.complete = Some(summary.clone());
         }
-        for server in &complete.cancelled {
-            self.statuses
-                .insert(server.clone(), McpStartupStatus::Cancelled);
-        }
-        self.complete = Some(complete.clone());
     }
+
+    fn trim_statuses(&mut self, preserve: Option<&str>) {
+        while self.statuses.len() > MCP_STARTUP_SNAPSHOT_MAX_SERVERS
+            || self.exceeds_model_visible_budget()
+        {
+            let candidate = self
+                .statuses
+                .iter()
+                .filter(|(server, _)| Some(server.as_str()) != preserve)
+                .min_by_key(|(_, status)| match status {
+                    McpStartupStatus::Ready => 0,
+                    McpStartupStatus::Starting => 1,
+                    McpStartupStatus::Cancelled => 2,
+                    McpStartupStatus::Failed { .. } => 3,
+                })
+                .map(|(server, _)| server.clone());
+            let Some(candidate) = candidate else {
+                break;
+            };
+            self.statuses.remove(&candidate);
+            self.omitted_server_names.insert(candidate);
+            self.omitted_updates = self.omitted_server_names.len();
+        }
+    }
+
+    fn exceeds_model_visible_budget(&self) -> bool {
+        serde_json::to_vec(self).is_ok_and(|snapshot| {
+            snapshot.len() > approx_bytes_for_tokens(MCP_STARTUP_SNAPSHOT_MAX_TOKENS)
+        })
+    }
+}
+
+fn bounded_mcp_startup_server_name(value: &str) -> String {
+    if value.len() <= MCP_STARTUP_SERVER_NAME_MAX_BYTES {
+        return value.to_string();
+    }
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    let suffix = format!("…{:016x}", hasher.finish());
+    let prefix_budget = MCP_STARTUP_SERVER_NAME_MAX_BYTES.saturating_sub(suffix.len());
+    format!(
+        "{}{}",
+        truncate_mcp_startup_text(value, prefix_budget),
+        suffix
+    )
+}
+
+fn truncate_mcp_startup_text(value: &str, max_bytes: usize) -> String {
+    let mut end = value.len().min(max_bytes);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
@@ -6467,6 +6627,7 @@ mod tests {
                 failed: vec![McpStartupFailure {
                     server: "b".to_string(),
                     error: "bad".to_string(),
+                    reason: None,
                 }],
                 cancelled: vec!["c".to_string()],
             }),
@@ -6499,9 +6660,12 @@ mod tests {
                 failed: vec![McpStartupFailure {
                     server: "sentry".to_string(),
                     error: "boom".to_string(),
+                    reason: None,
                 }],
                 cancelled: Vec::new(),
             }),
+            omitted_updates: 0,
+            omitted_server_names: BTreeSet::new(),
         };
 
         let value = serde_json::to_value(&snapshot)?;
@@ -6516,7 +6680,8 @@ mod tests {
                     "ready": ["docs"],
                     "failed": [{"server": "sentry", "error": "boom"}],
                     "cancelled": []
-                }
+                },
+                "omitted_updates": 0
             })
         );
         Ok(())
@@ -6532,23 +6697,253 @@ mod tests {
                 reason: Some(McpStartupFailureReason::ReauthenticationRequired),
             },
         });
+        snapshot.omitted_updates = 1;
 
         snapshot.record_complete(&McpStartupCompleteEvent {
             ready: Vec::new(),
             failed: vec![McpStartupFailure {
                 server: "codex_apps".to_string(),
                 error: "reauth required".to_string(),
+                reason: None,
             }],
             cancelled: Vec::new(),
         });
 
         assert_eq!(
-            snapshot.statuses.get("codex_apps"),
+            snapshot,
+            McpStartupSnapshot {
+                statuses: BTreeMap::from([(
+                    "codex_apps".to_string(),
+                    McpStartupStatus::Failed {
+                        error: "reauth required".to_string(),
+                        reason: Some(McpStartupFailureReason::ReauthenticationRequired),
+                    },
+                )]),
+                complete: Some(McpStartupCompleteEvent {
+                    ready: Vec::new(),
+                    failed: vec![McpStartupFailure {
+                        server: "codex_apps".to_string(),
+                        error: "reauth required".to_string(),
+                        reason: Some(McpStartupFailureReason::ReauthenticationRequired),
+                    }],
+                    cancelled: Vec::new(),
+                }),
+                omitted_updates: 0,
+                omitted_server_names: BTreeSet::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn mcp_startup_snapshot_bounds_model_visible_evidence() -> Result<()> {
+        let mut snapshot = McpStartupSnapshot::default();
+        for index in 0..MCP_STARTUP_SNAPSHOT_MAX_SERVERS + 4 {
+            snapshot.record_update(&McpStartupUpdateEvent {
+                server: format!("server-{index}-{}", "s".repeat(256)),
+                status: McpStartupStatus::Failed {
+                    error: "e".repeat(1_024),
+                    reason: None,
+                },
+            });
+        }
+
+        assert!(snapshot.statuses.len() <= MCP_STARTUP_SNAPSHOT_MAX_SERVERS);
+        assert!(
+            serde_json::to_vec(&snapshot)?.len()
+                <= approx_bytes_for_tokens(MCP_STARTUP_SNAPSHOT_MAX_TOKENS)
+        );
+        assert!(
+            snapshot
+                .statuses
+                .keys()
+                .all(|server| server.len() <= MCP_STARTUP_SERVER_NAME_MAX_BYTES)
+        );
+        assert!(snapshot.statuses.values().all(|status| match status {
+            McpStartupStatus::Failed { error, .. } => error.len() <= MCP_STARTUP_ERROR_MAX_BYTES,
+            _ => true,
+        }));
+        assert!(snapshot.omitted_updates > 0);
+        assert_eq!(snapshot.complete, None);
+
+        snapshot.record_complete(&McpStartupCompleteEvent {
+            ready: Vec::new(),
+            failed: (0..MCP_STARTUP_SNAPSHOT_MAX_SERVERS + 4)
+                .map(|index| McpStartupFailure {
+                    server: format!("server-{index}-{}", "s".repeat(256)),
+                    error: "e".repeat(1_024),
+                    reason: None,
+                })
+                .collect(),
+            cancelled: Vec::new(),
+        });
+
+        let complete = snapshot
+            .complete
+            .as_ref()
+            .expect("terminal snapshot should include a completion summary");
+        let expected_statuses = complete
+            .failed
+            .iter()
+            .map(|failure| {
+                (
+                    failure.server.clone(),
+                    McpStartupStatus::Failed {
+                        error: failure.error.clone(),
+                        reason: failure.reason,
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(snapshot.statuses, expected_statuses);
+        assert!(complete.failed.len() <= MCP_STARTUP_SNAPSHOT_MAX_SERVERS);
+        assert!(
+            serde_json::to_vec(&snapshot)?.len()
+                <= approx_bytes_for_tokens(MCP_STARTUP_SNAPSHOT_MAX_TOKENS)
+        );
+        assert!(snapshot.omitted_updates > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_startup_snapshot_preserves_only_failure_with_escaped_error() -> Result<()> {
+        let mut snapshot = McpStartupSnapshot::default();
+        snapshot.record_complete(&McpStartupCompleteEvent {
+            ready: Vec::new(),
+            failed: vec![McpStartupFailure {
+                server: "smoke_child".to_string(),
+                error: "\0".repeat(MCP_STARTUP_ERROR_MAX_BYTES),
+                reason: None,
+            }],
+            cancelled: Vec::new(),
+        });
+
+        let complete = snapshot
+            .complete
+            .as_ref()
+            .expect("terminal snapshot should include a completion summary");
+        let [failure] = complete.failed.as_slice() else {
+            panic!("terminal snapshot should retain its only failure");
+        };
+        assert!(!failure.error.is_empty());
+        assert!(failure.error.len() < MCP_STARTUP_ERROR_MAX_BYTES);
+        assert_eq!(
+            snapshot.statuses.get("smoke_child"),
             Some(&McpStartupStatus::Failed {
-                error: "reauth required".to_string(),
-                reason: Some(McpStartupFailureReason::ReauthenticationRequired),
+                error: failure.error.clone(),
+                reason: None,
             })
         );
+        assert!(
+            serde_json::to_vec(&snapshot)?.len()
+                <= approx_bytes_for_tokens(MCP_STARTUP_SNAPSHOT_MAX_TOKENS)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_startup_snapshot_prefers_reason_bearing_failure() -> Result<()> {
+        for reason_index in [0, 3] {
+            let failures = (0..4)
+                .map(|index| McpStartupFailure {
+                    server: format!("server-{index}"),
+                    error: "e".repeat(MCP_STARTUP_ERROR_MAX_BYTES),
+                    reason: (index == reason_index)
+                        .then_some(McpStartupFailureReason::ReauthenticationRequired),
+                })
+                .collect();
+            let mut snapshot = McpStartupSnapshot::default();
+            snapshot.record_complete(&McpStartupCompleteEvent {
+                ready: Vec::new(),
+                failed: failures,
+                cancelled: Vec::new(),
+            });
+
+            let complete = snapshot
+                .complete
+                .as_ref()
+                .expect("terminal snapshot should include a completion summary");
+            let failure = complete
+                .failed
+                .iter()
+                .find(|failure| failure.reason.is_some())
+                .expect("terminal snapshot should retain the actionable failure");
+            assert_eq!(failure.server, format!("server-{reason_index}"));
+            assert_eq!(
+                snapshot.statuses.get(&failure.server),
+                Some(&McpStartupStatus::Failed {
+                    error: failure.error.clone(),
+                    reason: failure.reason,
+                })
+            );
+            assert!(
+                serde_json::to_vec(&snapshot)?.len()
+                    <= approx_bytes_for_tokens(MCP_STARTUP_SNAPSHOT_MAX_TOKENS)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_startup_snapshot_preserves_omissions_after_recovery_update() {
+        let mut snapshot = McpStartupSnapshot::default();
+        snapshot.record_complete(&McpStartupCompleteEvent {
+            ready: (0..MCP_STARTUP_SNAPSHOT_MAX_SERVERS + 4)
+                .map(|index| format!("server-{index}"))
+                .collect(),
+            failed: Vec::new(),
+            cancelled: Vec::new(),
+        });
+        assert_eq!(snapshot.omitted_updates, 4);
+        let expected = McpStartupSnapshot {
+            statuses: snapshot.statuses.clone(),
+            complete: None,
+            omitted_updates: snapshot.omitted_updates,
+            omitted_server_names: snapshot.omitted_server_names.clone(),
+        };
+
+        snapshot.record_update(&McpStartupUpdateEvent {
+            server: "server-0".to_string(),
+            status: McpStartupStatus::Ready,
+        });
+
+        assert_eq!(snapshot, expected);
+    }
+
+    #[test]
+    fn mcp_startup_snapshot_preserves_new_failures_and_distinct_long_names() {
+        let mut snapshot = McpStartupSnapshot::default();
+        for index in 0..MCP_STARTUP_SNAPSHOT_MAX_SERVERS {
+            snapshot.record_update(&McpStartupUpdateEvent {
+                server: format!("ready-{index}"),
+                status: McpStartupStatus::Ready,
+            });
+        }
+        snapshot.record_update(&McpStartupUpdateEvent {
+            server: "z_failure".to_string(),
+            status: McpStartupStatus::Failed {
+                error: "boom".to_string(),
+                reason: None,
+            },
+        });
+        assert!(snapshot.statuses.contains_key("z_failure"));
+        assert_eq!(snapshot.omitted_updates, 1);
+
+        snapshot.record_update(&McpStartupUpdateEvent {
+            server: "ready-0".to_string(),
+            status: McpStartupStatus::Failed {
+                error: "retry failed".to_string(),
+                reason: None,
+            },
+        });
+        assert!(snapshot.statuses.contains_key("ready-0"));
+        assert_eq!(snapshot.omitted_updates, 1);
+
+        let shared_prefix = "s".repeat(MCP_STARTUP_SERVER_NAME_MAX_BYTES);
+        let first = bounded_mcp_startup_server_name(&format!("{shared_prefix}-first"));
+        let second = bounded_mcp_startup_server_name(&format!("{shared_prefix}-second"));
+        assert_ne!(first, second);
+        assert!(first.len() <= MCP_STARTUP_SERVER_NAME_MAX_BYTES);
+        assert!(second.len() <= MCP_STARTUP_SERVER_NAME_MAX_BYTES);
     }
 
     #[test]
@@ -6562,6 +6957,8 @@ mod tests {
         let expected = McpStartupSnapshot {
             statuses: BTreeMap::from([("docs".to_string(), McpStartupStatus::Starting)]),
             complete: None,
+            omitted_updates: 0,
+            omitted_server_names: BTreeSet::new(),
         };
         assert_eq!(snapshot, expected);
         Ok(())

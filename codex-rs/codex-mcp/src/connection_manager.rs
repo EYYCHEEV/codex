@@ -64,6 +64,7 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::McpStartupCompleteEvent;
 use codex_protocol::protocol::McpStartupFailure;
+use codex_protocol::protocol::McpStartupFailureReason;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
@@ -424,7 +425,7 @@ impl McpConnectionSet {
             let publication_gate = publication_gate.clone();
             join_set.spawn(async move {
                 if !publication_gate.wait().await {
-                    return (server_name, Err(StartupOutcomeError::Cancelled));
+                    return (server_name, Err(StartupOutcomeError::Cancelled), None);
                 }
                 if let Some(tx_event) = tx_event.as_ref() {
                     let _ = emit_update(
@@ -437,6 +438,7 @@ impl McpConnectionSet {
                     )
                     .await;
                 }
+                let mut failure_reason = None;
                 let mut outcome = async_managed_client.client().await;
                 if cancel_token.is_cancelled() {
                     outcome = Err(StartupOutcomeError::Cancelled);
@@ -483,7 +485,7 @@ impl McpConnectionSet {
                         Ok(_) => McpStartupStatus::Ready,
                         Err(StartupOutcomeError::Cancelled) => McpStartupStatus::Cancelled,
                         Err(error) => {
-                            let reason = mcp_startup_failure_reason(auth_state, error);
+                            failure_reason = mcp_startup_failure_reason(auth_state, error);
                             let error_str = mcp_init_error_display(
                                 server_name.as_str(),
                                 Some(&configured_config),
@@ -491,7 +493,7 @@ impl McpConnectionSet {
                             );
                             McpStartupStatus::Failed {
                                 error: error_str,
-                                reason,
+                                reason: failure_reason,
                             }
                         }
                     };
@@ -514,7 +516,7 @@ impl McpConnectionSet {
                     async_managed_client.reconnect_failed_startup().await;
                 }
 
-                (server_name, outcome)
+                (server_name, outcome, failure_reason)
             });
         }
         let manager = Self {
@@ -551,17 +553,8 @@ impl McpConnectionSet {
                     )
                     .await;
                 }
-                for (server_name, outcome) in outcomes {
-                    match outcome {
-                        Ok(_) => summary.ready.push(server_name),
-                        Err(StartupOutcomeError::Cancelled) => summary.cancelled.push(server_name),
-                        Err(StartupOutcomeError::Failed { error, .. }) => {
-                            summary.failed.push(McpStartupFailure {
-                                server: server_name,
-                                error,
-                            })
-                        }
-                    }
+                for (server_name, outcome, failure_reason) in outcomes {
+                    record_startup_outcome(&mut summary, server_name, outcome, failure_reason);
                 }
                 let _ = tx_event
                     .send(Event {
@@ -713,6 +706,23 @@ impl McpConnectionSet {
             }
         }
         server_infos
+    }
+}
+
+fn record_startup_outcome(
+    summary: &mut McpStartupCompleteEvent,
+    server_name: String,
+    outcome: Result<ManagedClient, StartupOutcomeError>,
+    failure_reason: Option<McpStartupFailureReason>,
+) {
+    match outcome {
+        Ok(_) => summary.ready.push(server_name),
+        Err(StartupOutcomeError::Cancelled) => summary.cancelled.push(server_name),
+        Err(StartupOutcomeError::Failed { error, .. }) => summary.failed.push(McpStartupFailure {
+            server: server_name,
+            error,
+            reason: failure_reason,
+        }),
     }
 }
 

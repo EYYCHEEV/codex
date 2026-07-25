@@ -16,6 +16,7 @@ use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::TurnStatus;
+use codex_config::McpServerConfig;
 use codex_core::config::Config;
 use codex_protocol::models::WebSearchAction;
 use codex_protocol::protocol;
@@ -137,8 +138,8 @@ impl EventProcessorWithJsonOutput {
         }
     }
 
-    fn configured_mcp_server_count(config: &Config) -> usize {
-        config.mcp_servers.get().len()
+    fn enabled_mcp_server_count(servers: &HashMap<String, McpServerConfig>) -> usize {
+        servers.values().filter(|server| server.enabled).count()
     }
 
     fn mcp_startup_status_from_notification(
@@ -188,10 +189,11 @@ impl EventProcessorWithJsonOutput {
         for (server, status) in &self.mcp_startup_statuses {
             match status {
                 protocol::McpStartupStatus::Ready => ready.push(server.clone()),
-                protocol::McpStartupStatus::Failed { error, .. } => {
+                protocol::McpStartupStatus::Failed { error, reason } => {
                     failed.push(protocol::McpStartupFailure {
                         server: server.clone(),
                         error: error.clone(),
+                        reason: *reason,
                     });
                 }
                 protocol::McpStartupStatus::Cancelled => {
@@ -729,7 +731,8 @@ impl EventProcessor for EventProcessorWithJsonOutput {
         session_configured: &SessionConfiguredEvent,
     ) {
         self.mcp_startup_statuses.clear();
-        self.expected_mcp_startup_servers = Some(Self::configured_mcp_server_count(config));
+        self.expected_mcp_startup_servers =
+            Some(Self::enabled_mcp_server_count(config.mcp_servers.get()));
         self.emitted_mcp_startup_complete = false;
         self.emit(Self::thread_started_event(session_configured));
     }

@@ -20,6 +20,7 @@ impl McpConnectionSet {
                     failures.push(McpStartupFailure {
                         server: server_name.clone(),
                         error: format!("required MCP server `{server_name}` was not initialized"),
+                        reason: None,
                     });
                     continue;
                 };
@@ -29,6 +30,7 @@ impl McpConnectionSet {
                     Err(error) => failures.push(McpStartupFailure {
                         server: server_name.clone(),
                         error: startup_outcome_error_message(error),
+                        reason: None,
                     }),
                 }
             }

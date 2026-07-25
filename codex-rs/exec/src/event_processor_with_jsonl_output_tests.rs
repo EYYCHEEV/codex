@@ -1,7 +1,143 @@
 use super::*;
+use codex_config::Constrained;
+use codex_config::LoaderOverrides;
+use codex_config::McpServerConfig;
+use codex_config::McpServerTransportConfig;
+use codex_core::config::ConfigBuilder;
+use codex_protocol::SessionId;
+use codex_protocol::ThreadId;
+use codex_protocol::protocol::AskForApproval;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::collections::HashMap;
 use tempfile::tempdir;
+
+fn mcp_server_config(enabled: bool) -> McpServerConfig {
+    McpServerConfig {
+        transport: McpServerTransportConfig::Stdio {
+            command: "unused".to_string(),
+            args: Vec::new(),
+            env: None,
+            env_vars: Vec::new(),
+            cwd: None,
+        },
+        auth: Default::default(),
+        environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+        enabled,
+        required: false,
+        supports_parallel_tool_calls: false,
+        disabled_reason: None,
+        startup_timeout_sec: None,
+        tool_timeout_sec: None,
+        default_tools_approval_mode: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        scopes: None,
+        oauth: None,
+        oauth_resource: None,
+        tools: HashMap::new(),
+    }
+}
+
+#[tokio::test]
+async fn disabled_mcp_server_does_not_block_startup_complete() {
+    let servers = HashMap::from([
+        ("enabled-1".to_string(), mcp_server_config(true)),
+        ("enabled-2".to_string(), mcp_server_config(true)),
+        ("disabled".to_string(), mcp_server_config(false)),
+    ]);
+    let codex_home = tempdir().expect("create codex home");
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+        .build()
+        .await
+        .expect("build default config");
+    config.mcp_servers = Constrained::allow_any(servers);
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+    processor.print_config_summary(
+        &config,
+        "",
+        &SessionConfiguredEvent {
+            session_id: SessionId::new(),
+            thread_id: ThreadId::new(),
+            forked_from_id: None,
+            parent_thread_id: None,
+            thread_source: None,
+            thread_name: None,
+            model: "test-model".to_string(),
+            model_provider_id: config.model_provider_id.clone(),
+            service_tier: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: config.approvals_reviewer,
+            permission_profile: config.permissions.effective_permission_profile(),
+            active_permission_profile: None,
+            cwd: config.cwd.clone(),
+            reasoning_effort: None,
+            initial_messages: None,
+            network_proxy: None,
+            rollout_path: None,
+        },
+    );
+    let ready_notification = |name: &str| {
+        ServerNotification::McpServerStatusUpdated(
+            codex_app_server_protocol::McpServerStatusUpdatedNotification {
+                thread_id: None,
+                name: name.to_string(),
+                status: codex_app_server_protocol::McpServerStartupState::Ready,
+                error: None,
+                failure_reason: None,
+            },
+        )
+    };
+    let first = processor.collect_thread_events(ready_notification("enabled-1"));
+    assert_eq!(
+        first,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::McpStartupUpdate(
+                protocol::McpStartupUpdateEvent {
+                    server: "enabled-1".to_string(),
+                    status: protocol::McpStartupStatus::Ready,
+                },
+            )],
+            status: CodexStatus::Running,
+        }
+    );
+
+    let second = processor.collect_thread_events(ready_notification("enabled-2"));
+    assert_eq!(
+        second,
+        CollectedThreadEvents {
+            events: vec![
+                ThreadEvent::McpStartupUpdate(protocol::McpStartupUpdateEvent {
+                    server: "enabled-2".to_string(),
+                    status: protocol::McpStartupStatus::Ready,
+                }),
+                ThreadEvent::McpStartupComplete(protocol::McpStartupCompleteEvent {
+                    ready: vec!["enabled-1".to_string(), "enabled-2".to_string()],
+                    failed: Vec::new(),
+                    cancelled: Vec::new(),
+                }),
+            ],
+            status: CodexStatus::Running,
+        }
+    );
+
+    let repeated = processor.collect_thread_events(ready_notification("enabled-2"));
+    assert_eq!(
+        repeated,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::McpStartupUpdate(
+                protocol::McpStartupUpdateEvent {
+                    server: "enabled-2".to_string(),
+                    status: protocol::McpStartupStatus::Ready,
+                },
+            )],
+            status: CodexStatus::Running,
+        }
+    );
+}
 
 #[test]
 fn failed_turn_does_not_overwrite_output_last_message_file() {

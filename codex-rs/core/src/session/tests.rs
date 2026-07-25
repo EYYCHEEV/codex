@@ -4553,7 +4553,7 @@ fn text_block(s: &str) -> serde_json::Value {
 }
 
 async fn build_test_config(codex_home: &Path) -> Config {
-    ConfigBuilder::without_managed_config_for_tests()
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.to_path_buf())
         .harness_overrides(ConfigOverrides {
             model: Some("gpt-5.5".to_string()),
@@ -4561,7 +4561,9 @@ async fn build_test_config(codex_home: &Path) -> Config {
         })
         .build()
         .await
-        .expect("load default test config")
+        .expect("load default test config");
+    config.model_provider.supports_websockets = false;
+    config
 }
 
 fn session_telemetry(
@@ -5674,6 +5676,7 @@ async fn mcp_startup_events_update_live_session_snapshot() {
                 failed: vec![codex_protocol::protocol::McpStartupFailure {
                     server: "docs".to_string(),
                     error: "boot failed".to_string(),
+                    reason: None,
                 }],
                 cancelled: Vec::new(),
             }),
@@ -5697,9 +5700,12 @@ async fn mcp_startup_events_update_live_session_snapshot() {
             failed: vec![codex_protocol::protocol::McpStartupFailure {
                 server: "docs".to_string(),
                 error: "boot failed".to_string(),
+                reason: None,
             }],
             cancelled: Vec::new(),
         }),
+        omitted_updates: 0,
+        omitted_server_names: Default::default(),
     };
     assert_eq!(snapshot, expected);
 }
@@ -5789,6 +5795,8 @@ async fn mcp_startup_recording_resets_and_ignores_stale_round_events() {
                 },
             )]),
             complete: None,
+            omitted_updates: 0,
+            omitted_server_names: Default::default(),
         })
     );
 
@@ -5832,6 +5840,8 @@ async fn mcp_startup_recording_resets_and_ignores_stale_round_events() {
                 codex_protocol::protocol::McpStartupStatus::Ready,
             )]),
             complete: None,
+            omitted_updates: 0,
+            omitted_server_names: Default::default(),
         })
     );
 }

@@ -227,6 +227,7 @@ fn terminal_mcp_startup_status_emits_aggregate_complete_event() {
                     failed: vec![protocol::McpStartupFailure {
                         server: "smoke".to_string(),
                         error: "boom".to_string(),
+                        reason: Some(protocol::McpStartupFailureReason::ReauthenticationRequired,),
                     }],
                     cancelled: vec![],
                 }),
