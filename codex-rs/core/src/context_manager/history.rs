@@ -65,6 +65,8 @@ use std::sync::LazyLock;
 
 use crate::context::GuardianContextMode;
 
+const MODEL_VISIBLE_ITEM_MAX_TOKENS: usize = 10_000;
+
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
@@ -362,15 +364,70 @@ impl ContextManager {
                 item: item.clone(),
                 metadata: metadata.cloned(),
             };
-            if let ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } = &mut processed.item
-            {
+            let original_output = match &processed.item {
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. } => Some(output.clone()),
+                _ => None,
+            };
+            if let Some(original_output) = original_output {
                 // The override already includes the tool's serialization allowance.
-                let policy = metadata
+                let configured_policy = metadata
                     .and_then(|metadata| metadata.history_truncation_token_limit)
                     .map(TruncationPolicy::Tokens)
                     .unwrap_or_else(|| with_serialization_allowance(policy));
-                truncate_function_output_payload(output, policy, estimate_audio_token_count);
+                let mut effective_policy = match configured_policy {
+                    TruncationPolicy::Bytes(bytes) => TruncationPolicy::Bytes(
+                        bytes.min(approx_bytes_for_tokens(MODEL_VISIBLE_ITEM_MAX_TOKENS)),
+                    ),
+                    TruncationPolicy::Tokens(tokens) => {
+                        TruncationPolicy::Tokens(tokens.min(MODEL_VISIBLE_ITEM_MAX_TOKENS))
+                    }
+                };
+                let max_item_tokens =
+                    i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
+
+                for _ in 0..3 {
+                    let output = match &mut processed.item {
+                        ResponseItem::FunctionCallOutput { output, .. }
+                        | ResponseItem::CustomToolCallOutput { output, .. } => output,
+                        _ => unreachable!("tool output variant changed while truncating history"),
+                    };
+                    *output = original_output.clone();
+                    truncate_function_output_payload(
+                        output,
+                        effective_policy,
+                        estimate_audio_token_count,
+                    );
+
+                    let estimated_tokens = estimate_item_token_count(&processed.item);
+                    if estimated_tokens <= max_item_tokens {
+                        break;
+                    }
+                    let excess_tokens = usize::try_from(estimated_tokens - max_item_tokens)
+                        .unwrap_or(usize::MAX)
+                        .saturating_add(1);
+                    effective_policy = match effective_policy {
+                        TruncationPolicy::Bytes(bytes) => TruncationPolicy::Bytes(
+                            bytes.saturating_sub(approx_bytes_for_tokens(excess_tokens)),
+                        ),
+                        TruncationPolicy::Tokens(tokens) => {
+                            TruncationPolicy::Tokens(tokens.saturating_sub(excess_tokens))
+                        }
+                    };
+                }
+
+                if estimate_item_token_count(&processed.item) > max_item_tokens {
+                    let output = match &mut processed.item {
+                        ResponseItem::FunctionCallOutput { output, .. }
+                        | ResponseItem::CustomToolCallOutput { output, .. } => output,
+                        _ => unreachable!("tool output variant changed while bounding history"),
+                    };
+                    output.body = FunctionCallOutputBody::Text(
+                        "Tool output omitted because the complete item exceeded the 10,000-token context limit."
+                            .to_string(),
+                    );
+                    output.success = original_output.success;
+                }
             }
             if let Some(review_history) = &mut self.review_history
                 && !matches!(item, ResponseItem::Message { role, content, .. }
