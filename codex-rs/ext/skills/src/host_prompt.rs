@@ -5,6 +5,7 @@ use codex_skills::SkillMetadata;
 use codex_skills::normalize_skill_path;
 
 use crate::HostSkillsSnapshot;
+use crate::fragments::MAX_SKILL_INSTRUCTION_TOKENS;
 use crate::fragments::SkillInstructions;
 use crate::render::truncate_main_prompt_contents;
 
@@ -87,12 +88,21 @@ impl HostSkillsSnapshot {
                             skill.name
                         ));
                     }
-                    prompts.fragments.push(Box::new(SkillInstructions {
+                    let fragment = SkillInstructions {
                         name: skill.name.clone(),
                         path: skill.path_to_skills_md.to_string_lossy().into_owned(),
                         contents,
                         resource_access: None,
-                    }));
+                    };
+                    if fragment.exceeds_model_visible_token_limit() {
+                        prompts.warnings.push(format!(
+                            "Skipped skill {} at {}: instructions exceed the {MAX_SKILL_INSTRUCTION_TOKENS}-token model-context limit",
+                            skill.name,
+                            skill.path_to_skills_md.display(),
+                        ));
+                        continue;
+                    }
+                    prompts.fragments.push(Box::new(fragment));
                     prompts.injected.push(skill.clone());
                 }
                 Err(err) => {

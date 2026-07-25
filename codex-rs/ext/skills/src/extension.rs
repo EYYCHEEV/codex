@@ -42,6 +42,7 @@ use crate::catalog::SkillCatalogEntry;
 use crate::catalog::SkillReadResult;
 use crate::catalog::SkillSourceKind;
 use crate::fragments::AvailableSkillsInstructions;
+use crate::fragments::MAX_SKILL_INSTRUCTION_TOKENS;
 use crate::fragments::SkillInstructions;
 use crate::fragments::SkillResourceAccess;
 use crate::provider::HostSkillProvider;
@@ -516,6 +517,20 @@ where
                                     main_resource: entry.main_prompt.as_str().to_string(),
                                 }),
                         };
+                        if fragment.exceeds_model_visible_token_limit() {
+                            let warning = format!(
+                                "Skipped skill {} at {}: instructions exceed the {MAX_SKILL_INSTRUCTION_TOKENS}-token model-context limit",
+                                entry.name,
+                                entry.rendered_path(),
+                            );
+                            self.emit_warning(
+                                thread_store.level_id(),
+                                Some(&input.turn_id),
+                                warning.clone(),
+                            );
+                            warnings.push(warning);
+                            continue;
+                        }
                         fragments.push(Box::new(fragment));
                         main_prompts_injected = true;
                         if entry.authority.kind == SkillSourceKind::Host {
