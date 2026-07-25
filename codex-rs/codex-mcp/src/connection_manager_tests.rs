@@ -2854,6 +2854,34 @@ fn mcp_startup_failure_reason_requires_existing_oauth_and_auth_failure() {
 }
 
 #[test]
+fn startup_completion_preserves_failure_reason() {
+    let reason = McpStartupFailureReason::ReauthenticationRequired;
+    let mut summary = McpStartupCompleteEvent::default();
+
+    record_startup_outcome(
+        &mut summary,
+        "example".to_string(),
+        Err(StartupOutcomeError::Failed {
+            error: "startup failed".to_string(),
+            is_authentication_required: true,
+        }),
+        Some(reason),
+    );
+
+    assert_eq!(
+        summary,
+        McpStartupCompleteEvent {
+            failed: vec![McpStartupFailure {
+                server: "example".to_string(),
+                error: "startup failed".to_string(),
+                reason: Some(reason),
+            }],
+            ..Default::default()
+        }
+    );
+}
+
+#[test]
 fn mcp_init_error_display_reports_generic_errors() {
     let server_name = "custom";
     let config = McpServerConfig {
