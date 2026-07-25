@@ -242,6 +242,38 @@ struct ListedAgentResult {
     mcp_startup: Option<codex_protocol::protocol::McpStartupSnapshot>,
 }
 
+fn completed_empty_mcp_startup_snapshot() -> codex_protocol::protocol::McpStartupSnapshot {
+    codex_protocol::protocol::McpStartupSnapshot {
+        complete: Some(codex_protocol::protocol::McpStartupCompleteEvent {
+            ready: Vec::new(),
+            failed: Vec::new(),
+            cancelled: Vec::new(),
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn wait_agent_mcp_startup_evidence_includes_each_serialized_evidence_source() {
+    let mut snapshot = codex_protocol::protocol::McpStartupSnapshot::default();
+    assert!(!wait::mcp_startup_snapshot_has_server_evidence(&snapshot));
+
+    snapshot.statuses.insert(
+        "docs".to_string(),
+        codex_protocol::protocol::McpStartupStatus::Starting,
+    );
+    assert!(wait::mcp_startup_snapshot_has_server_evidence(&snapshot));
+
+    snapshot = completed_empty_mcp_startup_snapshot();
+    assert!(wait::mcp_startup_snapshot_has_server_evidence(&snapshot));
+
+    snapshot = codex_protocol::protocol::McpStartupSnapshot {
+        omitted_updates: 1,
+        ..Default::default()
+    };
+    assert!(wait::mcp_startup_snapshot_has_server_evidence(&snapshot));
+}
+
 async fn wait_for_started_activity(
     rx_event: &async_channel::Receiver<codex_protocol::protocol::Event>,
     agent_path: &str,
@@ -3916,6 +3948,66 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
 }
 
 #[tokio::test]
+async fn wait_agent_latest_status_promotes_a_newly_final_status_before_redacting_it() {
+    let (_session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let thread = manager
+        .start_thread(StartThreadOptions::new(turn.config.as_ref().clone()))
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    let agent_control = manager.agent_control();
+    let completed_turn = thread.thread.session.new_default_turn().await;
+    thread
+        .thread
+        .session
+        .send_event(
+            completed_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: completed_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("first done".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    wait_for_agent_status(&agent_control, agent_id, |status| {
+        matches!(status, AgentStatus::Completed(_))
+    })
+    .await;
+
+    // Model the race where the wait itself observed no final status, but the
+    // agent completed before the latest-status sample was taken.
+    let mut final_statuses = HashMap::new();
+    let latest_status = wait::build_wait_agent_latest_status(
+        &agent_control,
+        &HashMap::from([(agent_id, agent_id.to_string())]),
+        &mut final_statuses,
+    )
+    .await;
+    assert_eq!(
+        latest_status,
+        HashMap::from([(agent_id.to_string(), AgentStatus::Completed(None))])
+    );
+    assert_eq!(
+        final_statuses,
+        HashMap::from([(
+            agent_id,
+            AgentStatus::Completed(Some("first done".to_string()))
+        )])
+    );
+
+    thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
 async fn wait_agent_times_out_when_status_is_not_final() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3953,7 +4045,10 @@ async fn wait_agent_times_out_when_status_is_not_final() {
                 manager.agent_control().get_status(agent_id).await,
             )]),
             timed_out: true,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
@@ -3991,11 +4086,11 @@ async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible
         .agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let finished_thread = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("finished thread should start");
     let running_thread = manager
-        .start_thread(config)
+        .start_thread(StartThreadOptions::new(config))
         .await
         .expect("running thread should start");
     let finished_id = finished_thread.thread_id;
@@ -4052,22 +4147,23 @@ async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible
     let (content, success) = expect_text_output(output);
     let result: wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
+    let empty_mcp_startup = completed_empty_mcp_startup_snapshot();
     assert_eq!(
         result,
         wait::WaitAgentResult {
             status: HashMap::from([(finished_id.to_string(), AgentStatus::Shutdown)]),
             latest_status: HashMap::from([
-                (
-                    finished_id.to_string(),
-                    manager.agent_control().get_status(finished_id).await
-                ),
+                (finished_id.to_string(), AgentStatus::Shutdown),
                 (
                     running_id.to_string(),
-                    manager.agent_control().get_status(running_id).await
+                    manager.agent_control().get_status(running_id).await,
                 ),
             ]),
             timed_out: false,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([
+                (finished_id.to_string(), empty_mcp_startup.clone()),
+                (running_id.to_string(), empty_mcp_startup),
+            ])),
         }
     );
     assert_eq!(success, None);
@@ -4086,10 +4182,14 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
     session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    wait_for_mcp_startup_snapshot(&session.services.agent_control, agent_id, |snapshot| {
+        snapshot.complete.is_some()
+    })
+    .await;
     thread
         .thread
         .codex
@@ -4205,7 +4305,10 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
                 manager.agent_control().get_status(agent_id).await,
             )]),
             timed_out: true,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
@@ -4224,7 +4327,7 @@ async fn wait_agent_clamps_long_timeouts_to_maximum() {
     session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
@@ -4264,7 +4367,10 @@ async fn wait_agent_clamps_long_timeouts_to_maximum() {
                 manager.agent_control().get_status(agent_id).await,
             )]),
             timed_out: true,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
@@ -4324,7 +4430,10 @@ async fn wait_agent_returns_final_status_without_timeout() {
             status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
             latest_status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
             timed_out: false,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
