@@ -3695,32 +3695,30 @@ mod tests {
 
     #[tokio::test]
     async fn auth_check_validates_external_chatgpt_account_id() {
-        let valid_check = auth_check_for_stored_tokens(
-            "chatgptAuthTokens",
-            "access-token",
-            /*refresh_token*/ "",
-            Some("account-id"),
-        )
-        .await;
+        let codex_home = tempfile::tempdir().expect("temporary CODEX_HOME");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("test config");
+        let valid_auth =
+            CodexAuth::from_external_chatgpt_tokens("e30.e30.signature", "account-id", None)
+                .expect("valid external ChatGPT auth");
+        let valid_check = auth_check(&config, Ok(Some(&valid_auth)));
         assert_eq!(valid_check.status, CheckStatus::Ok);
 
-        for account_id in [None, Some(" \t ")] {
-            let invalid_check = auth_check_for_stored_tokens(
-                "chatgptAuthTokens",
-                "access-token",
-                /*refresh_token*/ "",
-                account_id,
-            )
-            .await;
-            assert_eq!(invalid_check.status, CheckStatus::Fail);
-            assert_eq!(invalid_check.summary, "ChatGPT credentials are incomplete");
-            assert!(
-                invalid_check
-                    .details
-                    .iter()
-                    .any(|detail| detail == "effective ChatGPT auth error: account id is empty")
-            );
-        }
+        let invalid_auth =
+            CodexAuth::from_external_chatgpt_tokens("e30.e30.signature", " \t ", None)
+                .expect("synthetic external ChatGPT auth");
+        let invalid_check = auth_check(&config, Ok(Some(&invalid_auth)));
+        assert_eq!(invalid_check.status, CheckStatus::Fail);
+        assert_eq!(invalid_check.summary, "ChatGPT credentials are incomplete");
+        assert!(
+            invalid_check
+                .details
+                .iter()
+                .any(|detail| detail == "effective ChatGPT auth error: account id is empty")
+        );
     }
 
     #[tokio::test]

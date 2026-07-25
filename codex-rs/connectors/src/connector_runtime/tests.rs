@@ -395,10 +395,11 @@ fn codex_apps_tools_cache_reuses_only_the_exact_full_binding() {
         "https://chatgpt.com",
     );
     let production = cache.context(codex_home.path().to_path_buf(), production_key.clone());
-    production.store_current_tools_for_test(vec![create_test_tool(
-        CODEX_APPS_MCP_SERVER_NAME,
-        "production",
-    )]);
+    let _ = production.publish_if_newest_accepted(
+        production.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
+        &create_test_server_info("Codex Apps"),
+        vec![create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "production")],
+    );
 
     let exact = cache.context(codex_home.path().to_path_buf(), production_key.clone());
     assert_eq!(
@@ -483,10 +484,14 @@ fn managed_codex_apps_cache_separates_email_identities_with_shared_raw_ids() {
     );
 
     let first = cache.context(codex_home.path().to_path_buf(), first_key.clone());
-    first.store_current_tools_for_test(vec![create_test_tool(
-        CODEX_APPS_MCP_SERVER_NAME,
-        "first-account-tool",
-    )]);
+    let _ = first.publish_if_newest_accepted(
+        first.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh),
+        &create_test_server_info("Codex Apps"),
+        vec![create_test_tool(
+            CODEX_APPS_MCP_SERVER_NAME,
+            "first-account-tool",
+        )],
+    );
 
     let same_snapshot = cache.context(codex_home.path().to_path_buf(), first_key);
     assert_eq!(
