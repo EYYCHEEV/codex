@@ -12,6 +12,7 @@ use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
+use crate::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
@@ -22,11 +23,10 @@ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHa
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
 use crate::turn_diff_tracker::TurnDiffTracker;
-use crate::thread_store_from_config;
-use codex_extension_api::empty_extension_registry;
 use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
 use codex_config::McpServerConfig;
 use codex_config::McpServerTransportConfig;
+use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -35,6 +35,7 @@ use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::items::SubAgentActivityItem;
@@ -65,6 +66,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use core_test_support::TempDirExt;
@@ -213,6 +215,17 @@ struct ListedAgentResult {
     reasoning_effort: Option<ReasoningEffort>,
     agent_status: serde_json::Value,
     mcp_startup: Option<codex_protocol::protocol::McpStartupSnapshot>,
+}
+
+fn completed_empty_mcp_startup_snapshot() -> codex_protocol::protocol::McpStartupSnapshot {
+    codex_protocol::protocol::McpStartupSnapshot {
+        complete: Some(codex_protocol::protocol::McpStartupCompleteEvent {
+            ready: Vec::new(),
+            failed: Vec::new(),
+            cancelled: Vec::new(),
+        }),
+        ..Default::default()
+    }
 }
 
 async fn wait_for_started_activity(
@@ -1252,12 +1265,7 @@ async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
         .start_thread(root_config)
         .await
         .expect("root thread should start");
-    if let Some(startup_prewarm) = root
-        .thread
-        .session
-        .take_session_startup_prewarm()
-        .await
-    {
+    if let Some(startup_prewarm) = root.thread.session.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
     root.thread.session.new_default_turn().await;
@@ -1448,12 +1456,7 @@ model_reasoning_effort = "max"
         .start_thread((*turn.config).clone())
         .await
         .expect("root thread should start");
-    if let Some(startup_prewarm) = root
-        .thread
-        .session
-        .take_session_startup_prewarm()
-        .await
-    {
+    if let Some(startup_prewarm) = root.thread.session.take_session_startup_prewarm().await {
         startup_prewarm.abort().await;
     }
     root.thread.session.new_default_turn().await;
@@ -2218,10 +2221,7 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
     session
         .services
         .agent_control
-        .register_agent_metadata_for_tests(
-            root.thread_id,
-            worker_path,
-        );
+        .register_agent_metadata_for_tests(root.thread_id, worker_path);
     root.thread
         .session
         .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
@@ -2262,6 +2262,8 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
             },
         )]),
         complete: None,
+        omitted_updates: 0,
+        omitted_server_names: Default::default(),
     };
     assert_eq!(worker.mcp_startup, Some(expected));
     assert_eq!(worker.agent_type, DEFAULT_ROLE_NAME);
@@ -3996,6 +3998,75 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
 }
 
 #[tokio::test]
+async fn wait_agent_latest_status_resamples_agent_after_completion() {
+    let (_session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let thread = manager
+        .start_thread(turn.config.as_ref().clone())
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    let agent_control = manager.agent_control();
+    let completed_turn = thread.thread.session.new_default_turn().await;
+    thread
+        .thread
+        .session
+        .send_event(
+            completed_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: completed_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("first done".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    wait_for_agent_status(&agent_control, agent_id, |status| {
+        matches!(status, AgentStatus::Completed(_))
+    })
+    .await;
+
+    let restarted_turn = thread.thread.session.new_default_turn().await;
+    thread
+        .thread
+        .session
+        .send_event(
+            restarted_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: restarted_turn.sub_id.clone(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+    wait_for_agent_status(&agent_control, agent_id, |status| {
+        matches!(status, AgentStatus::Running)
+    })
+    .await;
+
+    let latest_status = wait::build_wait_agent_latest_status(
+        &agent_control,
+        &HashMap::from([(agent_id, agent_id.to_string())]),
+    )
+    .await;
+    assert_eq!(
+        latest_status,
+        HashMap::from([(agent_id.to_string(), AgentStatus::Running)])
+    );
+
+    thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
 async fn wait_agent_times_out_when_status_is_not_final() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4033,7 +4104,10 @@ async fn wait_agent_times_out_when_status_is_not_final() {
                 manager.agent_control().get_status(agent_id).await,
             )]),
             timed_out: true,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
@@ -4132,22 +4206,23 @@ async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible
     let (content, success) = expect_text_output(output);
     let result: wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
+    let empty_mcp_startup = completed_empty_mcp_startup_snapshot();
     assert_eq!(
         result,
         wait::WaitAgentResult {
             status: HashMap::from([(finished_id.to_string(), AgentStatus::Shutdown)]),
             latest_status: HashMap::from([
-                (
-                    finished_id.to_string(),
-                    manager.agent_control().get_status(finished_id).await
-                ),
+                (finished_id.to_string(), AgentStatus::Shutdown),
                 (
                     running_id.to_string(),
-                    manager.agent_control().get_status(running_id).await
+                    manager.agent_control().get_status(running_id).await,
                 ),
             ]),
             timed_out: false,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([
+                (finished_id.to_string(), empty_mcp_startup.clone()),
+                (running_id.to_string(), empty_mcp_startup),
+            ])),
         }
     );
     assert_eq!(success, None);
@@ -4170,6 +4245,10 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
+    wait_for_mcp_startup_snapshot(&session.services.agent_control, agent_id, |snapshot| {
+        snapshot.complete.is_some()
+    })
+    .await;
     thread
         .thread
         .session
@@ -4284,7 +4363,10 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
                 manager.agent_control().get_status(agent_id).await,
             )]),
             timed_out: true,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
@@ -4343,7 +4425,10 @@ async fn wait_agent_clamps_long_timeouts_to_maximum() {
                 manager.agent_control().get_status(agent_id).await,
             )]),
             timed_out: true,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
@@ -4403,7 +4488,10 @@ async fn wait_agent_returns_final_status_without_timeout() {
             status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
             latest_status: HashMap::from([(agent_id.to_string(), AgentStatus::Shutdown)]),
             timed_out: false,
-            mcp_startup: None,
+            mcp_startup: Some(HashMap::from([(
+                agent_id.to_string(),
+                completed_empty_mcp_startup_snapshot(),
+            )])),
         }
     );
     assert_eq!(success, None);
@@ -5251,25 +5339,25 @@ async fn tool_handlers_cascade_close_and_resume() {
     let parent_thread_id = parent.thread_id;
     let parent_session = parent.thread.session.clone();
 
-                    let child_spawn_output = SpawnAgentHandler::default()
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "spawn_agent",
-                            function_payload(json!({"message": "hello child"})),
-                        ))
-                        .await
-                        .expect("child spawn should succeed");
-                    let (child_content, child_success) = expect_text_output(child_spawn_output);
-                    let child_result: serde_json::Value = serde_json::from_str(&child_content)
-                        .expect("child spawn result should be json");
-                    let child_thread_id = parse_agent_id(
-                        child_result
-                            .get("agent_id")
-                            .and_then(serde_json::Value::as_str)
-                            .expect("child spawn result should include agent_id"),
-                    );
-                    assert_eq!(child_success, Some(true));
+    let child_spawn_output = SpawnAgentHandler::default()
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({"message": "hello child"})),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let (child_content, child_success) = expect_text_output(child_spawn_output);
+    let child_result: serde_json::Value =
+        serde_json::from_str(&child_content).expect("child spawn result should be json");
+    let child_thread_id = parse_agent_id(
+        child_result
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("child spawn result should include agent_id"),
+    );
+    assert_eq!(child_success, Some(true));
 
     let child_thread = manager
         .get_thread(child_thread_id)
@@ -5296,88 +5384,84 @@ async fn tool_handlers_cascade_close_and_resume() {
     );
     assert_eq!(grandchild_success, Some(true));
 
-                    let close_output = CloseAgentHandler
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "close_agent",
-                            function_payload(json!({"target": child_thread_id.to_string()})),
-                        ))
-                        .await
-                        .expect("close_agent should close the child subtree");
-                    let (close_content, close_success) = expect_text_output(close_output);
-                    let close_result: close_agent::CloseAgentResult =
-                        serde_json::from_str(&close_content)
-                            .expect("close_agent result should be json");
-                    assert_ne!(close_result.previous_status, AgentStatus::NotFound);
-                    assert_eq!(close_success, Some(true));
-                    assert_eq!(
-                        manager.agent_control().get_status(child_thread_id).await,
-                        AgentStatus::NotFound
-                    );
-                    assert_eq!(
-                        manager
-                            .agent_control()
-                            .get_status(grandchild_thread_id)
-                            .await,
-                        AgentStatus::NotFound
-                    );
+    let close_output = CloseAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should close the child subtree");
+    let (close_content, close_success) = expect_text_output(close_output);
+    let close_result: close_agent::CloseAgentResult =
+        serde_json::from_str(&close_content).expect("close_agent result should be json");
+    assert_ne!(close_result.previous_status, AgentStatus::NotFound);
+    assert_eq!(close_success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
 
-                    let child_resume_output = ResumeAgentHandler
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "resume_agent",
-                            function_payload(json!({"id": child_thread_id.to_string()})),
-                        ))
-                        .await
-                        .expect("resume_agent should reopen the child subtree");
-                    let (child_resume_content, child_resume_success) =
-                        expect_text_output(child_resume_output);
-                    let child_resume_result: resume_agent::ResumeAgentResult =
-                        serde_json::from_str(&child_resume_content)
-                            .expect("resume result should be json");
-                    assert_ne!(child_resume_result.status, AgentStatus::NotFound);
-                    assert_eq!(child_resume_success, Some(true));
-                    assert_ne!(
-                        manager.agent_control().get_status(child_thread_id).await,
-                        AgentStatus::NotFound
-                    );
-                    assert_ne!(
-                        manager
-                            .agent_control()
-                            .get_status(grandchild_thread_id)
-                            .await,
-                        AgentStatus::NotFound
-                    );
+    let child_resume_output = ResumeAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({"id": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("resume_agent should reopen the child subtree");
+    let (child_resume_content, child_resume_success) = expect_text_output(child_resume_output);
+    let child_resume_result: resume_agent::ResumeAgentResult =
+        serde_json::from_str(&child_resume_content).expect("resume result should be json");
+    assert_ne!(child_resume_result.status, AgentStatus::NotFound);
+    assert_eq!(child_resume_success, Some(true));
+    assert_ne!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_ne!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
 
-                    let close_again_output = CloseAgentHandler
-                        .handle(invocation(
-                            parent_session.clone(),
-                            parent_session.new_default_turn().await,
-                            "close_agent",
-                            function_payload(json!({"target": child_thread_id.to_string()})),
-                        ))
-                        .await
-                        .expect("close_agent should be repeatable for the child subtree");
-                    let (close_again_content, close_again_success) =
-                        expect_text_output(close_again_output);
-                    let close_again_result: close_agent::CloseAgentResult =
-                        serde_json::from_str(&close_again_content)
-                            .expect("second close_agent result should be json");
-                    assert_ne!(close_again_result.previous_status, AgentStatus::NotFound);
-                    assert_eq!(close_again_success, Some(true));
-                    assert_eq!(
-                        manager.agent_control().get_status(child_thread_id).await,
-                        AgentStatus::NotFound
-                    );
-                    assert_eq!(
-                        manager
-                            .agent_control()
-                            .get_status(grandchild_thread_id)
-                            .await,
-                        AgentStatus::NotFound
-                    );
+    let close_again_output = CloseAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": child_thread_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should be repeatable for the child subtree");
+    let (close_again_content, close_again_success) = expect_text_output(close_again_output);
+    let close_again_result: close_agent::CloseAgentResult =
+        serde_json::from_str(&close_again_content)
+            .expect("second close_agent result should be json");
+    assert_ne!(close_again_result.previous_status, AgentStatus::NotFound);
+    assert_eq!(close_again_success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(child_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
 
     let operator = manager
         .start_thread(StartThreadOptions::new(config.clone()))

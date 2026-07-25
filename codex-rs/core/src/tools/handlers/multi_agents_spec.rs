@@ -115,8 +115,8 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
 }
 
 pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
-    let expose_route_overrides = options.expose_spawn_agent_model_overrides
-        && !options.hide_agent_type_model_reasoning;
+    let expose_route_overrides =
+        options.expose_spawn_agent_model_overrides && !options.hide_agent_type_model_reasoning;
     let available_models_description = expose_route_overrides.then(|| {
         spawn_agent_models_description(&options.available_models, options.multi_agent_version)
     });
@@ -470,7 +470,11 @@ fn mcp_startup_snapshot_output_schema() -> Value {
                             "type": "object",
                             "properties": {
                                 "server": { "type": "string" },
-                                "error": { "type": "string" }
+                                "error": { "type": "string" },
+                                "reason": {
+                                    "type": "string",
+                                    "enum": ["reauthentication_required"]
+                                }
                             },
                             "required": ["server", "error"],
                             "additionalProperties": false
@@ -483,6 +487,11 @@ fn mcp_startup_snapshot_output_schema() -> Value {
                 },
                 "required": ["ready", "failed", "cancelled"],
                 "additionalProperties": false
+            },
+            "omitted_updates": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Number of MCP servers omitted to keep this model-visible snapshot bounded."
             }
         },
         "additionalProperties": false
@@ -633,7 +642,7 @@ fn wait_output_schema_v1() -> Value {
             },
             "latest_status": {
                 "type": "object",
-                "description": "Latest sampled statuses keyed by the requested agent ids. This includes non-final lifecycle states and is sampled when wait_agent returns.",
+                "description": "Latest sampled statuses keyed by every requested agent id. Final message and error payloads are redacted because full terminal details are already present in status.",
                 "additionalProperties": agent_status_output_schema()
             },
             "timed_out": {

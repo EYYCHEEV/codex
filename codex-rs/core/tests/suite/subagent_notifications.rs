@@ -62,8 +62,6 @@ const REQUESTED_MODEL: &str = "gpt-5.4";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 const V2_DEFAULT_MODEL: &str = "gpt-5.6-terra";
 const V2_DEFAULT_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
-const V2_REQUESTED_MODEL: &str = "gpt-5.6-sol";
-const V2_REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 const ROLE_MODEL: &str = "gpt-5.4";
 const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 const SUBAGENT_START_CONTEXT: &str = "subagent start context reaches child";
@@ -74,6 +72,23 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     decoded_body(req)
         .and_then(|body| String::from_utf8(body).ok())
         .is_some_and(|body| body.contains(text))
+}
+
+fn body_uses_model(req: &wiremock::Request, model: &str) -> bool {
+    decoded_body(req)
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .is_some_and(|body| body.get("model").and_then(Value::as_str) == Some(model))
+}
+
+fn body_last_user_message_contains(req: &wiremock::Request, text: &str) -> bool {
+    decoded_body(req)
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
+        .and_then(|input| input.last().cloned())
+        .is_some_and(|item| {
+            item.get("role").and_then(Value::as_str) == Some("user")
+                && item.to_string().contains(text)
+        })
 }
 
 fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
@@ -872,6 +887,134 @@ async fn subagent_notification_is_included_without_wait() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_agent_reports_terminal_once_and_keeps_unresolved_siblings_visible() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = test_codex()
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let completed_thread = test
+        .thread_manager
+        .start_thread(test.config.clone())
+        .await?;
+    let running_thread = test
+        .thread_manager
+        .start_thread(test.config.clone())
+        .await?;
+    let completed_id = completed_thread.thread_id;
+    let running_id = running_thread.thread_id;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, "finish child for wait"),
+        sse(vec![
+            ev_response_created("resp-completed-child"),
+            ev_assistant_message("msg-completed-child", "child done"),
+            ev_completed("resp-completed-child"),
+        ]),
+    )
+    .await;
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, test.cwd_path());
+    let wait_call_id = "wait-agent-v1-call";
+    let wait_args = serde_json::to_string(&json!({
+        "targets": [completed_id.to_string(), running_id.to_string()],
+        "timeout_ms": 10_000,
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| body_contains(request, "inspect both agents"),
+        sse(vec![
+            ev_response_created("resp-wait-1"),
+            ev_function_call_with_namespace(
+                wait_call_id,
+                MULTI_AGENT_V1_NAMESPACE,
+                "wait_agent",
+                &wait_args,
+            ),
+            ev_completed("resp-wait-1"),
+        ]),
+    )
+    .await;
+    let wait_result = mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| body_contains(request, wait_call_id),
+        sse(vec![
+            ev_response_created("resp-wait-2"),
+            ev_assistant_message("msg-wait-2", "done"),
+            ev_completed("resp-wait-2"),
+        ]),
+    )
+    .await;
+
+    let complete_child = async {
+        completed_thread
+            .thread
+            .submit(Op::UserInput {
+                items: vec![UserInput::Text {
+                    text: "finish child for wait".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+                responsesapi_client_metadata: None,
+                additional_context: Default::default(),
+                thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                    environments: Some(local_selections(test.config.cwd.clone())),
+                    approval_policy: Some(AskForApproval::Never),
+                    sandbox_policy: Some(sandbox_policy),
+                    permission_profile,
+                    model: Some(completed_thread.session_configured.model.clone()),
+                    ..Default::default()
+                },
+            })
+            .await?;
+        wait_for_event_match(completed_thread.thread.as_ref(), |event| match event {
+            EventMsg::TurnComplete(event) => event
+                .last_agent_message
+                .as_deref()
+                .is_some_and(|message| message == "child done")
+                .then_some(()),
+            _ => None,
+        })
+        .await;
+        anyhow::Ok(())
+    };
+    tokio::try_join!(complete_child, test.submit_turn("inspect both agents"))?;
+    let request = wait_result.single_request();
+    let output = request.function_call_output(wait_call_id);
+    let output: Value = serde_json::from_str(
+        output["output"]
+            .as_str()
+            .expect("wait_agent output should be JSON text"),
+    )?;
+    assert_eq!(
+        output["status"][completed_id.to_string()],
+        json!({"completed": "child done"})
+    );
+    assert_eq!(
+        output["latest_status"][completed_id.to_string()],
+        json!({"completed": null})
+    );
+    assert_eq!(
+        output["latest_status"][running_id.to_string()],
+        json!("pending_init")
+    );
+    assert_eq!(output["status"].get(running_id.to_string()), None);
+
+    running_thread.thread.submit(Op::Shutdown {}).await?;
+    Ok(())
+}
+
 #[test_case(ThreadHistoryMode::Legacy; "legacy")]
 #[test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -884,7 +1027,7 @@ async fn spawned_child_receives_forked_parent_context(
 
     let seed_turn = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, TURN_0_FORK_PROMPT),
+        |req: &wiremock::Request| body_last_user_message_contains(req, TURN_0_FORK_PROMPT),
         sse(vec![
             ev_response_created("resp-seed-1"),
             ev_assistant_message("msg-seed-1", "seeded"),
@@ -975,17 +1118,13 @@ async fn spawned_child_receives_forked_parent_context(
 }
 
 #[derive(Clone, Copy)]
-enum FullHistoryV2ModelSelection {
+enum V2SpawnSelection {
     ConfiguredDefault,
-    ExplicitOverride,
+    TypedRole,
 }
 
-#[test_case(FullHistoryV2ModelSelection::ConfiguredDefault; "configured default with omitted fork_turns")]
-#[test_case(FullHistoryV2ModelSelection::ExplicitOverride; "explicit override with fork_turns all")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
-    selection: FullHistoryV2ModelSelection,
-) -> Result<()> {
+async fn spawned_v2_children_use_fork_and_model_defaults() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -999,66 +1138,102 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         ]),
     )
     .await;
-    let (spawn_args, expected_model, expected_reasoning_effort) = match selection {
-        FullHistoryV2ModelSelection::ConfiguredDefault => (
-            json!({
-                "message": CHILD_PROMPT,
-                "task_name": "worker",
-            }),
-            V2_DEFAULT_MODEL,
-            V2_DEFAULT_REASONING_EFFORT,
+    let mut scenario_mocks = Vec::new();
+    for (selection, parent_prompt, child_prompt, call_id) in [
+        (
+            V2SpawnSelection::ConfiguredDefault,
+            "spawn configured-default child",
+            "configured-default child work",
+            "spawn-configured-default",
         ),
-        FullHistoryV2ModelSelection::ExplicitOverride => (
-            json!({
-                "message": CHILD_PROMPT,
-                "task_name": "worker",
-                "fork_turns": "all",
-                "model": V2_REQUESTED_MODEL,
-                "reasoning_effort": V2_REQUESTED_REASONING_EFFORT,
-            }),
-            V2_REQUESTED_MODEL,
-            V2_REQUESTED_REASONING_EFFORT,
+        (
+            V2SpawnSelection::TypedRole,
+            "spawn typed child",
+            "typed child work",
+            "spawn-typed",
         ),
-    };
-    let spawn_args = serde_json::to_string(&spawn_args)?;
-    let spawn_turn = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
-        sse(vec![
-            ev_response_created("resp-turn1-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                MULTI_AGENT_V2_NAMESPACE,
-                "spawn_agent",
-                &spawn_args,
+    ] {
+        let (spawn_args, expected_role_model, inherits_parent_context) = match selection {
+            V2SpawnSelection::ConfiguredDefault => (
+                json!({
+                    "message": child_prompt,
+                    "task_name": "worker",
+                }),
+                None,
+                true,
             ),
-            ev_completed("resp-turn1-1"),
-        ]),
-    )
-    .await;
-    let child_request_log = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| {
-            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
-        },
-        sse(vec![
-            ev_response_created("resp-child-1"),
-            ev_assistant_message("msg-child-1", "child done"),
-            ev_completed("resp-child-1"),
-        ]),
-    )
-    .await;
-    let _turn1_followup = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
-        sse(vec![
-            ev_response_created("resp-turn1-2"),
-            ev_assistant_message("msg-turn1-2", "parent done"),
-            ev_completed("resp-turn1-2"),
-        ]),
-    )
-    .await;
-    let mut builder = test_codex().with_config(|config| {
+            V2SpawnSelection::TypedRole => (
+                json!({
+                    "message": child_prompt,
+                    "task_name": "worker",
+                    "agent_type": "custom",
+                }),
+                Some(V2_DEFAULT_MODEL),
+                false,
+            ),
+        };
+        let spawn_args = serde_json::to_string(&spawn_args)?;
+        let spawn_turn = mount_sse_once_match(
+            &server,
+            move |req: &wiremock::Request| body_last_user_message_contains(req, parent_prompt),
+            sse(vec![
+                ev_response_created(&format!("resp-{call_id}-1")),
+                ev_function_call_with_namespace(
+                    call_id,
+                    MULTI_AGENT_V2_NAMESPACE,
+                    "spawn_agent",
+                    &spawn_args,
+                ),
+                ev_completed(&format!("resp-{call_id}-1")),
+            ]),
+        )
+        .await;
+        let child_request_log = mount_sse_once_match(
+            &server,
+            move |req: &wiremock::Request| body_last_user_message_contains(req, child_prompt),
+            sse(vec![
+                ev_response_created(&format!("resp-{call_id}-child")),
+                ev_assistant_message(&format!("msg-{call_id}-child"), "child done"),
+                ev_completed(&format!("resp-{call_id}-child")),
+            ]),
+        )
+        .await;
+        mount_sse_once_match(
+            &server,
+            move |req: &wiremock::Request| {
+                body_uses_model(req, INHERITED_MODEL)
+                    && decoded_body(req)
+                        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
+                        .is_some_and(|input| {
+                            let Some(output_index) = input.iter().position(|item| {
+                                item.get("type").and_then(Value::as_str)
+                                    == Some("function_call_output")
+                                    && item.get("call_id").and_then(Value::as_str) == Some(call_id)
+                            }) else {
+                                return false;
+                            };
+                            !input[output_index + 1..].iter().any(|item| {
+                                item.get("role").and_then(Value::as_str) == Some("user")
+                            })
+                        })
+            },
+            sse(vec![
+                ev_response_created(&format!("resp-{call_id}-2")),
+                ev_assistant_message(&format!("msg-{call_id}-2"), "parent done"),
+                ev_completed(&format!("resp-{call_id}-2")),
+            ]),
+        )
+        .await;
+        scenario_mocks.push((
+            parent_prompt,
+            expected_role_model,
+            inherits_parent_context,
+            spawn_turn,
+            child_request_log,
+        ));
+    }
+    let mut builder = test_codex().with_config(move |config| {
         config
             .features
             .enable(Feature::Collab)
@@ -1071,27 +1246,76 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
         config.agent_default_subagent_model = Some(V2_DEFAULT_MODEL.to_string());
         config.agent_default_subagent_reasoning_effort = Some(V2_DEFAULT_REASONING_EFFORT);
+        config.model_provider.request_max_retries = Some(0);
+        config.model_provider.stream_max_retries = Some(0);
+        config.model_provider.supports_websockets = false;
+        let role_path = config.codex_home.join("custom-role.toml");
+        std::fs::write(
+            &role_path,
+            format!(
+                "model = \"{V2_DEFAULT_MODEL}\"\nmodel_reasoning_effort = \"{V2_DEFAULT_REASONING_EFFORT}\"\n",
+            ),
+        )
+        .expect("write role config");
+        config.agent_roles.insert(
+            "custom".to_string(),
+            AgentRoleConfig {
+                description: Some("Custom role".to_string()),
+                config_file: Some(role_path.to_path_buf()),
+                nickname_candidates: None,
+            },
+        );
     });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn(TURN_0_FORK_PROMPT).await?;
-    let _ = seed_turn.single_request();
-    test.submit_turn(TURN_1_PROMPT).await?;
-    let _ = spawn_turn.single_request();
+    assert!(!seed_turn.requests().is_empty());
+    for (
+        parent_prompt,
+        expected_role_model,
+        inherits_parent_context,
+        spawn_turn,
+        child_request_log,
+    ) in scenario_mocks
+    {
+        test.submit_turn(parent_prompt).await?;
+        let parent_request = spawn_turn
+            .requests()
+            .into_iter()
+            .next()
+            .expect("parent spawn request should exist");
 
-    let child_request = wait_for_request_with_model(&child_request_log, expected_model).await?;
-    assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
-    let child_body = child_request.body_json();
-    assert_eq!(
-        (
-            child_body["model"].clone(),
-            child_body["reasoning"]["effort"].clone(),
-        ),
-        (
-            json!(expected_model),
-            json!(expected_reasoning_effort.to_string()),
-        )
-    );
+        let child_request = wait_for_requests(&child_request_log)
+            .await?
+            .into_iter()
+            .next()
+            .expect("child request should exist");
+        assert_eq!(
+            child_request.body_contains_text(parent_prompt),
+            inherits_parent_context
+        );
+        let child_body = child_request.body_json();
+        let (expected_model, expected_reasoning_effort) =
+            if let Some(expected_role_model) = expected_role_model {
+                (
+                    json!(expected_role_model),
+                    json!(V2_DEFAULT_REASONING_EFFORT.to_string()),
+                )
+            } else {
+                let parent_body = parent_request.body_json();
+                (
+                    parent_body["model"].clone(),
+                    parent_body["reasoning"]["effort"].clone(),
+                )
+            };
+        assert_eq!(
+            (
+                child_body["model"].clone(),
+                child_body["reasoning"]["effort"].clone(),
+            ),
+            (expected_model, expected_reasoning_effort)
+        );
+    }
 
     Ok(())
 }

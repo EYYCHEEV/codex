@@ -286,13 +286,10 @@ fn spawn_agent_route_error(
     let Some(model) = config.model.as_deref() else {
         return Some(format!("{route_label} model is unresolved"));
     };
-    let Some(model_preset) = available_models
-        .iter()
-        .find(|available_model| {
-            available_model.model == model
-                && model_supports_multi_agent_backend(available_model, MultiAgentVersion::V2)
-        })
-    else {
+    let Some(model_preset) = available_models.iter().find(|available_model| {
+        available_model.model == model
+            && model_supports_multi_agent_backend(available_model, MultiAgentVersion::V2)
+    }) else {
         return Some(format!(
             "{route_label} model is unavailable from the active provider catalog"
         ));
