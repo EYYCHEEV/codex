@@ -955,14 +955,14 @@ fn annotated_history_apis_preserve_envelopes() {
     );
 }
 
-#[test_case(None, 100, 5, true; "model policy")]
-#[test_case(Some(200), 100, 200, false; "configured override")]
-#[test_case(Some(100), 85, 100, true; "saved limit has no additional allowance")]
-#[test_case(Some(30_000), 20_000, 30_000, false; "large explicit budget")]
+#[test_case(None, 100, Some(5), true; "model policy")]
+#[test_case(Some(200), 100, Some(200), false; "configured override")]
+#[test_case(Some(100), 85, Some(100), true; "saved limit has no additional allowance")]
+#[test_case(Some(30_000), 20_000, None, true; "large explicit budget is hard capped")]
 fn record_annotated_items_preserves_metadata_while_processing_item(
     history_truncation_token_limit: Option<usize>,
     repeat_count: usize,
-    expected_token_limit: usize,
+    expected_token_limit: Option<usize>,
     expected_truncation: bool,
 ) {
     let mut envelope = ResponseItemEnvelope {
@@ -998,13 +998,20 @@ fn record_annotated_items_preserves_metadata_while_processing_item(
     let ResponseItem::FunctionCallOutput { output, .. } = &history.annotated_items()[0].item else {
         panic!("expected function call output");
     };
-    assert_eq!(
-        output.body,
-        FunctionCallOutputBody::Text(truncate_text(
-            &"word ".repeat(repeat_count),
-            TruncationPolicy::Tokens(expected_token_limit),
-        ))
-    );
+    if let Some(expected_token_limit) = expected_token_limit {
+        assert_eq!(
+            output.body,
+            FunctionCallOutputBody::Text(truncate_text(
+                &"word ".repeat(repeat_count),
+                TruncationPolicy::Tokens(expected_token_limit),
+            ))
+        );
+    } else {
+        assert!(
+            estimate_item_token_count(&history.annotated_items()[0].item)
+                <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+        );
+    }
 }
 
 #[test]
