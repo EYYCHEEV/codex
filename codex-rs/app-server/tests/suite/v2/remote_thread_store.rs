@@ -438,6 +438,8 @@ fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {
     // That is not thread persistence; keep the assertion focused on rollout,
     // session, sqlite, and other unexpected thread-store artifacts.
     entries.remove("shell_snapshots");
+    // File-backed auth reads may create their persistent cross-process lock file.
+    entries.remove(".auth.json.lock");
     assert_eq!(
         entries,
         BTreeSet::from([

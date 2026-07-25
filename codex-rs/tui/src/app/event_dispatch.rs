@@ -1185,18 +1185,17 @@ impl App {
                 idempotency_key,
                 credit_id,
             } => {
-                if self.chat_widget.managed_accounts().is_none() {
-                    if let Some(request_id) = self
+                if self.chat_widget.managed_accounts().is_none()
+                    && let Some(request_id) = self
                         .chat_widget
                         .start_rate_limit_reset_consumption(&idempotency_key)
-                    {
-                        self.consume_rate_limit_reset_credit(
-                            app_server,
-                            request_id,
-                            idempotency_key,
-                            credit_id,
-                        );
-                    }
+                {
+                    self.consume_rate_limit_reset_credit(
+                        app_server,
+                        request_id,
+                        idempotency_key,
+                        credit_id,
+                    );
                 }
             }
             AppEvent::RateLimitResetCreditConsumed {

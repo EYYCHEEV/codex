@@ -675,10 +675,8 @@ impl ModelClient {
                 None
             };
             let attempt_turn_state = client_session.turn_state();
-            let transport = self.build_api_transport(
-                &client_setup.api_provider,
-                RESPONSES_COMPACT_ENDPOINT,
-            )?;
+            let transport =
+                self.build_api_transport(&client_setup.api_provider, RESPONSES_COMPACT_ENDPOINT)?;
             let request_telemetry = Self::build_request_telemetry(
                 session_telemetry,
                 AuthRequestTelemetryContext::new(
@@ -928,12 +926,9 @@ impl ModelClient {
                 ManagedRateLimitRecorder::for_setup(auth_manager.as_ref(), &client_setup);
             let transport =
                 self.build_api_transport(&client_setup.api_provider, MEMORIES_SUMMARIZE_ENDPOINT)?;
-            let client = ApiMemoriesClient::new(
-                transport,
-                client_setup.api_provider,
-                client_setup.api_auth,
-            )
-            .with_telemetry(Some(request_telemetry));
+            let client =
+                ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                    .with_telemetry(Some(request_telemetry));
             let result = match client
                 .summarize_input(&payload, self.build_subagent_headers())
                 .await

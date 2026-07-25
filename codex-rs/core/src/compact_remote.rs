@@ -386,9 +386,9 @@ pub(crate) fn trim_function_call_history_to_fit_context_window(
     };
     // Keep the unclamped total so replacing an item cannot lose an overflow hidden by i64
     // saturation in the normal history estimator.
-    let base_tokens =
-        i128::try_from(approx_token_count(&base_instructions.text)).unwrap_or(i128::MAX)
-            .saturating_add(i128::from(additional_prompt_tokens));
+    let base_tokens = i128::try_from(approx_token_count(&base_instructions.text))
+        .unwrap_or(i128::MAX)
+        .saturating_add(i128::from(additional_prompt_tokens));
     let original_items = history.raw_items();
     let item_token_estimates = original_items
         .iter()

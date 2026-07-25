@@ -145,7 +145,7 @@ fn chatgpt_auth_json_with_last_refresh(
     refresh_token: &str,
     last_refresh: &str,
 ) -> serde_json::Value {
-    let fake_jwt = fake_chatgpt_jwt(plan_type, chatgpt_user_id, b"sig");
+    let fake_jwt = fake_chatgpt_jwt(plan_type, chatgpt_user_id, account_id, b"sig");
     json!({
         "OPENAI_API_KEY": null,
         "tokens": {
@@ -158,7 +158,12 @@ fn chatgpt_auth_json_with_last_refresh(
     })
 }
 
-fn fake_chatgpt_jwt(plan_type: &str, chatgpt_user_id: Option<&str>, signature: &[u8]) -> String {
+fn fake_chatgpt_jwt(
+    plan_type: &str,
+    chatgpt_user_id: Option<&str>,
+    account_id: Option<&str>,
+    signature: &[u8],
+) -> String {
     let header = json!({ "alg": "none", "typ": "JWT" });
     let mut auth_payload = json!({
         "chatgpt_plan_type": plan_type,
@@ -889,12 +894,22 @@ async fn get_bundle_refreshes_external_auth_after_unauthorized() {
         .await,
     );
     let initial_auth = CodexAuth::from_external_chatgpt_tokens(
-        &fake_chatgpt_jwt("enterprise", Some("user-12345"), b"initial"),
+        &fake_chatgpt_jwt(
+            "enterprise",
+            Some("user-12345"),
+            Some("account-12345"),
+            b"initial",
+        ),
         "account-12345",
         Some("enterprise"),
     )
     .expect("initial external auth");
-    let refreshed_token = fake_chatgpt_jwt("enterprise", Some("user-12345"), b"refreshed");
+    let refreshed_token = fake_chatgpt_jwt(
+        "enterprise",
+        Some("user-12345"),
+        Some("account-12345"),
+        b"refreshed",
+    );
     let refreshed_auth = CodexAuth::from_external_chatgpt_tokens(
         &refreshed_token,
         "account-12345",
