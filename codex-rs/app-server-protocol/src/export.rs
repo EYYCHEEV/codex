@@ -10,6 +10,7 @@ use crate::export_client_notification_schemas;
 use crate::export_client_param_schemas;
 use crate::export_client_response_schemas;
 use crate::export_client_responses;
+use crate::export_client_schema_param_types;
 use crate::export_server_notification_schemas;
 use crate::export_server_param_schemas;
 use crate::export_server_response_schemas;
@@ -131,6 +132,7 @@ pub fn generate_ts_with_options(
 
     ClientRequest::export_all_to(out_dir)?;
     export_client_responses(out_dir)?;
+    export_client_schema_param_types(out_dir)?;
     ClientNotification::export_all_to(out_dir)?;
     crate::UserVerificationRpcError::export_all_to(out_dir)?;
 
@@ -2162,6 +2164,9 @@ mod tests {
     use std::path::PathBuf;
     use uuid::Uuid;
 
+    const LOGOUT_PARAMS_WITH_UNDEFINED: &str =
+        "params: import(\"./v2/LogoutAccountParams\").LogoutAccountParams | null | undefined";
+
     #[test]
     fn generated_ts_optional_nullable_fields_only_in_params() -> Result<()> {
         // Assert that "?: T | null" only appears in generated *Params types.
@@ -2193,6 +2198,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("missing account usage response fixture"))?,
         )?;
         assert!(account_usage_response_ts.contains("threadUsage?: ThreadUsage | null"));
+        assert!(client_request_ts.contains(LOGOUT_PARAMS_WITH_UNDEFINED));
         let server_request_ts = std::str::from_utf8(
             fixture_tree
                 .get(Path::new("ServerRequest.ts"))
@@ -2266,11 +2272,13 @@ mod tests {
 
             let contents = std::str::from_utf8(contents)?;
             // Both stable usage RPCs originally required `params: undefined`. Preserve that
-            // source compatibility only for these exact envelopes, not arbitrary new fields.
+            // source compatibility only for these exact envelopes. Logout also preserves its
+            // legacy omitted-params form while exporting the concrete parameter type.
             let checked_contents = if path == Path::new("ClientRequest.ts") {
                 contents
                     .replace(LEGACY_ACCOUNT_USAGE_REQUEST, "")
                     .replace(LEGACY_ACCOUNT_RATE_LIMITS_REQUEST, "")
+                    .replacen(LOGOUT_PARAMS_WITH_UNDEFINED, "", 1)
             } else {
                 contents.to_owned()
             };
@@ -2427,6 +2435,26 @@ mod tests {
             "Generated TypeScript has optional nullable fields outside *Params types (disallowed '?: T | null'):\n{optional_nullable_offenders:?}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn production_ts_generator_preserves_logout_undefined_and_param_type() -> Result<()> {
+        let output = tempfile::tempdir()?;
+        generate_ts_with_options(
+            output.path(),
+            None,
+            GenerateTsOptions {
+                generate_indices: false,
+                ensure_headers: false,
+                run_prettier: false,
+                experimental_api: false,
+            },
+        )?;
+
+        let client_request = fs::read_to_string(output.path().join("ClientRequest.ts"))?;
+        assert!(client_request.contains(LOGOUT_PARAMS_WITH_UNDEFINED));
+        assert!(output.path().join("v2/LogoutAccountParams.ts").is_file());
         Ok(())
     }
 
