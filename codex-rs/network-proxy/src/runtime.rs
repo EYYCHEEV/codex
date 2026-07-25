@@ -1423,7 +1423,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_requires_allowlist_match() {
-        let state = network_proxy_state_for_policy(NetworkProxySettings {
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
             allow_local_binding: true,
             ..network_settings(&["example.com"], &[])
         });
@@ -1473,7 +1473,7 @@ mod tests {
 
     #[tokio::test]
     async fn add_allowed_domain_removes_matching_deny_entry() {
-        let state = network_proxy_state_for_policy(NetworkProxySettings {
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
             allow_local_binding: true,
             ..network_settings(&[], &["example.com"])
         });
@@ -1697,7 +1697,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_subdomain_wildcards_exclude_apex() {
-        let state = network_proxy_state_for_policy(NetworkProxySettings {
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
             allow_local_binding: true,
             ..network_settings(&["*.openai.com"], &[])
         });
@@ -1717,7 +1717,7 @@ mod tests {
 
     #[tokio::test]
     async fn host_blocked_global_wildcard_allowlist_allows_public_hosts_except_denylist() {
-        let state = network_proxy_state_for_policy(NetworkProxySettings {
+        let state = network_proxy_state_for_policy(NetworkProxyConfig {
             allow_local_binding: true,
             ..network_settings(&["*"], &["evil.example"])
         });

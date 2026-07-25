@@ -295,6 +295,15 @@ pub(crate) async fn run_turn(
         }
         Err(err) => return Err(err),
     };
+    if turn_context.apps_enabled()
+        && !collect_explicit_app_ids(&user_input).is_empty()
+        && let Err(err) = first_step_context
+            .mcp
+            .hard_refresh_codex_apps_tools_cache()
+            .await
+    {
+        warn!("failed to load explicitly requested Codex Apps tools: {err:#}");
+    }
     let first_resource_client = codex_mcp::McpResourceClient::from_runtime_and_binding(
         Arc::clone(&sess.services.mcp_runtime),
         Arc::clone(&first_step_context.mcp),
