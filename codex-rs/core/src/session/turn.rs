@@ -186,6 +186,16 @@ pub(crate) async fn run_turn(
     let first_step_context = sess
         .capture_step_context_for_setup(Arc::clone(&turn_context), &first_request_setup)
         .await;
+    if turn_context.apps_enabled()
+        && !collect_explicit_app_ids(&collect_capability_mention_inputs(&input)).is_empty()
+        && let Err(err) = first_step_context
+            .mcp
+            .manager()
+            .hard_refresh_codex_apps_tools_cache()
+            .await
+    {
+        warn!("failed to load explicitly requested Codex Apps tools: {err:#}");
+    }
     let first_resource_client =
         codex_mcp::McpResourceClient::new(first_step_context.mcp.manager_arc());
     turn_extension_data.insert(first_resource_client.clone());

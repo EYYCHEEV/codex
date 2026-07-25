@@ -194,16 +194,21 @@ pub fn unauthenticated_auth_provider() -> SharedAuthProvider {
 /// Returns the only auth manager that the configured provider is allowed to observe.
 ///
 /// Command-backed auth owns its isolated manager. The caller-supplied manager is
-/// available only to the first-party OpenAI auth path; static bearer/env providers
-/// and providers that do not require OpenAI auth must not inherit managed recovery,
-/// attestation, or catalog auth from unrelated global state.
+/// available only to the first-party OpenAI auth path and Amazon Bedrock, whose
+/// provider implementation filters it down to managed Bedrock credentials. Static
+/// bearer/env providers and other providers that do not require OpenAI auth must not
+/// inherit managed recovery, attestation, or catalog auth from unrelated global state.
 pub(crate) fn auth_manager_for_provider(
     auth_manager: Option<Arc<AuthManager>>,
     provider: &ModelProviderInfo,
 ) -> Option<Arc<AuthManager>> {
     match provider.auth.clone() {
         Some(config) => Some(AuthManager::external_bearer_only(config)),
-        None if crate::provider::provider_uses_first_party_auth_path(provider) => auth_manager,
+        None if crate::provider::provider_uses_first_party_auth_path(provider)
+            || provider.is_amazon_bedrock() =>
+        {
+            auth_manager
+        }
         None => None,
     }
 }
