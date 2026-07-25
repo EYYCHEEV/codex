@@ -42,7 +42,7 @@ fn assert_wall_time_header(output: &str) {
 // Verifies that a standard tool call (shell_command) exceeding the model formatting
 // limits is truncated before being sent back to the model.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
+async fn tool_call_output_configured_limit_cannot_exceed_model_visible_cap() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -99,20 +99,20 @@ async fn tool_call_output_configured_limit_chars_type() -> Result<()> {
         .context("function_call_output present for shell call")?;
     let output = output.replace("\r\n", "\n");
 
-    // Expect plain text (not JSON) containing the entire shell output.
+    // Expect plain text (not JSON) bounded by the model-visible item ceiling.
     assert!(
         serde_json::from_str::<Value>(&output).is_err(),
         "expected truncated shell output to be plain text"
     );
 
     assert!(
-        (400000..=401000).contains(&output.len()),
-        "we should be almost 100k tokens"
+        output.len() <= 40_000,
+        "shell output should remain within the 10k-token ceiling"
     );
 
     assert!(
-        !output.contains("tokens truncated"),
-        "shell output should not contain tokens truncated marker: {output}"
+        output.contains("truncated"),
+        "shell output should contain a truncation marker: {output}"
     );
 
     Ok(())
@@ -731,9 +731,9 @@ async fn shell_command_output_not_truncated_with_custom_limit() -> Result<()> {
     Ok(())
 }
 
-// MCP server output should also remain intact when the config increases the token limit.
+// MCP server output should remain bounded when the configured limit exceeds the hard ceiling.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn mcp_tool_call_output_not_truncated_with_custom_limit() -> Result<()> {
+async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -819,14 +819,13 @@ async fn mcp_tool_call_output_not_truncated_with_custom_limit() -> Result<()> {
         .function_call_output_text(call_id)
         .context("function_call_output present for rmcp call")?;
 
-    assert_eq!(
-        output.len(),
-        80065,
-        "MCP output should retain its serialized length plus wall-time header"
+    assert!(
+        output.len() <= 40_000,
+        "MCP output should remain within the 10k-token ceiling"
     );
     assert!(
-        !output.contains("truncated"),
-        "output should not include truncation markers when limit is raised: {output}"
+        output.contains("truncated"),
+        "MCP output should include a truncation marker: {output}"
     );
 
     Ok(())

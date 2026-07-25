@@ -25,6 +25,9 @@ max-threads = 4
 [test-groups.core_apply_patch_cli_integration]
 max-threads = 1
 
+[test-groups.core_truncation_heavy_integration]
+max-threads = 1
+
 [test-groups.windows_sandbox_legacy_sessions]
 max-threads = 1
 
@@ -79,6 +82,11 @@ slow-timeout = { period = "2m", terminate-after = 2 }
 # sensitive to Windows runner process-startup stalls when many cases launch at once.
 filter = 'package(codex-core) & kind(test) & test(apply_patch_cli)'
 test-group = 'core_apply_patch_cli_integration'
+
+[[profile.default.overrides]]
+filter = 'package(codex-core) & test(/(tool_call_output_configured_limit|mcp_tool_call_output_custom_limit)_cannot_exceed_model_visible_cap/)'
+test-group = 'core_truncation_heavy_integration'
+slow-timeout = { period = "1m", terminate-after = 2 }
 
 [[profile.default.overrides]]
 # These tests create restricted-token Windows child processes and private desktops.

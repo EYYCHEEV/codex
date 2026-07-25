@@ -35,6 +35,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::LazyLock;
 
+const MODEL_VISIBLE_ITEM_MAX_TOKENS: usize = 10_000;
+
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ContextManager {
@@ -132,7 +134,7 @@ impl ContextManager {
                 continue;
             }
 
-            let processed = self.process_item(item_ref, policy);
+            let processed = Self::process_item(item_ref, policy);
             Arc::make_mut(&mut self.items).push(processed);
         }
     }
@@ -341,34 +343,16 @@ impl ContextManager {
         normalize::strip_audio_when_unsupported(input_modalities, items);
     }
 
-    fn process_item(&self, item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
-        let policy = if let ResponseItem::CustomToolCallOutput { call_id, .. } = item
-            && let Some(max_output_tokens) = self.items.iter().rev().find_map(|item| match item {
-                ResponseItem::CustomToolCall {
-                    call_id: tool_call_id,
-                    name,
-                    input,
-                    ..
-                } if tool_call_id == call_id && name == codex_code_mode::PUBLIC_TOOL_NAME => {
-                    codex_code_mode::parse_exec_source(input)
-                        .ok()
-                        .and_then(|args| args.max_output_tokens)
-                }
-                _ => None,
-            }) {
-            match policy {
-                TruncationPolicy::Bytes(bytes) => {
-                    TruncationPolicy::Bytes(bytes.max(approx_bytes_for_tokens(max_output_tokens)))
-                }
-                TruncationPolicy::Tokens(tokens) => {
-                    TruncationPolicy::Tokens(tokens.max(max_output_tokens))
-                }
+    fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
+        let policy_with_serialization_budget = match policy * 1.2 {
+            TruncationPolicy::Bytes(bytes) => TruncationPolicy::Bytes(
+                bytes.min(approx_bytes_for_tokens(MODEL_VISIBLE_ITEM_MAX_TOKENS)),
+            ),
+            TruncationPolicy::Tokens(tokens) => {
+                TruncationPolicy::Tokens(tokens.min(MODEL_VISIBLE_ITEM_MAX_TOKENS))
             }
-        } else {
-            policy
         };
-        let policy_with_serialization_budget = policy * 1.2;
-        match item {
+        let truncate_item = |policy| match item {
             ResponseItem::FunctionCallOutput {
                 id,
                 call_id,
@@ -377,7 +361,7 @@ impl ContextManager {
             } => ResponseItem::FunctionCallOutput {
                 id: id.clone(),
                 call_id: call_id.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
+                output: truncate_function_output_payload(output, policy),
                 internal_chat_message_metadata_passthrough: metadata.clone(),
             },
             ResponseItem::CustomToolCallOutput {
@@ -390,7 +374,7 @@ impl ContextManager {
                 id: id.clone(),
                 call_id: call_id.clone(),
                 name: name.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
+                output: truncate_function_output_payload(output, policy),
                 internal_chat_message_metadata_passthrough: metadata.clone(),
             },
             ResponseItem::AdditionalTools { .. }
@@ -408,6 +392,70 @@ impl ContextManager {
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => item.clone(),
+        };
+        let is_tool_output = matches!(
+            item,
+            ResponseItem::FunctionCallOutput { .. } | ResponseItem::CustomToolCallOutput { .. }
+        );
+        let max_item_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
+        let mut effective_policy = policy_with_serialization_budget;
+        let mut processed = truncate_item(effective_policy);
+        for _ in 0..2 {
+            let estimated_tokens = estimate_item_token_count(&processed);
+            if !is_tool_output || estimated_tokens <= max_item_tokens {
+                return processed;
+            }
+            let excess_tokens = usize::try_from(estimated_tokens - max_item_tokens)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1);
+            effective_policy = match effective_policy {
+                TruncationPolicy::Bytes(bytes) => TruncationPolicy::Bytes(
+                    bytes.saturating_sub(approx_bytes_for_tokens(excess_tokens)),
+                ),
+                TruncationPolicy::Tokens(tokens) => {
+                    TruncationPolicy::Tokens(tokens.saturating_sub(excess_tokens))
+                }
+            };
+            processed = truncate_item(effective_policy);
+        }
+
+        let omitted = FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text(
+                "Tool output omitted because the complete item exceeded the 10,000-token context limit."
+                    .to_string(),
+            ),
+            success: match item {
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. } => output.success,
+                _ => None,
+            },
+        };
+        match item {
+            ResponseItem::FunctionCallOutput {
+                id,
+                call_id,
+                internal_chat_message_metadata_passthrough: metadata,
+                ..
+            } => ResponseItem::FunctionCallOutput {
+                id: id.clone(),
+                call_id: call_id.clone(),
+                output: omitted,
+                internal_chat_message_metadata_passthrough: metadata.clone(),
+            },
+            ResponseItem::CustomToolCallOutput {
+                id,
+                call_id,
+                name,
+                internal_chat_message_metadata_passthrough: metadata,
+                ..
+            } => ResponseItem::CustomToolCallOutput {
+                id: id.clone(),
+                call_id: call_id.clone(),
+                name: name.clone(),
+                output: omitted,
+                internal_chat_message_metadata_passthrough: metadata.clone(),
+            },
+            _ => processed,
         }
     }
 
