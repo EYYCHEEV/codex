@@ -41,7 +41,6 @@ import type { HooksListParams } from "./v2/HooksListParams";
 import type { ListAccountsParams } from "./v2/ListAccountsParams";
 import type { ListMcpServerStatusParams } from "./v2/ListMcpServerStatusParams";
 import type { LoginAccountParams } from "./v2/LoginAccountParams";
-import type { LogoutAccountParams } from "./v2/LogoutAccountParams";
 import type { MarketplaceAddParams } from "./v2/MarketplaceAddParams";
 import type { MarketplaceRemoveParams } from "./v2/MarketplaceRemoveParams";
 import type { MarketplaceUpgradeParams } from "./v2/MarketplaceUpgradeParams";
