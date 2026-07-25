@@ -891,10 +891,10 @@ mod tests {
 
     use super::*;
     use crate::FeedbackDiagnostic;
+    use crate::FeedbackDiagnostics;
     use codex_http_client::OutboundProxyPolicy;
     use flate2::read::GzDecoder;
     use http::StatusCode;
-    use crate::FeedbackDiagnostics;
     use pretty_assertions::assert_eq;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;

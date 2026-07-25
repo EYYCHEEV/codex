@@ -6,12 +6,16 @@ use codex_api::SharedAuthProvider;
 use codex_config::McpServerAuth;
 use codex_config::McpServerConfig;
 use codex_config::McpServerTransportConfig;
+use codex_config::types::AuthKeyringBackendKind;
+use codex_config::types::OAuthCredentialsStoreMode;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::McpStartupFailureReason;
 use codex_protocol::protocol::McpStartupUpdateEvent;
 use codex_rmcp_client::McpAuthState;
 use codex_rmcp_client::McpLoginRequirement;
+use codex_rmcp_client::determine_streamable_http_auth_status_from_credentials;
+use tracing::warn;
 
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::rmcp_client::DEFAULT_STARTUP_TIMEOUT;
@@ -70,6 +74,46 @@ pub(super) fn mcp_startup_failure_reason(
         )
         | None => None,
     }
+}
+
+pub(super) fn configured_mcp_startup_failure_reason(
+    server_name: &str,
+    config: &McpServerConfig,
+    has_runtime_auth: bool,
+    store_mode: OAuthCredentialsStoreMode,
+    keyring_backend_kind: AuthKeyringBackendKind,
+    error: &StartupOutcomeError,
+) -> Option<McpStartupFailureReason> {
+    if !error.is_authentication_required() || has_runtime_auth {
+        return None;
+    }
+    let auth_state = match &config.transport {
+        McpServerTransportConfig::StreamableHttp {
+            url,
+            bearer_token_env_var,
+            http_headers,
+            env_http_headers,
+            ..
+        } => match determine_streamable_http_auth_status_from_credentials(
+            config.oauth_credential_name(server_name).as_ref(),
+            url,
+            bearer_token_env_var.as_deref(),
+            http_headers.clone(),
+            env_http_headers.clone(),
+            store_mode,
+            keyring_backend_kind,
+        ) {
+            Ok(auth_state) => auth_state,
+            Err(error) => {
+                warn!(
+                    "failed to read stored auth status for MCP server `{server_name}`: {error:?}"
+                );
+                None
+            }
+        },
+        McpServerTransportConfig::Stdio { .. } => None,
+    };
+    mcp_startup_failure_reason(auth_state, error)
 }
 
 pub(super) fn mcp_init_error_display(
