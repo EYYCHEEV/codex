@@ -678,7 +678,7 @@ where
     })
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[derive(Serialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentsToml {
     /// Whether multi-agent tools are enabled. Defaults to true.
@@ -716,6 +716,58 @@ pub struct AgentsToml {
     /// ```
     #[serde(default, flatten)]
     pub roles: BTreeMap<String, AgentRoleToml>,
+}
+
+#[derive(Deserialize)]
+struct AgentsTomlWire {
+    enabled: Option<bool>,
+    configured_only: Option<ConfiguredOnlyToml>,
+    #[serde(alias = "max_threads")]
+    max_concurrent_threads_per_session: Option<usize>,
+    max_depth: Option<i32>,
+    default_subagent_model: Option<String>,
+    default_subagent_reasoning_effort: Option<ReasoningEffort>,
+    job_max_runtime_seconds: Option<u64>,
+    interrupt_message: Option<bool>,
+    #[serde(default, flatten)]
+    roles: BTreeMap<String, AgentRoleToml>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConfiguredOnlyToml {
+    Flag(bool),
+    Role(AgentRoleToml),
+}
+
+impl<'de> Deserialize<'de> for AgentsToml {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = AgentsTomlWire::deserialize(deserializer)?;
+        let (configured_only, configured_only_role) = match wire.configured_only {
+            Some(ConfiguredOnlyToml::Flag(configured_only)) => (Some(configured_only), None),
+            Some(ConfiguredOnlyToml::Role(role)) => (None, Some(role)),
+            None => (None, None),
+        };
+        let mut roles = wire.roles;
+        if let Some(role) = configured_only_role {
+            roles.insert("configured_only".to_string(), role);
+        }
+
+        Ok(Self {
+            enabled: wire.enabled,
+            configured_only,
+            max_concurrent_threads_per_session: wire.max_concurrent_threads_per_session,
+            max_depth: wire.max_depth,
+            default_subagent_model: wire.default_subagent_model,
+            default_subagent_reasoning_effort: wire.default_subagent_reasoning_effort,
+            job_max_runtime_seconds: wire.job_max_runtime_seconds,
+            interrupt_message: wire.interrupt_message,
+            roles,
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -982,6 +1034,45 @@ mod tests {
 
     const WORKSPACE_ID_A: &str = "123e4567-e89b-42d3-a456-426614174000";
     const WORKSPACE_ID_B: &str = "123e4567-e89b-42d3-a456-426614174001";
+
+    #[test]
+    fn agents_configured_only_accepts_boolean() {
+        let agents: AgentsToml = toml::from_str("configured_only = true")
+            .expect("configured_only boolean should deserialize");
+
+        assert_eq!(
+            agents,
+            AgentsToml {
+                configured_only: Some(true),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn agents_configured_only_preserves_legacy_role() {
+        let agents: AgentsToml = toml::from_str(
+            r#"
+[configured_only]
+description = "Legacy custom role"
+"#,
+        )
+        .expect("configured_only role should deserialize");
+
+        assert_eq!(
+            agents,
+            AgentsToml {
+                roles: BTreeMap::from([(
+                    "configured_only".to_string(),
+                    AgentRoleToml {
+                        description: Some("Legacy custom role".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            }
+        );
+    }
 
     #[test]
     fn forced_chatgpt_workspace_id_accepts_single_string() {
