@@ -2,6 +2,8 @@ use codex_context_fragments::ContextualUserFragment;
 
 use crate::injection::SkillInjection;
 
+pub(crate) const MAX_SKILL_INSTRUCTION_TOKENS: usize = 10_000;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillInstructions {
     name: String,

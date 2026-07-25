@@ -3,10 +3,13 @@ use std::sync::Arc;
 
 use crate::SkillLoadOutcome;
 use crate::SkillMetadata;
+use crate::skill_instructions::MAX_SKILL_INSTRUCTION_TOKENS;
+use crate::skill_instructions::SkillInstructions;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::InvocationType;
 use codex_analytics::SkillInvocation;
 use codex_analytics::TrackEventsContext;
+use codex_context_fragments::ContextualUserFragment;
 use codex_exec_server::LOCAL_FS;
 use codex_otel::SessionTelemetry;
 use codex_otel::sanitize_metric_tag_value;
@@ -18,6 +21,7 @@ pub use codex_skills::extract_tool_mentions_with_sigil;
 pub use codex_skills::normalize_skill_path;
 pub use codex_skills::plugin_config_name_from_path;
 pub use codex_skills::tool_kind_for_path;
+use codex_utils_output_truncation::approx_token_count;
 use codex_utils_path_uri::PathUri;
 use codex_utils_string::take_bytes_at_char_boundary;
 
@@ -111,6 +115,23 @@ pub async fn build_skill_injections(
                         skill.name
                     ));
                 }
+                let path = skill.path_to_skills_md.to_string_lossy().into_owned();
+                let injection = SkillInjection {
+                    name: skill.name.clone(),
+                    path,
+                    contents,
+                };
+                if approx_token_count(&SkillInstructions::from(&injection).render())
+                    > MAX_SKILL_INSTRUCTION_TOKENS
+                {
+                    emit_skill_injected_metric(otel, skill, "too_large");
+                    result.warnings.push(format!(
+                        "Skipped skill {name} at {path}: instructions exceed the {MAX_SKILL_INSTRUCTION_TOKENS}-token model-context limit",
+                        name = skill.name,
+                        path = skill.path_to_skills_md.display(),
+                    ));
+                    continue;
+                }
                 emit_skill_injected_metric(otel, skill, "ok");
                 invocations.push(SkillInvocation {
                     skill_name: skill.name.clone(),
@@ -120,11 +141,7 @@ pub async fn build_skill_injections(
                     remote_plugin_id: skill.remote_plugin_id.clone(),
                     invocation_type: InvocationType::Explicit,
                 });
-                result.items.push(SkillInjection {
-                    name: skill.name.clone(),
-                    path: skill.path_to_skills_md.to_string_lossy().into_owned(),
-                    contents,
-                });
+                result.items.push(injection);
             }
             Err(err) => {
                 emit_skill_injected_metric(otel, skill, "error");

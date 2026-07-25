@@ -12,7 +12,9 @@ use codex_exec_server::ExecutorFileSystem;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_skills_extension::SkillsExtensionConfig;
 use codex_skills_extension::install;
@@ -385,6 +387,76 @@ async fn try_start_turn_if_idle_injects_skill_mentioned_by_trusted_goal_input() 
             .iter()
             .all(|text| !text.contains(UNTRUSTED_SKILL_BODY)),
         "raw response items must not trigger skill injection, got {user_texts:?}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn try_start_turn_if_idle_omits_oversized_skill_mentioned_by_trusted_goal_input() -> Result<()>
+{
+    const GOAL_BODY: &str = "Continue the trusted idle goal with $oversized-goal.";
+    const OVERSIZED_MARKER: &str = "OVERSIZED_GOAL_SKILL_INSTRUCTION";
+
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_workspace_setup(move |cwd, fs| async move {
+        let body = format!("{OVERSIZED_MARKER}{}", "x".repeat(50_000));
+        write_repo_skill(
+            cwd,
+            fs,
+            "oversized-goal",
+            "oversized trusted idle goal",
+            &body,
+        )
+        .await
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+
+    let goal_input = ContextualUserFragment::into(InternalModelContextFragment::new(
+        InternalContextSource::from_static("goal"),
+        GOAL_BODY,
+    ));
+    test.codex
+        .try_start_turn_if_idle(vec![goal_input])
+        .await
+        .expect("idle goal should start a turn");
+
+    let warning = core_test_support::wait_for_event(test.codex.as_ref(), |event| {
+        matches!(event, EventMsg::Warning(_))
+    })
+    .await;
+    let EventMsg::Warning(WarningEvent { message }) = warning else {
+        unreachable!("wait_for_event returned a non-warning event")
+    };
+    assert!(
+        message.contains("oversized-goal")
+            && message.contains("exceed the 10000-token model-context limit"),
+        "unexpected oversized-skill warning: {message}"
+    );
+
+    core_test_support::wait_for_event(test.codex.as_ref(), |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = response_mock.single_request();
+    let user_texts = request.message_input_texts("user");
+    assert!(
+        user_texts.iter().any(|text| text.contains(GOAL_BODY)),
+        "expected trusted goal body in the model request, got {user_texts:?}"
+    );
+    assert!(
+        user_texts
+            .iter()
+            .all(|text| !text.contains(OVERSIZED_MARKER)),
+        "oversized skill instructions must be omitted, got {user_texts:?}"
     );
 
     Ok(())
