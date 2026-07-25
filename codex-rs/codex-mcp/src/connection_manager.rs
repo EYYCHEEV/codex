@@ -188,18 +188,16 @@ impl McpConnectionManager {
             let cancel_token = startup_cancellation_token.child_token();
             let lazy_startup =
                 host_owned_codex_apps_enabled && server_name == CODEX_APPS_MCP_SERVER_NAME;
-            if !lazy_startup {
-                if let Some(tx_event) = tx_event.as_ref() {
-                    let _ = emit_update(
-                        startup_submit_id.as_str(),
-                        tx_event,
-                        McpStartupUpdateEvent {
-                            server: server_name.clone(),
-                            status: McpStartupStatus::Starting,
-                        },
-                    )
-                    .await;
-                }
+            if !lazy_startup && let Some(tx_event) = tx_event.as_ref() {
+                let _ = emit_update(
+                    startup_submit_id.as_str(),
+                    tx_event,
+                    McpStartupUpdateEvent {
+                        server: server_name.clone(),
+                        status: McpStartupStatus::Starting,
+                    },
+                )
+                .await;
             }
             let configured_config = server.configured_config().cloned();
             let resolved_environment = configured_config.as_ref().map_or_else(
@@ -285,6 +283,7 @@ impl McpConnectionManager {
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
             join_set.spawn(async move {
+                let mut failure_reason = None;
                 let mut outcome = async_managed_client.client().await;
                 if cancel_token.is_cancelled() {
                     outcome = Err(StartupOutcomeError::Cancelled);
@@ -330,7 +329,7 @@ impl McpConnectionManager {
                         Ok(_) => McpStartupStatus::Ready,
                         Err(StartupOutcomeError::Cancelled) => McpStartupStatus::Cancelled,
                         Err(error) => {
-                            let reason = mcp_startup_failure_reason(auth_state, error);
+                            failure_reason = mcp_startup_failure_reason(auth_state, error);
                             let error_str = mcp_init_error_display(
                                 server_name.as_str(),
                                 configured_config.as_ref(),
@@ -338,7 +337,7 @@ impl McpConnectionManager {
                             );
                             McpStartupStatus::Failed {
                                 error: error_str,
-                                reason,
+                                reason: failure_reason,
                             }
                         }
                     };
@@ -361,7 +360,7 @@ impl McpConnectionManager {
                     async_managed_client.reconnect_failed_startup().await;
                 }
 
-                (server_name, outcome)
+                (server_name, outcome, failure_reason)
             });
         }
         let manager = Self {
@@ -377,17 +376,8 @@ impl McpConnectionManager {
             let outcomes = join_set.join_all().await;
             if let Some(tx_event) = tx_event {
                 let mut summary = McpStartupCompleteEvent::default();
-                for (server_name, outcome) in outcomes {
-                    match outcome {
-                        Ok(_) => summary.ready.push(server_name),
-                        Err(StartupOutcomeError::Cancelled) => summary.cancelled.push(server_name),
-                        Err(StartupOutcomeError::Failed { error, .. }) => {
-                            summary.failed.push(McpStartupFailure {
-                                server: server_name,
-                                error,
-                            })
-                        }
-                    }
+                for (server_name, outcome, failure_reason) in outcomes {
+                    record_startup_outcome(&mut summary, server_name, outcome, failure_reason);
                 }
                 let _ = tx_event
                     .send(Event {
@@ -412,6 +402,7 @@ impl McpConnectionManager {
                     failures.push(McpStartupFailure {
                         server: server_name.clone(),
                         error: format!("required MCP server `{server_name}` was not initialized"),
+                        reason: None,
                     });
                     continue;
                 };
@@ -421,6 +412,7 @@ impl McpConnectionManager {
                     Err(error) => failures.push(McpStartupFailure {
                         server: server_name.clone(),
                         error: startup_outcome_error_message(error),
+                        reason: None,
                     }),
                 }
             }
@@ -1022,6 +1014,23 @@ impl McpConnectionManager {
             permission_profile.get(),
             prefix_mcp_tool_names,
         )
+    }
+}
+
+fn record_startup_outcome(
+    summary: &mut McpStartupCompleteEvent,
+    server_name: String,
+    outcome: Result<ManagedClient, StartupOutcomeError>,
+    failure_reason: Option<McpStartupFailureReason>,
+) {
+    match outcome {
+        Ok(_) => summary.ready.push(server_name),
+        Err(StartupOutcomeError::Cancelled) => summary.cancelled.push(server_name),
+        Err(StartupOutcomeError::Failed { error, .. }) => summary.failed.push(McpStartupFailure {
+            server: server_name,
+            error,
+            reason: failure_reason,
+        }),
     }
 }
 

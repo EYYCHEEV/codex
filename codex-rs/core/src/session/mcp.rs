@@ -139,7 +139,18 @@ impl Session {
         turn_context: &TurnContext,
         request_setup: Option<&CurrentClientSetup>,
     ) -> McpAuthSnapshot {
-        if let Some(setup) = request_setup {
+        let provider_auth_is_explicit = request_setup.is_some()
+            && (turn_context.config.model_provider.env_key.is_some()
+                || turn_context
+                    .config
+                    .model_provider
+                    .experimental_bearer_token
+                    .is_some()
+                || turn_context.config.model_provider.auth.is_some()
+                || turn_context.config.model_provider.aws.is_some());
+        if let Some(setup) = request_setup
+            && (setup.effective_auth.is_some() || provider_auth_is_explicit)
+        {
             let auth = setup.effective_auth.clone();
             let transport_auth_binding = match auth.as_ref() {
                 Some(auth) => {
@@ -154,38 +165,43 @@ impl Session {
             };
         }
 
-        let selection_scope = codex_login::ManagedChatgptSelectionScope {
-            thread_id: Some(self.thread_id().to_string()),
-            session_id: Some(self.session_id().to_string()),
-            model: Some(turn_context.model_info.slug.clone()),
-        };
-        match self
-            .services
-            .auth_manager
-            .managed_chatgpt_auth_snapshot(&selection_scope)
-            .await
-        {
-            Ok(Some(snapshot)) => {
-                return McpAuthSnapshot {
-                    auth: Some(snapshot.auth),
-                    transport_auth_binding: Some(snapshot.transport),
-                    credential_revision: Some(snapshot.account_revision),
-                };
+        if !provider_auth_is_explicit {
+            let selection_scope = codex_login::ManagedChatgptSelectionScope {
+                thread_id: Some(self.thread_id().to_string()),
+                session_id: Some(self.session_id().to_string()),
+                model: Some(turn_context.model_info.slug.clone()),
+            };
+            match self
+                .services
+                .auth_manager
+                .managed_chatgpt_auth_snapshot(&selection_scope)
+                .await
+            {
+                Ok(Some(snapshot)) => {
+                    return McpAuthSnapshot {
+                        auth: Some(snapshot.auth),
+                        transport_auth_binding: Some(snapshot.transport),
+                        credential_revision: Some(snapshot.account_revision),
+                    };
+                }
+                Ok(None) => {}
+                Err(err) => warn!("failed to resolve managed MCP auth snapshot: {err}"),
             }
-            Ok(None) => {}
-            Err(err) => warn!("failed to resolve managed MCP auth snapshot: {err}"),
         }
 
         let auth = self.services.auth_manager.auth().await;
-        let transport_auth_binding = auth.as_ref().map(|auth| {
-            self.bind_external_auth_revision(
-                auth,
-                TransportAuthBinding::for_nonmanaged_auth(Some(auth)),
-            )
-        });
+        let transport_auth_binding = auth
+            .as_ref()
+            .map(|auth| {
+                self.bind_external_auth_revision(
+                    auth,
+                    TransportAuthBinding::for_nonmanaged_auth(Some(auth)),
+                )
+            })
+            .or_else(|| request_setup.map(|setup| setup.transport_auth_binding.clone()));
         McpAuthSnapshot {
             transport_auth_binding,
-            credential_revision: None,
+            credential_revision: request_setup.and_then(|setup| setup.credential_revision),
             auth,
         }
     }
@@ -280,14 +296,15 @@ impl Session {
                 .configured_servers()
                 .values()
                 .any(|server| {
-                    let was_available = current
-                        .ready_selected_capability_roots()
-                        .iter()
-                        .any(|root| {
-                            let CapabilityRootLocation::Environment { environment_id, .. } =
-                                &root.location;
-                            environment_id == &server.environment_id
-                        });
+                    let was_available =
+                        current
+                            .ready_selected_capability_roots()
+                            .iter()
+                            .any(|root| {
+                                let CapabilityRootLocation::Environment { environment_id, .. } =
+                                    &root.location;
+                                environment_id == &server.environment_id
+                            });
                     let is_available = available_environment_ids.contains(&server.environment_id);
                     server.enabled && was_available != is_available
                 })

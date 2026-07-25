@@ -42,9 +42,9 @@ use rmcp::model::ReadResourceResult;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::ResolvedMcpCatalog;
 use crate::CodexAppsToolsCache;
 use crate::CodexAppsToolsCacheKey;
+use crate::ResolvedMcpCatalog;
 use crate::connection_manager::McpConnectionManager;
 use crate::runtime::McpRuntimeContext;
 use crate::server::EffectiveMcpServer;
