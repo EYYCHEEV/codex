@@ -69,9 +69,6 @@ pub struct EventProcessorWithJsonOutput {
     last_critical_error: Option<ThreadErrorEvent>,
     final_message: Option<String>,
     emit_final_message_on_shutdown: bool,
-    mcp_startup_statuses: HashMap<String, protocol::McpStartupStatus>,
-    expected_mcp_startup_servers: Option<usize>,
-    emitted_mcp_startup_complete: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -97,9 +94,6 @@ impl EventProcessorWithJsonOutput {
             last_critical_error: None,
             final_message: None,
             emit_final_message_on_shutdown: false,
-            mcp_startup_statuses: HashMap::new(),
-            expected_mcp_startup_servers: None,
-            emitted_mcp_startup_complete: false,
         }
     }
 
@@ -138,10 +132,6 @@ impl EventProcessorWithJsonOutput {
         }
     }
 
-    fn configured_mcp_server_count(config: &Config) -> usize {
-        config.mcp_servers.get().len()
-    }
-
     fn mcp_startup_status_from_notification(
         status: McpServerStartupState,
         error: Option<String>,
@@ -152,68 +142,10 @@ impl EventProcessorWithJsonOutput {
             McpServerStartupState::Ready => protocol::McpStartupStatus::Ready,
             McpServerStartupState::Failed => protocol::McpStartupStatus::Failed {
                 error: error.unwrap_or_else(|| "unknown MCP startup failure".to_string()),
-                reason: failure_reason.map(
-                    |McpServerStartupFailureReason::ReauthenticationRequired| {
-                        protocol::McpStartupFailureReason::ReauthenticationRequired
-                    },
-                ),
+                reason: failure_reason.map(McpServerStartupFailureReason::to_core),
             },
             McpServerStartupState::Cancelled => protocol::McpStartupStatus::Cancelled,
         }
-    }
-
-    fn mcp_startup_status_is_terminal(status: &protocol::McpStartupStatus) -> bool {
-        !matches!(status, protocol::McpStartupStatus::Starting)
-    }
-
-    fn maybe_collect_mcp_startup_complete(&mut self) -> Option<ThreadEvent> {
-        if self.emitted_mcp_startup_complete || self.mcp_startup_statuses.is_empty() {
-            return None;
-        }
-
-        let observed = self.mcp_startup_statuses.len();
-        let expected = self.expected_mcp_startup_servers.unwrap_or(observed);
-        if observed < expected
-            || self
-                .mcp_startup_statuses
-                .values()
-                .any(|status| !Self::mcp_startup_status_is_terminal(status))
-        {
-            return None;
-        }
-
-        let mut ready = Vec::new();
-        let mut failed = Vec::new();
-        let mut cancelled = Vec::new();
-
-        for (server, status) in &self.mcp_startup_statuses {
-            match status {
-                protocol::McpStartupStatus::Ready => ready.push(server.clone()),
-                protocol::McpStartupStatus::Failed { error, .. } => {
-                    failed.push(protocol::McpStartupFailure {
-                        server: server.clone(),
-                        error: error.clone(),
-                    });
-                }
-                protocol::McpStartupStatus::Cancelled => {
-                    cancelled.push(server.clone());
-                }
-                protocol::McpStartupStatus::Starting => {}
-            }
-        }
-
-        ready.sort();
-        cancelled.sort();
-        failed.sort_by(|left, right| left.server.cmp(&right.server));
-        self.emitted_mcp_startup_complete = true;
-
-        Some(ThreadEvent::McpStartupComplete(
-            protocol::McpStartupCompleteEvent {
-                ready,
-                failed,
-                cancelled,
-            },
-        ))
     }
 
     pub fn map_todo_items(plan: &[codex_app_server_protocol::TurnPlanStep]) -> Vec<TodoItem> {
@@ -569,14 +501,29 @@ impl EventProcessorWithJsonOutput {
                     notification.failure_reason,
                 );
                 let server = notification.name;
-                self.mcp_startup_statuses
-                    .insert(server.clone(), status.clone());
                 events.push(ThreadEvent::McpStartupUpdate(
                     protocol::McpStartupUpdateEvent { server, status },
                 ));
-                if let Some(event) = self.maybe_collect_mcp_startup_complete() {
-                    events.push(event);
-                }
+                CodexStatus::Running
+            }
+            ServerNotification::McpServerStartupComplete(notification) => {
+                events.push(ThreadEvent::McpStartupComplete(
+                    protocol::McpStartupCompleteEvent {
+                        ready: notification.ready,
+                        failed: notification
+                            .failed
+                            .into_iter()
+                            .map(|failure| protocol::McpStartupFailure {
+                                server: failure.name,
+                                error: failure.error,
+                                reason: failure
+                                    .failure_reason
+                                    .map(McpServerStartupFailureReason::to_core),
+                            })
+                            .collect(),
+                        cancelled: notification.cancelled,
+                    },
+                ));
                 CodexStatus::Running
             }
             ServerNotification::ItemStarted(notification) => {
@@ -736,13 +683,10 @@ impl EventProcessorWithJsonOutput {
 impl EventProcessor for EventProcessorWithJsonOutput {
     fn print_config_summary(
         &mut self,
-        config: &Config,
+        _config: &Config,
         _: &str,
         session_configured: &SessionConfiguredEvent,
     ) {
-        self.mcp_startup_statuses.clear();
-        self.expected_mcp_startup_servers = Some(Self::configured_mcp_server_count(config));
-        self.emitted_mcp_startup_complete = false;
         self.emit(Self::thread_started_event(session_configured));
     }
 

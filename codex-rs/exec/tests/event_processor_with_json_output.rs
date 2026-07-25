@@ -9,6 +9,8 @@ use codex_app_server_protocol::ErrorNotification;
 use codex_app_server_protocol::FileUpdateChange as ApiFileUpdateChange;
 use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
+use codex_app_server_protocol::McpServerStartupCompleteNotification;
+use codex_app_server_protocol::McpServerStartupFailure;
 use codex_app_server_protocol::McpServerStartupFailureReason;
 use codex_app_server_protocol::McpServerStartupState;
 use codex_app_server_protocol::McpServerStatusUpdatedNotification;
@@ -198,39 +200,60 @@ fn mcp_startup_status_updated_emits_update_event() {
 }
 
 #[test]
-fn terminal_mcp_startup_status_emits_aggregate_complete_event() {
+fn mcp_startup_complete_emits_canonical_aggregate_event() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
 
-    let collected = processor.collect_thread_events(ServerNotification::McpServerStatusUpdated(
-        McpServerStatusUpdatedNotification {
-            thread_id: None,
-            name: "smoke".to_string(),
-            status: McpServerStartupState::Failed,
-            error: Some("boom".to_string()),
-            failure_reason: Some(McpServerStartupFailureReason::ReauthenticationRequired),
+    let collected = processor.collect_thread_events(ServerNotification::McpServerStartupComplete(
+        McpServerStartupCompleteNotification {
+            thread_id: "thread-1".to_string(),
+            ready: vec!["ready".to_string()],
+            failed: vec![McpServerStartupFailure {
+                name: "smoke".to_string(),
+                error: "boom".to_string(),
+                failure_reason: Some(McpServerStartupFailureReason::ReauthenticationRequired),
+            }],
+            cancelled: vec!["cancelled".to_string()],
         },
     ));
 
     assert_eq!(
         collected,
         CollectedThreadEvents {
-            events: vec![
-                ThreadEvent::McpStartupUpdate(protocol::McpStartupUpdateEvent {
-                    server: "smoke".to_string(),
-                    status: protocol::McpStartupStatus::Failed {
-                        error: "boom".to_string(),
-                        reason: Some(protocol::McpStartupFailureReason::ReauthenticationRequired),
-                    },
-                }),
-                ThreadEvent::McpStartupComplete(protocol::McpStartupCompleteEvent {
-                    ready: vec![],
+            events: vec![ThreadEvent::McpStartupComplete(
+                protocol::McpStartupCompleteEvent {
+                    ready: vec!["ready".to_string()],
                     failed: vec![protocol::McpStartupFailure {
                         server: "smoke".to_string(),
                         error: "boom".to_string(),
+                        reason: Some(protocol::McpStartupFailureReason::ReauthenticationRequired),
                     }],
-                    cancelled: vec![],
-                }),
-            ],
+                    cancelled: vec!["cancelled".to_string()],
+                },
+            )],
+            status: CodexStatus::Running,
+        }
+    );
+}
+
+#[test]
+fn empty_mcp_startup_complete_emits_terminal_event() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let collected = processor.collect_thread_events(ServerNotification::McpServerStartupComplete(
+        McpServerStartupCompleteNotification {
+            thread_id: "thread-1".to_string(),
+            ready: Vec::new(),
+            failed: Vec::new(),
+            cancelled: Vec::new(),
+        },
+    ));
+
+    assert_eq!(
+        collected,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::McpStartupComplete(
+                protocol::McpStartupCompleteEvent::default(),
+            )],
             status: CodexStatus::Running,
         }
     );

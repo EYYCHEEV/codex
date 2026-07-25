@@ -34,6 +34,7 @@ import type { ItemGuardianApprovalReviewStartedNotification } from "./v2/ItemGua
 import type { ItemStartedNotification } from "./v2/ItemStartedNotification";
 import type { McpServerEventStreamNotification } from "./v2/McpServerEventStreamNotification";
 import type { McpServerOauthLoginCompletedNotification } from "./v2/McpServerOauthLoginCompletedNotification";
+import type { McpServerStartupCompleteNotification } from "./v2/McpServerStartupCompleteNotification";
 import type { McpServerStatusUpdatedNotification } from "./v2/McpServerStatusUpdatedNotification";
 import type { McpToolCallProgressNotification } from "./v2/McpToolCallProgressNotification";
 import type { ModelReroutedNotification } from "./v2/ModelReroutedNotification";
