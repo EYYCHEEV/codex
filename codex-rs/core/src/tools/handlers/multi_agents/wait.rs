@@ -360,21 +360,28 @@ async fn build_wait_agent_mcp_startup(
 }
 
 fn mcp_startup_snapshot_has_server_evidence(snapshot: &McpStartupSnapshot) -> bool {
-    !snapshot.statuses.is_empty()
-        || snapshot.complete.as_ref().is_some_and(|complete| {
-            !complete.ready.is_empty()
-                || !complete.failed.is_empty()
-                || !complete.cancelled.is_empty()
-        })
+    !snapshot.statuses.is_empty() || snapshot.complete.is_some() || snapshot.omitted_updates > 0
 }
 
-async fn build_wait_agent_latest_status(
+pub(super) async fn build_wait_agent_latest_status(
     agent_control: &crate::agent::AgentControl,
     target_by_thread_id: &HashMap<ThreadId, String>,
 ) -> HashMap<String, AgentStatus> {
     let mut statuses = HashMap::with_capacity(target_by_thread_id.len());
     for (thread_id, target) in target_by_thread_id {
-        statuses.insert(target.clone(), agent_control.get_status(*thread_id).await);
+        let status = agent_control.get_status(*thread_id).await;
+        let status = redact_final_status(&status);
+        statuses.insert(target.clone(), status);
     }
     statuses
+}
+
+fn redact_final_status(status: &AgentStatus) -> AgentStatus {
+    match status {
+        AgentStatus::Completed(_) => AgentStatus::Completed(None),
+        AgentStatus::Errored(_) => AgentStatus::Errored(
+            "Error details are available in the final status entry.".to_string(),
+        ),
+        status => status.clone(),
+    }
 }

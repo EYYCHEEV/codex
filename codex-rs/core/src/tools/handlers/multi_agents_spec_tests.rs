@@ -456,7 +456,7 @@ fn wait_agent_tool_v1_advertises_latest_status_and_bounded_waits() {
     assert_eq!(
         output_schema["properties"]["latest_status"]["description"],
         json!(
-            "Latest sampled statuses keyed by the requested agent ids. This includes non-final lifecycle states and is sampled when wait_agent returns."
+            "Latest sampled statuses keyed by every requested agent id. Final message and error payloads are redacted because full terminal details are already present in status."
         )
     );
     assert_eq!(
