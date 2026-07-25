@@ -209,22 +209,25 @@ impl Handler {
             results
         };
 
-        let timed_out = statuses.is_empty();
-        let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
+        let mut statuses_by_id = statuses.into_iter().collect::<HashMap<_, _>>();
         let mcp_startup =
             build_wait_agent_mcp_startup(&session.services.agent_control, &target_by_thread_id)
                 .await;
-        let latest_status =
-            build_wait_agent_latest_status(&session.services.agent_control, &target_by_thread_id)
-                .await;
+        let latest_status = build_wait_agent_latest_status(
+            &session.services.agent_control,
+            &target_by_thread_id,
+            &mut statuses_by_id,
+        )
+        .await;
+        let timed_out = statuses_by_id.is_empty();
         let result = WaitAgentResult {
-            status: statuses
-                .into_iter()
+            status: statuses_by_id
+                .iter()
                 .filter_map(|(thread_id, status)| {
                     target_by_thread_id
-                        .get(&thread_id)
+                        .get(thread_id)
                         .cloned()
-                        .map(|target| (target, status))
+                        .map(|target| (target, status.clone()))
                 })
                 .collect(),
             latest_status,
@@ -376,22 +379,34 @@ async fn build_wait_agent_mcp_startup(
     (!snapshots.is_empty()).then_some(snapshots)
 }
 
-fn mcp_startup_snapshot_has_server_evidence(snapshot: &McpStartupSnapshot) -> bool {
-    !snapshot.statuses.is_empty()
-        || snapshot.complete.as_ref().is_some_and(|complete| {
-            !complete.ready.is_empty()
-                || !complete.failed.is_empty()
-                || !complete.cancelled.is_empty()
-        })
+pub(super) fn mcp_startup_snapshot_has_server_evidence(snapshot: &McpStartupSnapshot) -> bool {
+    !snapshot.statuses.is_empty() || snapshot.complete.is_some() || snapshot.omitted_updates > 0
 }
 
-async fn build_wait_agent_latest_status(
+pub(super) async fn build_wait_agent_latest_status(
     agent_control: &crate::agent::AgentControl,
     target_by_thread_id: &HashMap<ThreadId, String>,
+    final_statuses: &mut HashMap<ThreadId, AgentStatus>,
 ) -> HashMap<String, AgentStatus> {
     let mut statuses = HashMap::with_capacity(target_by_thread_id.len());
     for (thread_id, target) in target_by_thread_id {
-        statuses.insert(target.clone(), agent_control.get_status(*thread_id).await);
+        let status = agent_control.get_status(*thread_id).await;
+        if is_final(&status) {
+            final_statuses
+                .entry(*thread_id)
+                .or_insert_with(|| status.clone());
+        }
+        statuses.insert(target.clone(), redact_final_status(&status));
     }
     statuses
+}
+
+fn redact_final_status(status: &AgentStatus) -> AgentStatus {
+    match status {
+        AgentStatus::Completed(_) => AgentStatus::Completed(None),
+        AgentStatus::Errored(_) => AgentStatus::Errored(
+            "Error details are available in the final status entry.".to_string(),
+        ),
+        status => status.clone(),
+    }
 }

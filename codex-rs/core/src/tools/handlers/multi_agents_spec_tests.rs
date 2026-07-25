@@ -504,7 +504,7 @@ fn wait_agent_tool_v1_advertises_latest_status_and_bounded_waits() {
     assert_eq!(
         output_schema["properties"]["latest_status"]["description"],
         json!(
-            "Latest sampled statuses keyed by the requested agent ids. This includes non-final lifecycle states and is sampled when wait_agent returns."
+            "Latest sampled statuses keyed by every requested agent id. Final message and error payloads are redacted because full terminal details are already present in status."
         )
     );
     assert_eq!(
@@ -516,6 +516,25 @@ fn wait_agent_tool_v1_advertises_latest_status_and_bounded_waits() {
             "shutdown",
             "not_found"
         ])
+    );
+    let mcp_startup_schema = &output_schema["properties"]["mcp_startup"]["additionalProperties"];
+    assert_eq!(mcp_startup_schema["additionalProperties"], json!(false));
+    assert_eq!(
+        mcp_startup_schema["properties"]["complete"]["additionalProperties"],
+        json!(false)
+    );
+    assert_eq!(
+        mcp_startup_schema["properties"]["complete"]["properties"]["failed"]["items"]["properties"]
+            ["reason"]["enum"],
+        json!(["reauthentication_required"])
+    );
+    assert_eq!(
+        mcp_startup_schema["properties"]["complete"]["properties"]["failed"]["items"]["additionalProperties"],
+        json!(false)
+    );
+    assert_eq!(
+        mcp_startup_schema["properties"]["omitted_updates"]["type"],
+        json!("integer")
     );
 }
 

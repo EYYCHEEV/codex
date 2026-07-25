@@ -478,7 +478,11 @@ fn mcp_startup_snapshot_output_schema() -> Value {
                             "type": "object",
                             "properties": {
                                 "server": { "type": "string" },
-                                "error": { "type": "string" }
+                                "error": { "type": "string" },
+                                "reason": {
+                                    "type": "string",
+                                    "enum": ["reauthentication_required"]
+                                }
                             },
                             "required": ["server", "error"],
                             "additionalProperties": false
@@ -491,6 +495,11 @@ fn mcp_startup_snapshot_output_schema() -> Value {
                 },
                 "required": ["ready", "failed", "cancelled"],
                 "additionalProperties": false
+            },
+            "omitted_updates": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Monotonic count of MCP startup evidence entries omitted to keep this model-visible snapshot bounded."
             }
         },
         "additionalProperties": false
@@ -641,7 +650,7 @@ fn wait_output_schema_v1() -> Value {
             },
             "latest_status": {
                 "type": "object",
-                "description": "Latest sampled statuses keyed by the requested agent ids. This includes non-final lifecycle states and is sampled when wait_agent returns.",
+                "description": "Latest sampled statuses keyed by every requested agent id. Final message and error payloads are redacted because full terminal details are already present in status.",
                 "additionalProperties": agent_status_output_schema()
             },
             "timed_out": {
