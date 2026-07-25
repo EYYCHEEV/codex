@@ -25,6 +25,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
+use codex_utils_output_truncation::approx_token_count;
 use codex_web_search_extension::install as install_web_search_extension;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::apps_test_server::AppsTestToolLoading;
@@ -1271,7 +1272,10 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     )
     .await?;
 
-    let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
+    let request = second_mock.single_request();
+    let whole_output_item = serde_json::to_string(&request.custom_tool_call_output("call-1"))?;
+    assert!(approx_token_count(&whole_output_item) <= 10_000);
+    let items = custom_tool_output_items(&request, "call-1");
     let output = text_item(&items, /*index*/ 1);
     assert_regex_match(
         r"^Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
