@@ -233,8 +233,8 @@ macro_rules! export_client_param_schema {
 
 /// Generates an `enum ClientRequest` where each variant is a request that the
 /// client can send to the server. Each variant has associated `params` and
-/// `response` types. Also generates a `export_client_responses()` function to
-/// export all response types to TypeScript.
+/// `response` types. Also generates TypeScript exporters for response and
+/// schema-only parameter types.
 macro_rules! client_request_definitions {
     (
         $(
@@ -478,9 +478,24 @@ macro_rules! client_request_definitions {
             Ok(())
         }
 
+        pub fn export_client_schema_param_types(
+            out_dir: &::std::path::Path,
+        ) -> ::std::result::Result<(), ::ts_rs::ExportError> {
+            $(
+                $(<$schema_params as ::ts_rs::TS>::export_all_to(out_dir)?;)?
+            )*
+            Ok(())
+        }
+
         pub(crate) fn visit_client_response_types(v: &mut impl ::ts_rs::TypeVisitor) {
             $(
                 v.visit::<$response>();
+            )*
+        }
+
+        pub(crate) fn visit_client_schema_param_types(v: &mut impl ::ts_rs::TypeVisitor) {
+            $(
+                $(v.visit::<$schema_params>();)?
             )*
         }
 
@@ -1096,7 +1111,7 @@ client_request_definitions! {
     },
 
     LogoutAccount => "account/logout" {
-        params: #[serde(default)] Option<v2::LogoutAccountParams>,
+        params: #[ts(type = "import(\"./v2/LogoutAccountParams\").LogoutAccountParams | null | undefined")] #[serde(default)] Option<v2::LogoutAccountParams>,
         schema_params: v2::LogoutAccountParams,
         serialization: global("account-pool"),
         response: v2::LogoutAccountResponse,
