@@ -87,9 +87,9 @@ filter = 'package(codex-core) & kind(test) & test(apply_patch_cli)'
 test-group = 'core_apply_patch_cli_integration'
 
 [[profile.default.overrides]]
-# These full-turn tests exercise nested execution or child-agent lifecycle and
+# These full-turn tests exercise nested execution, child-agent lifecycle, or guardian review and
 # finish close to the broad 60s ceiling on loaded local and CI runners.
-filter = 'package(codex-core) & (test(wait_agent_reports_terminal_once_and_keeps_unresolved_siblings_visible) | test(spawned_v2_children_use_fork_and_model_defaults) | test(/try_start_turn_if_idle_.*skill_mentioned_by_trusted_goal_input/))'
+filter = 'package(codex-core) & (test(wait_agent_reports_terminal_once_and_keeps_unresolved_siblings_visible) | test(spawned_v2_children_use_fork_and_model_defaults) | test(request_permissions_routes_to_guardian_when_reviewer_is_enabled) | test(/try_start_turn_if_idle_.*skill_mentioned_by_trusted_goal_input/))'
 slow-timeout = { period = "1m", terminate-after = 2 }
 
 [[profile.default.overrides]]
