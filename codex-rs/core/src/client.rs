@@ -95,7 +95,7 @@ use codex_login::RefreshTokenError;
 use codex_login::TransportAuthBinding;
 use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::add_originator_header;
-use codex_login::default_client::build_default_reqwest_client_for_route;
+use codex_login::default_client::build_default_reqwest_client_for_route_async;
 use codex_otel::SessionTelemetry;
 use codex_otel::current_span_w3c_trace_context;
 use codex_protocol::auth::AuthMode;
@@ -661,8 +661,9 @@ impl ModelClient {
                 None
             };
             let attempt_turn_state = client_session.turn_state();
-            let transport =
-                self.build_api_transport(&client_setup.api_provider, RESPONSES_COMPACT_ENDPOINT)?;
+            let transport = self
+                .build_api_transport(&client_setup.api_provider, RESPONSES_COMPACT_ENDPOINT)
+                .await?;
             let request_telemetry = Self::build_request_telemetry(
                 session_telemetry,
                 AuthRequestTelemetryContext::new(
@@ -835,7 +836,9 @@ impl ModelClient {
             client_setup.api_auth.as_ref(),
         ));
         let api_provider = api_provider_override.unwrap_or(client_setup.api_provider);
-        let transport = self.build_api_transport(&api_provider, REALTIME_CALLS_ENDPOINT)?;
+        let transport = self
+            .build_api_transport(&api_provider, REALTIME_CALLS_ENDPOINT)
+            .await?;
         let response = ApiRealtimeCallClient::new(transport, api_provider, client_setup.api_auth)
             .create_with_session_and_headers(sdp, session_config, extra_headers)
             .await
@@ -909,8 +912,9 @@ impl ModelClient {
             );
             let mut rate_limit_recorder =
                 ManagedRateLimitRecorder::for_setup(auth_manager.as_ref(), &client_setup);
-            let transport =
-                self.build_api_transport(&client_setup.api_provider, MEMORIES_SUMMARIZE_ENDPOINT)?;
+            let transport = self
+                .build_api_transport(&client_setup.api_provider, MEMORIES_SUMMARIZE_ENDPOINT)
+                .await?;
             let client =
                 ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
                     .with_telemetry(Some(request_telemetry));
@@ -1202,18 +1206,18 @@ impl ModelClient {
             .await
     }
 
-    fn build_api_transport(
+    async fn build_api_transport(
         &self,
         api_provider: &ApiProvider,
         endpoint: &str,
     ) -> Result<ReqwestTransport> {
         let request_url = api_provider.url_for_path(endpoint);
-        let client = build_default_reqwest_client_for_route(
-            &self.http_client_factory,
-            &request_url,
+        let client = build_default_reqwest_client_for_route_async(
+            self.http_client_factory.clone(),
+            request_url,
             ClientRouteClass::Api,
         )
-        .map_err(std::io::Error::from)?;
+        .await?;
         Ok(ReqwestTransport::new(client))
     }
 
