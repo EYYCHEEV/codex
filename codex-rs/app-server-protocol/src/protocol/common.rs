@@ -468,6 +468,7 @@ macro_rules! client_request_definitions {
             Ok(())
         }
 
+        #[cfg(test)]
         pub fn export_client_schema_param_types(
             out_dir: &::std::path::Path,
         ) -> ::std::result::Result<(), ::ts_rs::ExportError> {
@@ -491,6 +492,7 @@ macro_rules! client_request_definitions {
             )*
         }
 
+        #[cfg(test)]
         #[allow(clippy::vec_init_then_push)]
         pub fn export_client_response_schemas(
             out_dir: &::std::path::Path,

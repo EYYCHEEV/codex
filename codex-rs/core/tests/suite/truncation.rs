@@ -31,6 +31,8 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
 
+const MODEL_VISIBLE_ITEM_MAX_BYTES: usize = 40_000;
+
 fn assert_wall_time_header(output: &str) {
     let (wall_time, marker) = output
         .split_once('\n')
@@ -93,8 +95,9 @@ async fn tool_call_output_configured_limit_cannot_exceed_model_visible_cap() -> 
 
     // Inspect what we sent back to the model; it should contain a truncated
     // function_call_output for the shell call.
-    let output = mock2
-        .single_request()
+    let request = mock2.single_request();
+    let item = request.function_call_output(call_id);
+    let output = request
         .function_call_output_text(call_id)
         .context("function_call_output present for shell call")?;
     let output = output.replace("\r\n", "\n");
@@ -106,8 +109,8 @@ async fn tool_call_output_configured_limit_cannot_exceed_model_visible_cap() -> 
     );
 
     assert!(
-        output.len() <= 40_000,
-        "shell output should remain within the 10k-token ceiling"
+        serde_json::to_string(&item)?.len() <= MODEL_VISIBLE_ITEM_MAX_BYTES,
+        "serialized shell output item should remain within the 10k-token ceiling"
     );
 
     assert!(
@@ -817,14 +820,15 @@ async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> 
         )
         .await?;
 
-    let output = mock2
-        .single_request()
+    let request = mock2.single_request();
+    let item = request.function_call_output(call_id);
+    let output = request
         .function_call_output_text(call_id)
         .context("function_call_output present for rmcp call")?;
 
     assert!(
-        output.len() <= 40_000,
-        "MCP output should remain within the 10k-token ceiling"
+        serde_json::to_string(&item)?.len() <= MODEL_VISIBLE_ITEM_MAX_BYTES,
+        "serialized MCP output item should remain within the 10k-token ceiling"
     );
     assert!(
         output.contains("truncated"),

@@ -1293,6 +1293,144 @@ fn record_items_truncates_custom_tool_call_output_content() {
 }
 
 #[test]
+fn record_items_omits_tool_pairs_with_oversized_identifiers() {
+    let oversized = "x".repeat(40_001);
+    let items = vec![
+        ResponseItem::FunctionCall {
+            id: None,
+            name: "shell".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: oversized.clone(),
+            encrypted_function_args: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: oversized.clone(),
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::ToolSearchCall {
+            id: None,
+            call_id: Some(oversized.clone()),
+            status: None,
+            execution: "client".to_string(),
+            arguments: serde_json::Value::Null,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::ToolSearchOutput {
+            id: None,
+            call_id: Some(oversized.clone()),
+            status: "completed".to_string(),
+            execution: "client".to_string(),
+            tools: Vec::new(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: oversized.clone(),
+            name: "custom".to_string(),
+            namespace: None,
+            input: "{}".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id: oversized,
+            name: Some("custom".to_string()),
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    let history = create_history_with_items(items);
+
+    assert_eq!(
+        history.for_prompt(&default_input_modalities()),
+        Vec::<ResponseItem>::new()
+    );
+}
+
+#[test]
+fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
+    let items = vec![
+        ResponseItem::FunctionCall {
+            id: Some(ResponseItemId::with_suffix("fc", "large")),
+            name: "shell".to_string(),
+            namespace: Some("tools".to_string()),
+            arguments: "x".repeat(40_001),
+            call_id: "function-call".to_string(),
+            encrypted_function_args: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: "function-call".to_string(),
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "custom-call".to_string(),
+            name: "x".repeat(40_001),
+            namespace: None,
+            input: "{}".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::CustomToolCallOutput {
+            id: None,
+            call_id: "custom-call".to_string(),
+            name: Some("x".repeat(40_001)),
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
+    ];
+    let prompt = create_history_with_items(items).for_prompt(&default_input_modalities());
+
+    assert_eq!(
+        prompt,
+        vec![
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "shell".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: "function-call".to_string(),
+                encrypted_function_args: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "function-call".to_string(),
+                output: FunctionCallOutputPayload::from_text("ok".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::CustomToolCall {
+                id: None,
+                status: None,
+                call_id: "custom-call".to_string(),
+                name: "tool".to_string(),
+                namespace: None,
+                input: "{}".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::CustomToolCallOutput {
+                id: None,
+                call_id: "custom-call".to_string(),
+                name: None,
+                output: FunctionCallOutputPayload::from_text(
+                    "Tool output omitted because the complete item exceeded the 10,000-token context limit."
+                        .to_string(),
+                ),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]
+    );
+}
+
+#[test]
 fn record_items_respects_custom_token_limit() {
     let mut history = ContextManager::new();
     let policy = TruncationPolicy::Tokens(10);
