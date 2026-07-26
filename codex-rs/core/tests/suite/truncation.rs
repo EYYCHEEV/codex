@@ -44,6 +44,8 @@ use wiremock::MockServer;
 use super::rmcp_client::remote_aware_environment_id;
 use super::rmcp_client::remote_aware_stdio_server_bin;
 
+const MODEL_VISIBLE_ITEM_MAX_BYTES: usize = 40_000;
+
 fn assert_wall_time_header(output: &str) {
     let (wall_time, marker) = output
         .split_once('\n')
@@ -107,8 +109,9 @@ async fn tool_call_output_configured_limit_cannot_exceed_model_visible_cap() -> 
 
     // Inspect what we sent back to the model; it should contain a truncated
     // function_call_output for the shell call.
-    let output = mock2
-        .single_request()
+    let request = mock2.single_request();
+    let item = request.function_call_output(call_id);
+    let output = request
         .function_call_output_text(call_id)
         .context("function_call_output present for shell call")?;
     let output = output.replace("\r\n", "\n");
@@ -120,8 +123,8 @@ async fn tool_call_output_configured_limit_cannot_exceed_model_visible_cap() -> 
     );
 
     assert!(
-        output.len() <= 40_000,
-        "shell output should remain within the 10k-token ceiling"
+        serde_json::to_string(&item)?.len() <= MODEL_VISIBLE_ITEM_MAX_BYTES,
+        "serialized shell output item should remain within the 10k-token ceiling"
     );
 
     assert!(
@@ -757,7 +760,7 @@ async fn call_mcp_echo(
     builder: TestCodexBuilder,
     output_token_limit: Option<usize>,
     message_bytes: usize,
-) -> Result<(TestCodex, String)> {
+) -> Result<(TestCodex, String, Value)> {
     let call_id = "rmcp-output";
     let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
@@ -805,11 +808,12 @@ async fn call_mcp_echo(
     wait_for_mcp_server(&fixture.codex, server_name).await?;
     fixture.submit_text_turn("call the MCP echo tool").await?;
 
-    let output = response
-        .single_request()
+    let request = response.single_request();
+    let item = request.function_call_output(call_id);
+    let output = request
         .function_call_output_text(call_id)
         .context("model-facing MCP output text")?;
-    Ok((fixture, output))
+    Ok((fixture, output, item))
 }
 
 #[test_case(3_000, 13_000; "serialization allowance")]
@@ -823,7 +827,7 @@ async fn mcp_tool_output_limit_preserves_output_that_fits(
 
     let server = start_mock_server().await;
     let builder = test_codex().with_config(|config| config.tool_output_token_limit = Some(50));
-    let (_fixture, output) =
+    let (_fixture, output, _item) =
         call_mcp_echo(&server, builder, Some(output_token_limit), message_bytes).await?;
 
     assert!(output.contains(&"a".repeat(message_bytes)));
@@ -837,7 +841,7 @@ async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> 
 
     let server = start_mock_server().await;
     let builder = test_codex().with_config(|config| config.tool_output_token_limit = Some(50));
-    let (_fixture, output) = call_mcp_echo(
+    let (_fixture, output, item) = call_mcp_echo(
         &server,
         builder,
         Some(30_000),
@@ -846,7 +850,10 @@ async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> 
     .await?;
 
     assert!(output.contains("truncated"));
-    assert!(output.len() <= 40_000);
+    assert!(
+        serde_json::to_string(&item)?.len() <= MODEL_VISIBLE_ITEM_MAX_BYTES,
+        "serialized MCP output item should remain within the 10k-token ceiling"
+    );
     Ok(())
 }
 
@@ -872,7 +879,7 @@ async fn mcp_tool_output_limit_applies_to_hook_feedback() -> Result<()> {
             core_test_support::hooks::trust_discovered_hooks(config);
             config.tool_output_token_limit = Some(50);
         });
-    let (_fixture, output) =
+    let (_fixture, output, _item) =
         call_mcp_echo(&server, builder, Some(100), /*message_bytes*/ 0).await?;
 
     assert!(output.starts_with("hook feedback "));
@@ -891,7 +898,7 @@ async fn mcp_tool_output_limit_survives_resume(output_token_limit: Option<usize>
 
     let server = start_mock_server().await;
     let builder = test_codex().with_config(|config| config.tool_output_token_limit = Some(50_000));
-    let (fixture, output) = call_mcp_echo(
+    let (fixture, output, _item) = call_mcp_echo(
         &server,
         builder,
         output_token_limit,
