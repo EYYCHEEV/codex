@@ -46,6 +46,8 @@ impl AgentControl {
         }
 
         let root_history = root_thread.session.clone_history().await;
+        let root_logical_items = root_history.logical_items();
+        let root_logical_envelopes = root_history.logical_annotated_items();
         let history = root_history.conversation_history_snapshot();
         let root_evidence = root_thread
             .session
@@ -58,35 +60,30 @@ impl AgentControl {
         {
             let reconciled = ReconciledRetainedContext::new(
                 history.retained_context(),
-                root_history
-                    .annotated_items()
-                    .iter()
-                    .filter_map(|envelope| {
-                        let item = &envelope.item;
-                        let Some(TurnItem::UserMessage(message)) = parse_turn_item(item) else {
-                            return None;
-                        };
-                        let text = message.message();
-                        if is_summary_message(&text)
-                            || text.trim_start().starts_with("<user_action>")
-                        {
-                            return None;
-                        }
-                        let order = envelope
-                            .metadata
-                            .as_ref()
-                            .filter(|metadata| !metadata.inherited_user_message)
-                            .and_then(|metadata| metadata.user_input_order);
-                        Some((
-                            order,
-                            RetainedUserMessage {
-                                turn_id: item.turn_id().unwrap_or_default().to_owned(),
-                                message_id: item.id().map(|id| id.as_str().to_owned()),
-                                text,
-                                complete: false,
-                            },
-                        ))
-                    }),
+                root_logical_envelopes.iter().filter_map(|envelope| {
+                    let item = &envelope.item;
+                    let Some(TurnItem::UserMessage(message)) = parse_turn_item(item) else {
+                        return None;
+                    };
+                    let text = message.message();
+                    if is_summary_message(&text) || text.trim_start().starts_with("<user_action>") {
+                        return None;
+                    }
+                    let order = envelope
+                        .metadata
+                        .as_ref()
+                        .filter(|metadata| !metadata.inherited_user_message)
+                        .and_then(|metadata| metadata.user_input_order);
+                    Some((
+                        order,
+                        RetainedUserMessage {
+                            turn_id: item.turn_id().unwrap_or_default().to_owned(),
+                            message_id: item.id().map(|id| id.as_str().to_owned()),
+                            text,
+                            complete: false,
+                        },
+                    ))
+                }),
             );
             let mut missing_root_instructions = reconciled.missing_user_messages;
             let mut messages = reconciled
@@ -97,9 +94,12 @@ impl AgentControl {
                             // Older records may omit a large instruction. Recover that exact
                             // source while it remains available in the parent context.
                             let original = message.message_id.as_deref().and_then(|id| {
-                                root_history.raw_items().chain(history.review_items()).find(
-                                    |item| item.id().is_some_and(|item_id| item_id.as_str() == id),
-                                )
+                                root_logical_items
+                                    .iter()
+                                    .chain(history.review_items())
+                                    .find(|item| {
+                                        item.id().is_some_and(|item_id| item_id.as_str() == id)
+                                    })
                             });
                             let Some(TurnItem::UserMessage(original)) =
                                 original.and_then(parse_turn_item)
@@ -133,8 +133,8 @@ impl AgentControl {
                 .collect::<Vec<_>>();
             messages.drain(..messages.len().saturating_sub(MAX_ROOT_MESSAGES));
             // Optional assistant context cannot evict required grants or restrictions.
-            let mut assistant_messages = root_history
-                .raw_items()
+            let mut assistant_messages = root_logical_items
+                .iter()
                 .filter_map(|item| {
                     let Some(TurnItem::AgentMessage(message)) = parse_turn_item(item) else {
                         return None;
@@ -174,8 +174,8 @@ impl AgentControl {
             messages.insert(/*index*/ 0, GuardianRootMessage::RetainedContextScope);
             (messages, authorization_version)
         } else {
-            let mut messages = root_history
-                .raw_items()
+            let mut messages = root_logical_items
+                .iter()
                 .filter_map(|item| match (parse_turn_item(item), item) {
                     (Some(TurnItem::UserMessage(message)), _) => {
                         let message = message.message();

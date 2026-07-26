@@ -22,6 +22,7 @@ use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::LocalShellStatus;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::openai_models::InputModality;
@@ -1799,8 +1800,357 @@ fn record_items_omits_tool_pairs_with_oversized_identifiers() {
 }
 
 #[test]
-fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
-    let items = vec![
+fn record_items_projects_large_user_message_without_losing_text_or_metadata() {
+    let text = format!(
+        "{}{}{}",
+        "plain \"quoted\" \\ escaped\n".repeat(2_000),
+        "🦀é漢字".repeat(3_000),
+        " tail"
+    );
+    let item = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "large-user")),
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputText { text },
+            ContentItem::InputText {
+                text: String::new(),
+            },
+            ContentItem::InputText {
+                text: "distinct trailing content item".to_string(),
+            },
+        ],
+        phase: Some(MessagePhase::Commentary),
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("turn-large".to_string()),
+            content_item_kinds: Some(vec![
+                ContentItemKind("user.text".to_string()),
+                ContentItemKind("user.text".to_string()),
+                ContentItemKind("user.text".to_string()),
+            ]),
+            ..Default::default()
+        }),
+    };
+    let envelope = ResponseItemEnvelope {
+        item: item.clone(),
+        metadata: Some(CodexHarnessMetadata {
+            user_input_order: Some(17),
+            inherited_user_message: true,
+            ..Default::default()
+        }),
+    };
+    let mut history = ContextManager::new();
+
+    history.record_annotated_items(
+        std::slice::from_ref(&envelope),
+        TruncationPolicy::Tokens(10_000),
+    );
+
+    assert!(history.annotated_items().len() > 1);
+    assert_eq!(history.user_message_revision, 1);
+    assert!(history.annotated_items().iter().all(|chunk| {
+        estimate_item_token_count(&chunk.item)
+            <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+    }));
+    assert_eq!(history.logical_items(), vec![item.clone()]);
+    assert_eq!(
+        history
+            .annotated_items()
+            .iter()
+            .filter(|chunk| is_history_turn_boundary(chunk))
+            .count(),
+        1
+    );
+    assert!(history.annotated_items().iter().skip(1).all(|chunk| {
+        chunk.metadata.as_ref().is_some_and(|metadata| {
+            metadata.user_input_order == Some(17)
+                && metadata.inherited_user_message
+                && metadata.history_only_continuation
+                && metadata.turn_boundary_override == Some(false)
+        })
+    }));
+}
+
+#[test]
+fn marker_shaped_user_text_is_projected_as_an_ordinary_turn() {
+    let item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: format!("<skill>\n{}\n</skill>", "public text ".repeat(5_000)),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("user.text".to_string())]),
+            ..Default::default()
+        }),
+    };
+    let history = create_history_with_items(vec![item.clone()]);
+
+    assert_eq!(history.logical_items(), vec![item.clone()]);
+    assert_eq!(
+        history
+            .annotated_items()
+            .iter()
+            .filter(|item| is_history_turn_boundary(item))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn record_items_projects_large_agent_message_as_one_logical_turn() {
+    let item = ResponseItem::AgentMessage {
+        id: Some(ResponseItemId::with_suffix("amsg", "large")),
+        author: "/root".to_string(),
+        recipient: "/root/worker".to_string(),
+        content: vec![
+            AgentMessageInputContent::InputText {
+                text: format!(
+                    "{}{}",
+                    "agent \"quoted\" \\ escaped\n".repeat(2_500),
+                    "🦀é漢字".repeat(3_000)
+                ),
+            },
+            AgentMessageInputContent::InputText {
+                text: String::new(),
+            },
+            AgentMessageInputContent::InputText {
+                text: "distinct trailing segment".to_string(),
+            },
+        ],
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("agent-turn".to_string()),
+            content_item_kinds: Some(vec![
+                ContentItemKind("multi_agent.inter_agent_message".to_string()),
+                ContentItemKind("multi_agent.inter_agent_message".to_string()),
+                ContentItemKind("multi_agent.inter_agent_message".to_string()),
+            ]),
+            ..Default::default()
+        }),
+    };
+    let mut history = ContextManager::new();
+
+    history.record_items([&item], TruncationPolicy::Tokens(10_000));
+
+    assert!(history.annotated_items().len() > 1);
+    assert!(history.annotated_items().iter().all(|chunk| {
+        estimate_item_token_count(&chunk.item)
+            <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+    }));
+    assert_eq!(history.logical_items(), vec![item.clone()]);
+    assert_eq!(
+        history
+            .annotated_items()
+            .iter()
+            .filter(|chunk| is_history_turn_boundary(chunk))
+            .count(),
+        1
+    );
+    assert_eq!(history.user_message_revision, 0);
+
+    let mut resumed = ContextManager::new();
+    resumed.replace_annotated(vec![ResponseItemEnvelope::new(item)]);
+    assert_eq!(resumed.annotated_items(), history.annotated_items());
+}
+
+#[test]
+fn record_items_preserves_large_encrypted_agent_message_by_model_visible_estimate() {
+    let item = ResponseItem::AgentMessage {
+        id: Some(ResponseItemId::with_suffix("amsg", "encrypted")),
+        author: "/root".to_string(),
+        recipient: "/root/worker".to_string(),
+        content: vec![AgentMessageInputContent::EncryptedContent {
+            encrypted_content: "e".repeat(60_000),
+        }],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(serialized_json_bytes(&item).unwrap() > MODEL_VISIBLE_ITEM_MAX_BYTES);
+    assert!(
+        estimate_item_token_count(&item)
+            <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+    );
+    let history = create_history_with_items(vec![item.clone()]);
+
+    assert_eq!(history.annotated_items().len(), 1);
+    assert_eq!(history.logical_items(), vec![item]);
+    assert!(is_history_turn_boundary(&history.annotated_items()[0]));
+}
+
+#[test]
+fn rollback_counts_projected_user_message_as_one_logical_turn() {
+    let first = user_input_text_msg(&"first 🦀 ".repeat(8_000));
+    let first_reply = assistant_msg("first reply");
+    let second = user_input_text_msg(&"second \"quoted\" ".repeat(8_000));
+    let second_reply = assistant_msg("second reply");
+    let mut history = create_history_with_items(vec![
+        first.clone(),
+        first_reply.clone(),
+        second,
+        second_reply,
+    ]);
+
+    assert_eq!(
+        history
+            .annotated_items()
+            .iter()
+            .filter(|item| is_history_turn_boundary(item))
+            .count(),
+        2
+    );
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(history.logical_items(), vec![first, first_reply]);
+}
+
+#[test]
+fn remove_first_item_evicts_an_entire_projected_message() {
+    let large = user_input_text_msg(&"large message ".repeat(8_000));
+    let following = assistant_msg("following");
+    let mut history = create_history_with_items(vec![large, following.clone()]);
+    assert!(history.annotated_items().len() > 2);
+
+    history.remove_first_item();
+
+    assert_eq!(history.logical_items(), vec![following]);
+}
+
+#[test]
+fn record_items_preserves_large_inline_media_using_model_visible_estimate() {
+    let item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: format!("data:image/png;base64,{}", "a".repeat(80_000)),
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let history = create_history_with_items(vec![item.clone()]);
+
+    assert_eq!(history.logical_items(), vec![item]);
+    assert!(
+        estimate_item_token_count(&history.annotated_items()[0].item)
+            <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+    );
+}
+
+#[test]
+fn oversized_server_tool_search_output_removes_call_from_legacy_review_history() {
+    let call = ResponseItem::ToolSearchCall {
+        id: None,
+        call_id: Some("server-pair".to_string()),
+        status: None,
+        execution: "server".to_string(),
+        arguments: serde_json::Value::Null,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let output = ResponseItem::ToolSearchOutput {
+        id: None,
+        call_id: Some("server-pair".to_string()),
+        status: "completed".to_string(),
+        execution: "server".to_string(),
+        tools: vec![serde_json::json!({ "description": "x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES) })],
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = ContextManager::new();
+    history.record_items([&call], TruncationPolicy::Tokens(10_000));
+    history.replace_compacted(vec![ResponseItemEnvelope::new(call)]);
+    let generation_before = history
+        .review_history
+        .as_ref()
+        .expect("legacy review history")
+        .generation();
+
+    history.record_items([&output], TruncationPolicy::Tokens(10_000));
+
+    assert!(history.annotated_items().is_empty());
+    let review_history = history
+        .review_history
+        .as_ref()
+        .expect("legacy review history");
+    assert!(review_history.items().next().is_none());
+    assert!(review_history.generation() > generation_before);
+}
+
+#[test]
+fn original_detail_image_outputs_over_token_cap_omit_function_and_custom_pairs() {
+    let image = ImageBuffer::from_pixel(3201, 3201, Luma([12u8]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image
+        .write_to(&mut bytes, ImageFormat::Png)
+        .expect("encode png");
+    let image_url = format!(
+        "data:image/png;base64,{}",
+        BASE64_STANDARD.encode(bytes.get_ref())
+    );
+    let function_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "function".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: "function-image".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let function_output = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some("function-image".to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_content_items(vec![
+            FunctionCallOutputContentItem::InputImage {
+                image_url: image_url.clone(),
+                detail: Some(ImageDetail::Original),
+            },
+        ]),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let custom_call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "custom-image".to_string(),
+        name: "custom".to_string(),
+        namespace: None,
+        input: "{}".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let custom_output = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "custom-image".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_content_items(vec![
+            FunctionCallOutputContentItem::InputImage {
+                image_url,
+                detail: Some(ImageDetail::Original),
+            },
+        ]),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    for output in [&function_output, &custom_output] {
+        assert!(serialized_json_bytes(output).unwrap() <= MODEL_VISIBLE_ITEM_MAX_BYTES);
+        assert!(
+            estimate_item_token_count(output)
+                > i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+        );
+    }
+    let mut history = ContextManager::new();
+    history.record_items(
+        [&function_call, &custom_call],
+        TruncationPolicy::Tokens(10_000),
+    );
+
+    history.record_items(
+        [&function_output, &custom_output],
+        TruncationPolicy::Tokens(10_000),
+    );
+
+    assert!(history.annotated_items().is_empty());
+}
+
+#[test]
+fn record_items_omits_oversized_tool_pairs_across_batches_without_rewriting_history() {
+    let calls = [
         ResponseItem::FunctionCall {
             id: Some(ResponseItemId::with_suffix("fc", "large")),
             name: "shell".to_string(),
@@ -1808,14 +2158,6 @@ fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
             arguments: "x".repeat(40_001),
             call_id: "function-call".to_string(),
             encrypted_function_args: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::FunctionCallOutput {
-            id: None,
-            call_id: Some("function-call".to_string()),
-            name: None,
-            namespace: None,
-            output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::CustomToolCall {
@@ -1827,6 +2169,16 @@ fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
             input: "{}".to_string(),
             internal_chat_message_metadata_passthrough: None,
         },
+    ];
+    let outputs = [
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: Some("function-call".to_string()),
+            name: None,
+            namespace: None,
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
         ResponseItem::CustomToolCallOutput {
             id: None,
             call_id: "custom-call".to_string(),
@@ -1835,49 +2187,157 @@ fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
             internal_chat_message_metadata_passthrough: None,
         },
     ];
-    let prompt = create_history_with_items(items).for_prompt(&default_input_modalities());
+    let mut history = ContextManager::new();
+    history.record_items(calls.iter(), TruncationPolicy::Tokens(10_000));
+    history.record_items(outputs.iter(), TruncationPolicy::Tokens(10_000));
 
     assert_eq!(
-        prompt,
-        vec![
-            ResponseItem::FunctionCall {
-                id: None,
-                name: "shell".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-                call_id: "function-call".to_string(),
-                encrypted_function_args: None,
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::FunctionCallOutput {
-                id: None,
-                call_id: Some("function-call".to_string()),
-                name: None,
-                namespace: None,
-                output: FunctionCallOutputPayload::from_text("ok".to_string()),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::CustomToolCall {
-                id: None,
-                status: None,
-                call_id: "custom-call".to_string(),
-                name: "tool".to_string(),
-                namespace: None,
-                input: "{}".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::CustomToolCallOutput {
-                id: None,
-                call_id: "custom-call".to_string(),
-                name: None,
-                output: FunctionCallOutputPayload::from_text(
-                    "Tool output omitted because the complete item exceeded the 10,000-token context limit."
-                        .to_string(),
-                ),
-                internal_chat_message_metadata_passthrough: None,
-            },
-        ]
+        history.for_prompt(&default_input_modalities()),
+        Vec::<ResponseItem>::new()
     );
+}
+
+#[test]
+fn record_items_omits_call_when_oversized_optional_id_output_arrives_first() {
+    let output = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some("output-first".to_string()),
+        name: Some("x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES)),
+        namespace: None,
+        output: FunctionCallOutputPayload::from_text("ok".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let call = ResponseItem::FunctionCall {
+        id: None,
+        name: "tool".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: "output-first".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = ContextManager::new();
+
+    history.record_items([&output], TruncationPolicy::Tokens(10_000));
+    history.record_items([&call], TruncationPolicy::Tokens(10_000));
+
+    assert!(history.annotated_items().is_empty());
+}
+
+#[test]
+fn record_items_preserves_named_external_output_without_call_id_and_metadata() {
+    let envelope = ResponseItemEnvelope {
+        item: ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: None,
+            name: Some("send_message_to_thread".to_string()),
+            namespace: Some("codex_app".to_string()),
+            output: FunctionCallOutputPayload::from_text("word ".repeat(100)),
+            internal_chat_message_metadata_passthrough: None,
+        },
+        metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: Some(20),
+            user_input_order: Some(7),
+            ..Default::default()
+        }),
+    };
+    let mut history = ContextManager::new();
+
+    history.record_annotated_items(std::slice::from_ref(&envelope), TruncationPolicy::Tokens(4));
+
+    assert_eq!(history.annotated_items().len(), 1);
+    assert_eq!(history.annotated_items()[0].metadata, envelope.metadata);
+    assert_ne!(history.annotated_items()[0].item, envelope.item);
+    assert_eq!(history.for_prompt(&default_input_modalities()).len(), 1);
+}
+
+#[test]
+fn record_items_omits_oversized_stamped_message_and_general_item() {
+    let items = [
+        ResponseItem::Message {
+            id: Some(ResponseItemId::with_suffix("msg", "large")),
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "small".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    turn_id: Some("x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES)),
+                    ..Default::default()
+                },
+            ),
+        },
+        ResponseItem::AdditionalTools {
+            id: None,
+            role: "developer".to_string(),
+            tools: vec![
+                serde_json::json!({ "description": "x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES) }),
+            ],
+        },
+    ];
+    let mut history = ContextManager::new();
+
+    history.record_items(items.iter(), TruncationPolicy::Tokens(10_000));
+
+    assert!(history.annotated_items().is_empty());
+}
+
+#[test]
+fn replacement_enforces_cap_preserves_metadata_and_clears_stale_pair_tracker() {
+    let oversized_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "tool".to_string(),
+        namespace: None,
+        arguments: "x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES),
+        call_id: "reused".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let replacement_metadata = Some(CodexHarnessMetadata {
+        user_input_order: Some(9),
+        ..Default::default()
+    });
+    let replacement = ResponseItemEnvelope {
+        item: assistant_msg("replacement"),
+        metadata: replacement_metadata.clone(),
+    };
+    let oversized_replacement = ResponseItemEnvelope {
+        item: assistant_msg(&"x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES)),
+        metadata: Some(CodexHarnessMetadata {
+            user_input_order: Some(10),
+            ..Default::default()
+        }),
+    };
+    let call = ResponseItem::FunctionCall {
+        id: None,
+        name: "tool".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: "reused".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let output = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some("reused".to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_text("ok".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = ContextManager::new();
+    history.record_items([&oversized_call], TruncationPolicy::Tokens(10_000));
+
+    history.replace_annotated(vec![replacement.clone(), oversized_replacement]);
+    history.record_items([&call, &output], TruncationPolicy::Tokens(10_000));
+
+    assert_eq!(history.annotated_items()[0], replacement);
+    assert_eq!(history.annotated_items().len(), 3);
+    assert!(history.annotated_items().iter().all(|envelope| {
+        serialized_json_bytes(&envelope.item)
+            .is_ok_and(|bytes| bytes <= MODEL_VISIBLE_ITEM_MAX_BYTES)
+    }));
 }
 
 #[test]
