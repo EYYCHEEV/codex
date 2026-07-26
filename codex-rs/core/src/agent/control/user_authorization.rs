@@ -58,6 +58,7 @@ impl LocalAgentControl {
         }
 
         let root_history = root_thread.session.clone_history().await;
+        let root_logical_envelopes = root_history.logical_annotated_items();
         let history = root_history.conversation_history_snapshot();
         // Join calls to host-confirmed outputs in this snapshot. Older outputs without
         // captured text cannot establish what was sent, including after a hook rewrite.
@@ -90,8 +91,7 @@ impl LocalAgentControl {
         let retained_context = root_history.retained_context();
         let reconciled = ReconciledRetainedContext::new(
             Some(retained_context),
-            root_history
-                .annotated_items()
+            root_logical_envelopes
                 .iter()
                 .filter_map(|envelope| {
                     let item = &envelope.item;
@@ -135,8 +135,9 @@ impl LocalAgentControl {
                         // Older records may omit a large instruction. Recover that exact
                         // source while it remains available in the parent context.
                         let original = message.message_id.as_deref().and_then(|id| {
-                            root_history
-                                .raw_items()
+                            root_logical_envelopes
+                                .iter()
+                                .map(|envelope| &envelope.item)
                                 .chain(root_history.guardian_history_items().into_iter().flatten())
                                 .find(|item| {
                                     item.id().is_some_and(|item_id| item_id.as_str() == id)
@@ -199,8 +200,7 @@ impl LocalAgentControl {
         let mut missing_assistant_context = retained_context.has_omitted_assistant_messages();
         // Prefer a renderable retained original over a shortened checkpoint copy.
         // Otherwise preserve the bounded live evidence, including confirmed messaging sends.
-        let live_assistant_messages = root_history
-            .annotated_items()
+        let live_assistant_messages = root_logical_envelopes
             .iter()
             .filter(|envelope| {
                 !envelope
@@ -249,8 +249,9 @@ impl LocalAgentControl {
                 };
                 if message.phase == Some(MessagePhase::Commentary)
                     || message.message_id.as_deref().is_some_and(|id| {
-                        root_history
-                            .raw_items()
+                        root_logical_envelopes
+                            .iter()
+                            .map(|envelope| &envelope.item)
                             .chain(root_history.guardian_history_items().into_iter().flatten())
                             .any(|item| {
                                 matches!(item, ResponseItem::Message {

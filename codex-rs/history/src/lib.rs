@@ -124,6 +124,20 @@ pub struct CodexHarnessMetadata {
     /// Sender context captured by the host when this task message was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_user_messages: Option<Box<SenderUserMessages>>,
+    /// Overrides whether this projected history item starts a logical instruction turn.
+    ///
+    /// Persisted source items normally leave this unset. History projections set it when one
+    /// logical message is represented by multiple bounded model-visible items.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_boundary_override: Option<bool>,
+
+    /// Whether this is a model-history-only continuation of the preceding message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub history_only_continuation: bool,
+
+    /// Original content-item indices for a projected message chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_content_indices: Option<Vec<usize>>,
 }
 
 fn deserialize_mcp_attribution_checkpoint<'de, D>(
