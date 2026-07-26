@@ -92,15 +92,14 @@ filter = 'package(codex-core) & kind(test) & test(apply_patch_cli)'
 test-group = 'core_apply_patch_cli_integration'
 
 [[profile.default.overrides]]
-# These full-turn tests exercise nested execution or child-agent lifecycle and
-# finish close to the broad 60s ceiling on loaded local and CI runners.
-filter = 'package(codex-core) & (test(wait_agent_reports_terminal_once_and_keeps_unresolved_siblings_visible) | test(spawned_v2_children_use_fork_and_model_defaults) | test(/try_start_turn_if_idle_.*skill_mentioned_by_trusted_goal_input/))'
+# Guardian review may legitimately consume its 90-second request budget before
+# the test's outer timeout fires.
+filter = 'package(codex-core) & test(request_permissions_routes_to_guardian_when_reviewer_is_enabled)'
 slow-timeout = { period = "1m", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter = 'package(codex-core) & test(/code_mode_exec_(nested_limit_|without_nested_limit_|outer_limit_).*/)'
 test-group = 'core_code_mode_exec_integration'
-slow-timeout = { period = "1m", terminate-after = 2 }
 
 [[profile.default.overrides]]
 filter = 'package(codex-core) & test(/(tool_call_output_configured_limit|mcp_tool_call_output_custom_limit)_cannot_exceed_model_visible_cap/)'

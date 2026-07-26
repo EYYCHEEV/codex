@@ -457,7 +457,8 @@ impl ModelClientSession {
             };
             let transport = self
                 .client
-                .build_api_transport(&client_setup.api_provider, endpoint.path())?;
+                .build_api_transport(&client_setup.api_provider, endpoint.path())
+                .await?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup
                     .effective_auth
