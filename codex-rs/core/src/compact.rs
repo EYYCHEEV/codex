@@ -390,7 +390,7 @@ async fn run_compact_task_inner_impl(
     };
 
     let history_snapshot = sess.clone_history().await;
-    let history_items = history_snapshot.annotated_items();
+    let history_items = history_snapshot.logical_annotated_items();
     let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
         get_last_assistant_message_from_turn(compaction_response.output.iter())
             .filter(|summary| !summary.trim().is_empty())
@@ -400,10 +400,10 @@ async fn run_compact_task_inner_impl(
                 )
             })?
     } else {
-        get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default()
+        get_last_assistant_message_from_turn(history_items.iter().map(|envelope| &envelope.item)).unwrap_or_default()
     };
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
-    let user_messages = collect_annotated_user_messages(history_items);
+    let user_messages = collect_annotated_user_messages(&history_items);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
     if let Some(summary_item) = new_history.last_mut() {

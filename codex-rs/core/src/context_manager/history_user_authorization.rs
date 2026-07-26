@@ -86,7 +86,7 @@ impl ContextManager {
         {
             // Worker checkpoints intentionally omit copied instructions. A standalone
             // root adopts the surviving prefix without duplicating an adopted checkpoint.
-            let items = Arc::clone(&self.items);
+            let items = self.logical_annotated_items();
             for envelope in items.iter().filter(|envelope| {
                 envelope
                     .metadata
@@ -140,6 +140,12 @@ impl ContextManager {
         }
         let is_assistant =
             matches!(item, ResponseItem::Message { role, .. } if role == "assistant");
+        if metadata.is_some_and(|metadata| {
+            metadata.history_only_continuation
+                || (!is_assistant && metadata.turn_boundary_override == Some(false))
+        }) {
+            return None;
+        }
         if metadata.is_some_and(|metadata| metadata.compaction_output)
             || (!is_assistant && !crate::context::is_user_authorization_message(item))
         {
