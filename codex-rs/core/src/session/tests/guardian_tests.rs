@@ -131,7 +131,7 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
         .expect("primary environment")
         .selection();
     let response = tokio::time::timeout(
-        Duration::from_secs(45),
+        crate::guardian::GUARDIAN_REVIEW_TIMEOUT + Duration::from_secs(5),
         session.request_permissions_for_environment(
             &turn_context,
             "perm-call-1".to_string(),
