@@ -326,6 +326,9 @@ impl SessionState {
             if snapshot.individual_limit.is_some() {
                 canonical.individual_limit = snapshot.individual_limit;
             }
+            if snapshot.spend_control_reached.is_some() {
+                canonical.spend_control_reached = snapshot.spend_control_reached;
+            }
             if snapshot.plan_type.is_some() {
                 canonical.plan_type = snapshot.plan_type;
             }
