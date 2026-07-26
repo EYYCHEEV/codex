@@ -460,11 +460,14 @@ impl ModelClientSession {
             } else {
                 None
             };
-            let transport = self.client.build_api_transport(
-                &client_setup.api_provider,
-                "/responses",
-                client_setup.redirect_policy,
-            )?;
+            let transport = self
+                .client
+                .build_api_transport(
+                    &client_setup.api_provider,
+                    "/responses",
+                    client_setup.redirect_policy,
+                )
+                .await?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup
                     .effective_auth
