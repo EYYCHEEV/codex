@@ -102,9 +102,7 @@ pub async fn build_skill_injections(
                     path,
                     contents,
                 };
-                if approx_token_count(&SkillInstructions::from(&injection).render())
-                    > MAX_SKILL_INSTRUCTION_TOKENS
-                {
+                if exceeds_model_context_limit(&injection) {
                     emit_skill_injected_metric(otel, skill, "too_large");
                     result.warnings.push(format!(
                         "Skipped skill {name} at {path}: instructions exceed the {MAX_SKILL_INSTRUCTION_TOKENS}-token model-context limit",
@@ -138,6 +136,13 @@ pub async fn build_skill_injections(
     analytics_client.track_skill_invocations(tracking, invocations);
 
     result
+}
+
+fn exceeds_model_context_limit(injection: &SkillInjection) -> bool {
+    let model_item = ContextualUserFragment::into(SkillInstructions::from(injection));
+    serde_json::to_string(&model_item).map_or(true, |serialized| {
+        approx_token_count(&serialized) > MAX_SKILL_INSTRUCTION_TOKENS
+    })
 }
 
 fn normalize_host_skill_path(path: &str) -> String {

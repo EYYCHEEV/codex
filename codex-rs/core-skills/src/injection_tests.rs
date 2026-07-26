@@ -34,6 +34,21 @@ fn linked_skill_mention(name: &str, unix_path: &str) -> String {
     format!("[${name}]({})", test_path_buf(unix_path).display())
 }
 
+#[test]
+fn serialized_skill_instructions_cannot_exceed_model_context_limit() {
+    let injection = SkillInjection {
+        name: "escape-heavy".to_string(),
+        path: "/tmp/escape-heavy/SKILL.md".to_string(),
+        contents: "\"".repeat(39_000),
+    };
+
+    assert!(
+        approx_token_count(&SkillInstructions::from(&injection).render())
+            <= MAX_SKILL_INSTRUCTION_TOKENS
+    );
+    assert!(exceeds_model_context_limit(&injection));
+}
+
 fn collect_mentions(
     inputs: &[UserInput],
     skills: &[SkillMetadata],
