@@ -15,8 +15,6 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
-use codex_protocol::models::LocalShellAction;
-use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -32,6 +30,7 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_items_with_policy;
 use codex_utils_output_truncation::truncate_text;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -63,6 +62,8 @@ pub(crate) struct ContextManager {
     reference_context_item: Option<TurnContextItem>,
     /// World state most recently appended to model-visible history.
     world_state_baseline: Option<WorldStateSnapshot>,
+    /// Oversized calls omitted from model-visible history whose matching outputs have not arrived.
+    omitted_call_ids: HashSet<String>,
 }
 
 impl ContextManager {
@@ -75,6 +76,7 @@ impl ContextManager {
             ),
             reference_context_item: None,
             world_state_baseline: None,
+            omitted_call_ids: HashSet::new(),
         }
     }
 
@@ -138,8 +140,39 @@ impl ContextManager {
                 continue;
             }
 
-            if let Some(processed) = Self::process_item(item_ref, policy) {
-                Arc::make_mut(&mut self.items).push(processed);
+            let output_call_id = match item_ref {
+                ResponseItem::FunctionCallOutput { call_id, .. }
+                | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id),
+                ResponseItem::ToolSearchOutput {
+                    call_id: Some(call_id),
+                    ..
+                } => Some(call_id),
+                _ => None,
+            };
+            if output_call_id.is_some_and(|call_id| self.omitted_call_ids.remove(call_id)) {
+                continue;
+            }
+
+            match Self::process_item(item_ref, policy) {
+                Some(processed) => Arc::make_mut(&mut self.items).push(processed),
+                None => {
+                    let call_id = match item_ref {
+                        ResponseItem::FunctionCall { call_id, .. }
+                        | ResponseItem::CustomToolCall { call_id, .. } => Some(call_id),
+                        ResponseItem::ToolSearchCall {
+                            call_id: Some(call_id),
+                            ..
+                        }
+                        | ResponseItem::LocalShellCall {
+                            call_id: Some(call_id),
+                            ..
+                        } => Some(call_id),
+                        _ => None,
+                    };
+                    if let Some(call_id) = call_id {
+                        self.omitted_call_ids.insert(call_id.clone());
+                    }
+                }
             }
         }
     }
@@ -433,115 +466,7 @@ impl ContextManager {
                 | ResponseItem::ToolSearchOutput { .. }
                 | ResponseItem::CustomToolCallOutput { .. }
         ) {
-            if estimate_item_token_count(&processed) > max_item_tokens {
-                processed = match item {
-                    ResponseItem::FunctionCall { name, call_id, .. } => {
-                        ResponseItem::FunctionCall {
-                            id: None,
-                            name: name.clone(),
-                            namespace: None,
-                            arguments: "{}".to_string(),
-                            call_id: call_id.clone(),
-                            internal_chat_message_metadata_passthrough: None,
-                        }
-                    }
-                    ResponseItem::ToolSearchCall { call_id, .. } => ResponseItem::ToolSearchCall {
-                        id: None,
-                        call_id: call_id.clone(),
-                        status: None,
-                        execution: "client".to_string(),
-                        arguments: serde_json::Value::Null,
-                        internal_chat_message_metadata_passthrough: None,
-                    },
-                    ResponseItem::CustomToolCall { call_id, name, .. } => {
-                        ResponseItem::CustomToolCall {
-                            id: None,
-                            status: None,
-                            call_id: call_id.clone(),
-                            name: name.clone(),
-                            namespace: None,
-                            input: "{}".to_string(),
-                            internal_chat_message_metadata_passthrough: None,
-                        }
-                    }
-                    ResponseItem::LocalShellCall {
-                        call_id, status, ..
-                    } => ResponseItem::LocalShellCall {
-                        id: None,
-                        call_id: call_id.clone(),
-                        status: status.clone(),
-                        action: LocalShellAction::Exec(LocalShellExecAction {
-                            command: Vec::new(),
-                            timeout_ms: None,
-                            working_directory: None,
-                            env: None,
-                            user: None,
-                        }),
-                        internal_chat_message_metadata_passthrough: None,
-                    },
-                    _ => processed,
-                };
-            }
-            if estimate_item_token_count(&processed) > max_item_tokens {
-                match &mut processed {
-                    ResponseItem::FunctionCall { name, .. }
-                    | ResponseItem::CustomToolCall { name, .. } => {
-                        *name = "tool".to_string();
-                    }
-                    _ => {}
-                }
-            }
-            let synthetic_output = match &processed {
-                ResponseItem::FunctionCall { id, call_id, .. } => {
-                    Some(ResponseItem::FunctionCallOutput {
-                        id: normalize::synthetic_output_id("fco", id.as_deref()),
-                        call_id: call_id.clone(),
-                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        internal_chat_message_metadata_passthrough: None,
-                    })
-                }
-                ResponseItem::ToolSearchCall {
-                    id,
-                    call_id: Some(call_id),
-                    ..
-                } => Some(ResponseItem::ToolSearchOutput {
-                    id: normalize::synthetic_output_id("tso", id.as_deref()),
-                    call_id: Some(call_id.clone()),
-                    status: "completed".to_string(),
-                    execution: "client".to_string(),
-                    tools: Vec::new(),
-                    internal_chat_message_metadata_passthrough: None,
-                }),
-                ResponseItem::CustomToolCall { id, call_id, .. } => {
-                    Some(ResponseItem::CustomToolCallOutput {
-                        id: normalize::synthetic_output_id("ctco", id.as_deref()),
-                        call_id: call_id.clone(),
-                        name: None,
-                        output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                        internal_chat_message_metadata_passthrough: None,
-                    })
-                }
-                ResponseItem::LocalShellCall {
-                    id,
-                    call_id: Some(call_id),
-                    ..
-                } => Some(ResponseItem::FunctionCallOutput {
-                    id: normalize::synthetic_output_id("fco", id.as_deref()),
-                    call_id: call_id.clone(),
-                    output: FunctionCallOutputPayload::from_text("aborted".to_string()),
-                    internal_chat_message_metadata_passthrough: None,
-                }),
-                _ => None,
-            };
-            if synthetic_output.is_some()
-                && (estimate_item_token_count(&processed) > max_item_tokens
-                    || synthetic_output
-                        .as_ref()
-                        .is_some_and(|output| estimate_item_token_count(output) > max_item_tokens))
-            {
-                return None;
-            }
-            return Some(processed);
+            return (estimate_item_token_count(&processed) <= max_item_tokens).then_some(processed);
         }
         for _ in 0..2 {
             let estimated_tokens = estimate_item_token_count(&processed);

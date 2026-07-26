@@ -818,19 +818,13 @@ async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> 
         .await?;
 
     let request = mock2.single_request();
-    let item = request.function_call_output(call_id);
-    let output = request
-        .function_call_output_text(call_id)
-        .context("function_call_output present for rmcp call")?;
+    let oversized_pair: Vec<_> = request
+        .input()
+        .into_iter()
+        .filter(|item| item.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id))
+        .collect();
 
-    assert!(
-        serde_json::to_string(&item)?.len() <= MODEL_VISIBLE_ITEM_MAX_BYTES,
-        "serialized MCP output item should remain within the 10k-token ceiling"
-    );
-    assert!(
-        output.contains("truncated"),
-        "MCP output should include a truncation marker: {output}"
-    );
+    assert_eq!(oversized_pair, Vec::<serde_json::Value>::new());
 
     Ok(())
 }

@@ -1319,20 +1319,14 @@ fn record_items_omits_tool_pairs_with_oversized_identifiers() {
 }
 
 #[test]
-fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
-    let items = vec![
+fn record_items_omits_oversized_tool_pairs_without_rewriting_history() {
+    let calls = [
         ResponseItem::FunctionCall {
             id: Some(ResponseItemId::with_suffix("fc", "large")),
             name: "shell".to_string(),
             namespace: Some("tools".to_string()),
             arguments: "x".repeat(40_001),
             call_id: "function-call".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::FunctionCallOutput {
-            id: None,
-            call_id: "function-call".to_string(),
-            output: FunctionCallOutputPayload::from_text("ok".to_string()),
             internal_chat_message_metadata_passthrough: None,
         },
         ResponseItem::CustomToolCall {
@@ -1344,6 +1338,14 @@ fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
             input: "{}".to_string(),
             internal_chat_message_metadata_passthrough: None,
         },
+    ];
+    let outputs = [
+        ResponseItem::FunctionCallOutput {
+            id: None,
+            call_id: "function-call".to_string(),
+            output: FunctionCallOutputPayload::from_text("ok".to_string()),
+            internal_chat_message_metadata_passthrough: None,
+        },
         ResponseItem::CustomToolCallOutput {
             id: None,
             call_id: "custom-call".to_string(),
@@ -1352,46 +1354,32 @@ fn record_items_bounds_oversized_tool_fields_without_orphaning_outputs() {
             internal_chat_message_metadata_passthrough: None,
         },
     ];
-    let prompt = create_history_with_items(items).for_prompt(&default_input_modalities());
+    let mut history = ContextManager::new();
+    history.record_items(calls.iter(), TruncationPolicy::Tokens(10_000));
+    history.record_items(outputs.iter(), TruncationPolicy::Tokens(10_000));
+    let prompt = history.for_prompt(&default_input_modalities());
 
-    assert_eq!(
-        prompt,
-        vec![
-            ResponseItem::FunctionCall {
-                id: None,
-                name: "shell".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-                call_id: "function-call".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::FunctionCallOutput {
-                id: None,
-                call_id: "function-call".to_string(),
-                output: FunctionCallOutputPayload::from_text("ok".to_string()),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::CustomToolCall {
-                id: None,
-                status: None,
-                call_id: "custom-call".to_string(),
-                name: "tool".to_string(),
-                namespace: None,
-                input: "{}".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::CustomToolCallOutput {
-                id: None,
-                call_id: "custom-call".to_string(),
-                name: None,
-                output: FunctionCallOutputPayload::from_text(
-                    "Tool output omitted because the complete item exceeded the 10,000-token context limit."
-                        .to_string(),
-                ),
-                internal_chat_message_metadata_passthrough: None,
-            },
-        ]
-    );
+    assert_eq!(prompt, Vec::<ResponseItem>::new());
+}
+
+#[test]
+fn record_items_omits_oversized_stamped_message() {
+    let item = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "large")),
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "x".repeat(40_000),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("turn-1".to_string()),
+        }),
+    };
+    let mut history = ContextManager::new();
+
+    history.record_items([&item], TruncationPolicy::Tokens(10_000));
+
+    assert_eq!(history.raw_items(), Vec::<ResponseItem>::new());
 }
 
 #[test]
