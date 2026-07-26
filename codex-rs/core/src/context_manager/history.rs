@@ -41,6 +41,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
+use codex_protocol::models::LocalShellAction;
+use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -65,6 +67,8 @@ use std::sync::LazyLock;
 use crate::context::GuardianContextMode;
 
 const MODEL_VISIBLE_ITEM_MAX_TOKENS: usize = 10_000;
+// Leave structural headroom so calls and outputs make the same keep/drop decision independently.
+const MODEL_VISIBLE_PAIR_ID_MAX_TOKENS: usize = 9_000;
 
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
@@ -363,6 +367,35 @@ impl ContextManager {
                 item: item.clone(),
                 metadata: metadata.cloned(),
             };
+            let pair_id = match item {
+                ResponseItem::FunctionCall { call_id, .. }
+                | ResponseItem::CustomToolCall { call_id, .. }
+                | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.as_str()),
+                ResponseItem::FunctionCallOutput {
+                    call_id: Some(call_id),
+                    ..
+                }
+                | ResponseItem::ToolSearchCall {
+                    call_id: Some(call_id),
+                    ..
+                }
+                | ResponseItem::ToolSearchOutput {
+                    call_id: Some(call_id),
+                    ..
+                }
+                | ResponseItem::LocalShellCall {
+                    call_id: Some(call_id),
+                    ..
+                } => Some(call_id.as_str()),
+                _ => None,
+            };
+            if pair_id.is_some_and(|call_id| {
+                serde_json::to_string(call_id).map_or(true, |serialized| {
+                    approx_token_count(&serialized) > MODEL_VISIBLE_PAIR_ID_MAX_TOKENS
+                })
+            }) {
+                continue;
+            }
             let original_output = match &processed.item {
                 ResponseItem::FunctionCallOutput { output, .. }
                 | ResponseItem::CustomToolCallOutput { output, .. } => Some(output.clone()),
@@ -427,6 +460,129 @@ impl ContextManager {
                     );
                     output.success = original_output.success;
                 }
+            }
+
+            let max_item_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
+            if estimate_item_token_count(&processed.item) > max_item_tokens {
+                match &mut processed.item {
+                    ResponseItem::FunctionCall {
+                        id,
+                        namespace,
+                        arguments,
+                        encrypted_function_args,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => {
+                        *id = None;
+                        *namespace = None;
+                        *arguments = "{}".to_string();
+                        *encrypted_function_args = None;
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    ResponseItem::ToolSearchCall {
+                        id,
+                        status,
+                        execution,
+                        arguments,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => {
+                        *id = None;
+                        *status = None;
+                        *execution = "client".to_string();
+                        *arguments = serde_json::Value::Null;
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    ResponseItem::CustomToolCall {
+                        id,
+                        status,
+                        namespace,
+                        input,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => {
+                        *id = None;
+                        *status = None;
+                        *namespace = None;
+                        *input = "{}".to_string();
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    ResponseItem::LocalShellCall {
+                        id,
+                        action,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => {
+                        *id = None;
+                        *action = LocalShellAction::Exec(LocalShellExecAction {
+                            command: Vec::new(),
+                            timeout_ms: None,
+                            working_directory: None,
+                            env: None,
+                            user: None,
+                        });
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    ResponseItem::FunctionCallOutput {
+                        id,
+                        name,
+                        namespace,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => {
+                        *id = None;
+                        *name = None;
+                        *namespace = None;
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    ResponseItem::CustomToolCallOutput {
+                        id,
+                        name,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => {
+                        *id = None;
+                        *name = None;
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    ResponseItem::ToolSearchOutput {
+                        id,
+                        status,
+                        execution,
+                        tools,
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => {
+                        *id = None;
+                        *status = "completed".to_string();
+                        *execution = "client".to_string();
+                        tools.clear();
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    _ => {}
+                }
+            }
+            if estimate_item_token_count(&processed.item) > max_item_tokens {
+                match &mut processed.item {
+                    ResponseItem::FunctionCall { name, .. }
+                    | ResponseItem::CustomToolCall { name, .. } => {
+                        *name = "tool".to_string();
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(
+                &processed.item,
+                ResponseItem::FunctionCall { .. }
+                    | ResponseItem::FunctionCallOutput { .. }
+                    | ResponseItem::ToolSearchCall { .. }
+                    | ResponseItem::ToolSearchOutput { .. }
+                    | ResponseItem::CustomToolCall { .. }
+                    | ResponseItem::CustomToolCallOutput { .. }
+                    | ResponseItem::LocalShellCall { .. }
+            ) && estimate_item_token_count(&processed.item) > max_item_tokens
+            {
+                continue;
             }
             if let Some(review_history) = &mut self.review_history
                 && !matches!(item, ResponseItem::Message { role, content, .. }
