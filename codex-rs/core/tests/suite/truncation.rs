@@ -760,7 +760,7 @@ async fn call_mcp_echo(
     builder: TestCodexBuilder,
     output_token_limit: Option<usize>,
     message_bytes: usize,
-) -> Result<(TestCodex, String, Value)> {
+) -> Result<(TestCodex, Option<String>, Vec<Value>)> {
     let call_id = "rmcp-output";
     let server_name = "rmcp";
     let namespace = format!("mcp__{server_name}");
@@ -809,11 +809,13 @@ async fn call_mcp_echo(
     fixture.submit_text_turn("call the MCP echo tool").await?;
 
     let request = response.single_request();
-    let item = request.function_call_output(call_id);
-    let output = request
-        .function_call_output_text(call_id)
-        .context("model-facing MCP output text")?;
-    Ok((fixture, output, item))
+    let output = request.function_call_output_text(call_id);
+    let pair_items = request
+        .input()
+        .into_iter()
+        .filter(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
+        .collect();
+    Ok((fixture, output, pair_items))
 }
 
 #[test_case(3_000, 13_000; "serialization allowance")]
@@ -829,6 +831,7 @@ async fn mcp_tool_output_limit_preserves_output_that_fits(
     let builder = test_codex().with_config(|config| config.tool_output_token_limit = Some(50));
     let (_fixture, output, _item) =
         call_mcp_echo(&server, builder, Some(output_token_limit), message_bytes).await?;
+    let output = output.context("model-facing MCP output text")?;
 
     assert!(output.contains(&"a".repeat(message_bytes)));
     Ok(())
@@ -841,7 +844,7 @@ async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> 
 
     let server = start_mock_server().await;
     let builder = test_codex().with_config(|config| config.tool_output_token_limit = Some(50));
-    let (_fixture, output, item) = call_mcp_echo(
+    let (_fixture, output, pair_items) = call_mcp_echo(
         &server,
         builder,
         Some(30_000),
@@ -849,11 +852,18 @@ async fn mcp_tool_call_output_custom_limit_cannot_exceed_model_visible_cap() -> 
     )
     .await?;
 
-    assert!(output.contains("truncated"));
-    assert!(
-        serde_json::to_string(&item)?.len() <= MODEL_VISIBLE_ITEM_MAX_BYTES,
-        "serialized MCP output item should remain within the 10k-token ceiling"
-    );
+    match output {
+        Some(output) => {
+            assert!(output.contains("truncated"));
+            assert_eq!(pair_items.len(), 2);
+            assert!(
+                pair_items.iter().all(|item| serde_json::to_string(item)
+                    .is_ok_and(|serialized| serialized.len() <= MODEL_VISIBLE_ITEM_MAX_BYTES)),
+                "every serialized MCP pair item should remain within the 10k-token ceiling"
+            );
+        }
+        None => assert_eq!(pair_items, Vec::<Value>::new()),
+    }
     Ok(())
 }
 
@@ -881,6 +891,7 @@ async fn mcp_tool_output_limit_applies_to_hook_feedback() -> Result<()> {
         });
     let (_fixture, output, _item) =
         call_mcp_echo(&server, builder, Some(100), /*message_bytes*/ 0).await?;
+    let output = output.context("model-facing MCP output text")?;
 
     assert!(output.starts_with("hook feedback "));
     assert!(output.contains("truncated"));
@@ -892,13 +903,15 @@ async fn mcp_tool_output_limit_applies_to_hook_feedback() -> Result<()> {
 #[test_case(None; "model default")]
 #[test_case(Some(30_000); "tool override")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_tool_output_limit_survives_resume(output_token_limit: Option<usize>) -> Result<()> {
+async fn mcp_tool_output_limit_or_pair_omission_survives_resume(
+    output_token_limit: Option<usize>,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(Ok(()), "requires a Windows test_stdio_server binary");
 
     let server = start_mock_server().await;
     let builder = test_codex().with_config(|config| config.tool_output_token_limit = Some(50_000));
-    let (fixture, output, _item) = call_mcp_echo(
+    let (fixture, output, pair_items) = call_mcp_echo(
         &server,
         builder,
         output_token_limit,
@@ -921,13 +934,24 @@ async fn mcp_tool_output_limit_survives_resume(output_token_limit: Option<usize>
     });
     let resumed = resume_builder.restart(&server, &fixture).await?;
     resumed.submit_turn("continue").await?;
-    assert_eq!(
-        resumed_response
-            .single_request()
-            .function_call_output_text("rmcp-output")
-            .context("resumed MCP output")?,
-        output
-    );
+    let resumed_request = resumed_response.single_request();
+    match output {
+        Some(output) => assert_eq!(
+            resumed_request
+                .function_call_output_text("rmcp-output")
+                .context("resumed MCP output")?,
+            output
+        ),
+        None => {
+            assert_eq!(pair_items, Vec::<Value>::new());
+            assert!(
+                resumed_request
+                    .input()
+                    .into_iter()
+                    .all(|item| item.get("call_id").and_then(Value::as_str) != Some("rmcp-output"))
+            );
+        }
+    }
 
     Ok(())
 }

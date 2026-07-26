@@ -5,6 +5,7 @@ use super::tests::make_session_and_context;
 use super::tests::raw_history_items;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
+use codex_history::CodexHarnessMetadata;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
@@ -12,6 +13,7 @@ use codex_history::ResumedHistory;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionContextWindow;
@@ -61,6 +63,61 @@ fn assistant_message(text: &str) -> ResponseItem {
 
 fn annotated(items: Vec<ResponseItem>) -> Vec<ResponseItemEnvelope> {
     items.into_iter().map(ResponseItemEnvelope::new).collect()
+}
+
+#[tokio::test]
+async fn reconstruction_bounds_checkpoint_and_suffix_as_one_history() {
+    let (session, turn_context) = make_session_and_context().await;
+    let safe_checkpoint = ResponseItemEnvelope {
+        item: assistant_message("safe checkpoint"),
+        metadata: Some(CodexHarnessMetadata {
+            client_authored: true,
+            fallback_token_limit_override: Some(512),
+            ..Default::default()
+        }),
+    };
+    let call_id = "oversized-checkpoint-call".to_string();
+    let oversized_call = ResponseItemEnvelope::new(ResponseItem::FunctionCall {
+        id: None,
+        name: "shell".to_string(),
+        namespace: None,
+        arguments: "x".repeat(40_001),
+        call_id: call_id.clone(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    });
+    let matching_output = ResponseItemEnvelope::new(ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some(call_id),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_text("must also be omitted".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    });
+    let safe_suffix = ResponseItemEnvelope::new(assistant_message("safe suffix"));
+    let rollout_items = vec![
+        RolloutItem::Compacted(CompactedItem {
+            message: String::new(),
+            replacement_history: Some(vec![safe_checkpoint.clone(), oversized_call]),
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+        }),
+        RolloutItem::ResponseItem(matching_output),
+        RolloutItem::ResponseItem(safe_suffix.clone()),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    assert_eq!(reconstructed.history, vec![safe_checkpoint, safe_suffix]);
 }
 
 fn inter_agent_assistant_message(text: &str) -> ResponseItem {

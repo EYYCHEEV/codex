@@ -41,8 +41,6 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
-use codex_protocol::models::LocalShellAction;
-use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -60,6 +58,7 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use codex_utils_output_truncation::truncate_function_output_payload;
 use codex_utils_output_truncation::with_serialization_allowance;
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -68,8 +67,27 @@ use std::sync::LazyLock;
 use crate::context::GuardianContextMode;
 
 const MODEL_VISIBLE_ITEM_MAX_TOKENS: usize = 10_000;
-// Leave structural headroom so calls and outputs make the same keep/drop decision independently.
-const MODEL_VISIBLE_PAIR_ID_MAX_TOKENS: usize = 9_000;
+const MODEL_VISIBLE_ITEM_MAX_BYTES: usize = MODEL_VISIBLE_ITEM_MAX_TOKENS * 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ToolPairKind {
+    Function,
+    ToolSearch,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ToolPairSide {
+    Call,
+    Output,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ToolPairKey {
+    kind: ToolPairKind,
+    call_id: String,
+    side: ToolPairSide,
+}
 
 /// Transcript of thread history
 #[derive(Debug, Clone, Default)]
@@ -102,6 +120,8 @@ pub(crate) struct ContextManager {
     reference_context_item: Option<TurnContextItem>,
     /// World state most recently appended to model-visible history.
     world_state_baseline: Option<WorldStateSnapshot>,
+    /// Oversized pair halves omitted while their counterpart has not arrived yet.
+    omitted_tool_pairs: HashSet<ToolPairKey>,
 }
 
 struct SharedConversationHistory {
@@ -164,13 +184,7 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
             self.items
                 .iter()
                 .map(|envelope| &envelope.item)
-                .filter(|item| {
-                    !matches!(
-                        item,
-                        ResponseItem::Message { role, content, .. }
-                            if role == "user" && is_contextual_user_message_content(content)
-                    )
-                }),
+                .filter(|item| !is_contextual_user_item(item)),
         )
     }
 }
@@ -190,6 +204,7 @@ impl ContextManager {
             ),
             reference_context_item: None,
             world_state_baseline: None,
+            omitted_tool_pairs: HashSet::new(),
         }
     }
 
@@ -364,234 +379,39 @@ impl ContextManager {
                 continue;
             }
 
-            let mut processed = ResponseItemEnvelope {
-                item: item.clone(),
-                metadata: metadata.cloned(),
-            };
-            let pair_id = match item {
-                ResponseItem::FunctionCall { call_id, .. }
-                | ResponseItem::CustomToolCall { call_id, .. }
-                | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id.as_str()),
-                ResponseItem::FunctionCallOutput {
-                    call_id: Some(call_id),
-                    ..
-                }
-                | ResponseItem::ToolSearchCall {
-                    call_id: Some(call_id),
-                    ..
-                }
-                | ResponseItem::ToolSearchOutput {
-                    call_id: Some(call_id),
-                    ..
-                }
-                | ResponseItem::LocalShellCall {
-                    call_id: Some(call_id),
-                    ..
-                } => Some(call_id.as_str()),
-                _ => None,
-            };
-            if pair_id.is_some_and(|call_id| {
-                serde_json::to_string(call_id).map_or(true, |serialized| {
-                    approx_token_count(&serialized) > MODEL_VISIBLE_PAIR_ID_MAX_TOKENS
-                })
-            }) {
+            let pair_key = tool_pair_key(item);
+            if pair_key
+                .as_ref()
+                .is_some_and(|key| self.omitted_tool_pairs.remove(key))
+            {
                 continue;
             }
-            let original_output = match &processed.item {
-                ResponseItem::FunctionCallOutput { output, .. }
-                | ResponseItem::CustomToolCallOutput { output, .. } => Some(output.clone()),
-                _ => None,
-            };
-            if let Some(original_output) = original_output {
-                // The override already includes the tool's serialization allowance.
-                let configured_policy = metadata
-                    .and_then(|metadata| metadata.history_truncation_token_limit)
-                    .map(TruncationPolicy::Tokens)
-                    .unwrap_or_else(|| with_serialization_allowance(policy));
-                let mut effective_policy = match configured_policy {
-                    TruncationPolicy::Bytes(bytes) => TruncationPolicy::Bytes(
-                        bytes.min(approx_bytes_for_tokens(MODEL_VISIBLE_ITEM_MAX_TOKENS)),
-                    ),
-                    TruncationPolicy::Tokens(tokens) => {
-                        TruncationPolicy::Tokens(tokens.min(MODEL_VISIBLE_ITEM_MAX_TOKENS))
-                    }
-                };
-                let max_item_tokens =
-                    i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
 
-                for _ in 0..3 {
-                    let output = match &mut processed.item {
-                        ResponseItem::FunctionCallOutput { output, .. }
-                        | ResponseItem::CustomToolCallOutput { output, .. } => output,
-                        _ => unreachable!("tool output variant changed while truncating history"),
-                    };
-                    *output = original_output.clone();
-                    truncate_function_output_payload(
-                        output,
-                        effective_policy,
-                        estimate_audio_token_count,
-                    );
-
-                    let estimated_tokens = estimate_item_token_count(&processed.item);
-                    if estimated_tokens <= max_item_tokens {
-                        break;
-                    }
-                    let excess_tokens = usize::try_from(estimated_tokens - max_item_tokens)
-                        .unwrap_or(usize::MAX)
-                        .saturating_add(1);
-                    effective_policy = match effective_policy {
-                        TruncationPolicy::Bytes(bytes) => TruncationPolicy::Bytes(
-                            bytes.saturating_sub(approx_bytes_for_tokens(excess_tokens)),
-                        ),
-                        TruncationPolicy::Tokens(tokens) => {
-                            TruncationPolicy::Tokens(tokens.saturating_sub(excess_tokens))
-                        }
-                    };
-                }
-
-                if estimate_item_token_count(&processed.item) > max_item_tokens {
-                    let output = match &mut processed.item {
-                        ResponseItem::FunctionCallOutput { output, .. }
-                        | ResponseItem::CustomToolCallOutput { output, .. } => output,
-                        _ => unreachable!("tool output variant changed while bounding history"),
-                    };
-                    output.body = FunctionCallOutputBody::Text(
-                        "Tool output omitted because the complete item exceeded the 10,000-token context limit."
-                            .to_string(),
-                    );
-                    output.success = original_output.success;
-                }
-            }
-
-            let max_item_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
-            if estimate_item_token_count(&processed.item) > max_item_tokens {
-                match &mut processed.item {
-                    ResponseItem::FunctionCall {
-                        id,
-                        namespace,
-                        arguments,
-                        encrypted_function_args,
-                        internal_chat_message_metadata_passthrough,
-                        ..
-                    } => {
-                        *id = None;
-                        *namespace = None;
-                        *arguments = "{}".to_string();
-                        *encrypted_function_args = None;
-                        *internal_chat_message_metadata_passthrough = None;
-                    }
-                    ResponseItem::ToolSearchCall {
-                        id,
-                        status,
-                        execution,
-                        arguments,
-                        internal_chat_message_metadata_passthrough,
-                        ..
-                    } => {
-                        *id = None;
-                        *status = None;
-                        *execution = "client".to_string();
-                        *arguments = serde_json::Value::Null;
-                        *internal_chat_message_metadata_passthrough = None;
-                    }
-                    ResponseItem::CustomToolCall {
-                        id,
-                        status,
-                        namespace,
-                        input,
-                        internal_chat_message_metadata_passthrough,
-                        ..
-                    } => {
-                        *id = None;
-                        *status = None;
-                        *namespace = None;
-                        *input = "{}".to_string();
-                        *internal_chat_message_metadata_passthrough = None;
-                    }
-                    ResponseItem::LocalShellCall {
-                        id,
-                        action,
-                        internal_chat_message_metadata_passthrough,
-                        ..
-                    } => {
-                        *id = None;
-                        *action = LocalShellAction::Exec(LocalShellExecAction {
-                            command: Vec::new(),
-                            timeout_ms: None,
-                            working_directory: None,
-                            env: None,
-                            user: None,
-                        });
-                        *internal_chat_message_metadata_passthrough = None;
-                    }
-                    ResponseItem::FunctionCallOutput {
-                        id,
-                        name,
-                        namespace,
-                        internal_chat_message_metadata_passthrough,
-                        ..
-                    } => {
-                        *id = None;
-                        *name = None;
-                        *namespace = None;
-                        *internal_chat_message_metadata_passthrough = None;
-                    }
-                    ResponseItem::CustomToolCallOutput {
-                        id,
-                        name,
-                        internal_chat_message_metadata_passthrough,
-                        ..
-                    } => {
-                        *id = None;
-                        *name = None;
-                        *internal_chat_message_metadata_passthrough = None;
-                    }
-                    ResponseItem::ToolSearchOutput {
-                        id,
-                        status,
-                        execution,
-                        tools,
-                        internal_chat_message_metadata_passthrough,
-                        ..
-                    } => {
-                        *id = None;
-                        *status = "completed".to_string();
-                        *execution = "client".to_string();
-                        tools.clear();
-                        *internal_chat_message_metadata_passthrough = None;
-                    }
-                    _ => {}
-                }
-            }
-            if estimate_item_token_count(&processed.item) > max_item_tokens {
-                match &mut processed.item {
-                    ResponseItem::FunctionCall { name, .. }
-                    | ResponseItem::CustomToolCall { name, .. } => {
-                        *name = "tool".to_string();
-                    }
-                    _ => {}
-                }
-            }
-            if matches!(
-                &processed.item,
-                ResponseItem::FunctionCall { .. }
-                    | ResponseItem::FunctionCallOutput { .. }
-                    | ResponseItem::ToolSearchCall { .. }
-                    | ResponseItem::ToolSearchOutput { .. }
-                    | ResponseItem::CustomToolCall { .. }
-                    | ResponseItem::CustomToolCallOutput { .. }
-                    | ResponseItem::LocalShellCall { .. }
-            ) && estimate_item_token_count(&processed.item) > max_item_tokens
-            {
+            let processed = Self::process_item(item, metadata, policy);
+            if processed.is_empty() {
+                Self::record_omitted_pair(
+                    Arc::make_mut(&mut self.items),
+                    &mut self.omitted_tool_pairs,
+                    self.review_history.as_mut(),
+                    item,
+                    pair_key,
+                );
                 continue;
             }
             if let Some(review_history) = &mut self.review_history
-                && !matches!(item, ResponseItem::Message { role, content, .. }
-                if role == "user" && is_contextual_user_message_content(content))
+                && is_projectable_message(item)
+                && !is_contextual_user_item(item)
             {
-                review_history.record(&processed.item);
+                review_history.record(item);
             }
-            Arc::make_mut(&mut self.items).push(processed);
+            for processed in processed {
+                if let Some(review_history) = &mut self.review_history
+                    && !is_projectable_message(item)
+                {
+                    review_history.record(&processed.item);
+                }
+                Arc::make_mut(&mut self.items).push(processed);
+            }
             self.record_user_authorization(
                 item,
                 metadata,
@@ -616,7 +436,8 @@ impl ContextManager {
         input_modalities: &[InputModality],
     ) -> Vec<ResponseItemEnvelope> {
         self.normalize_history(input_modalities);
-        Arc::unwrap_or_clone(self.items)
+        let normalized = Arc::unwrap_or_clone(self.items);
+        Self::bound_replacement_items(normalized).0
     }
 
     /// Iterates over raw response items without exposing their history envelopes.
@@ -629,6 +450,14 @@ impl ContextManager {
     /// Returns annotated history items without cloning their response payloads.
     pub(crate) fn annotated_items(&self) -> &[ResponseItemEnvelope] {
         &self.items
+    }
+
+    pub(crate) fn logical_items(&self) -> Vec<ResponseItem> {
+        logical_items(&self.items)
+    }
+
+    pub(crate) fn logical_annotated_items(&self) -> Vec<ResponseItemEnvelope> {
+        logical_envelopes(&self.items)
     }
 
     /// Returns raw items in the history and consumes the snapshot.
@@ -687,7 +516,22 @@ impl ContextManager {
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            normalize::remove_corresponding_for(items, &removed.item);
+            let _ = normalize::remove_corresponding_for(items, &removed.item);
+            if is_projectable_message(&removed.item)
+                && removed
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.projected_content_indices.is_some())
+            {
+                while items.first().is_some_and(|envelope| {
+                    envelope
+                        .metadata
+                        .as_ref()
+                        .is_some_and(|metadata| metadata.history_only_continuation)
+                }) {
+                    items.remove(0);
+                }
+            }
             self.world_state_baseline = None;
         }
     }
@@ -700,11 +544,15 @@ impl ContextManager {
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
         self.retained_context = Arc::default();
         self.user_message_revision = self.user_message_revision.saturating_add(1);
+        let (items, omitted_tool_pairs) = Self::bound_replacement_items(items);
+        self.omitted_tool_pairs = omitted_tool_pairs;
         if let Some(review_history) = &mut self.review_history {
-            review_history.reset(items.iter().map(|item| &item.item).filter(|item| {
-                !matches!(item, ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content))
-            }));
+            let logical_items = logical_items(&items);
+            review_history.reset(
+                logical_items
+                    .iter()
+                    .filter(|item| !is_contextual_user_item(item)),
+            );
         }
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
@@ -717,14 +565,16 @@ impl ContextManager {
             && self.review_history.is_none()
         {
             let mut retained = TranscriptHistory::new(self.history_version.saturating_add(1));
-            for item in self.raw_items().filter(|item| {
-                !matches!(item, ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content))
-            }) {
+            for item in logical_items(&self.items)
+                .iter()
+                .filter(|item| !is_contextual_user_item(item))
+            {
                 retained.record(item);
             }
             self.review_history = Some(retained);
         }
+        let (items, omitted_tool_pairs) = Self::bound_replacement_items(items);
+        self.omitted_tool_pairs = omitted_tool_pairs;
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
         self.world_state_baseline = None;
@@ -849,11 +699,7 @@ impl ContextManager {
 
     fn get_non_last_reasoning_items_tokens(&self) -> i64 {
         // Get reasoning items excluding all the ones after the last instruction boundary.
-        let Some(last_user_index) = self
-            .items
-            .iter()
-            .rposition(|envelope| is_user_turn_boundary(&envelope.item))
-        else {
+        let Some(last_user_index) = self.items.iter().rposition(is_history_turn_boundary) else {
             return 0;
         };
 
@@ -933,6 +779,169 @@ impl ContextManager {
         normalize::strip_audio_when_unsupported(input_modalities, items);
     }
 
+    fn process_item(
+        item: &ResponseItem,
+        metadata: Option<&CodexHarnessMetadata>,
+        policy: TruncationPolicy,
+    ) -> Vec<ResponseItemEnvelope> {
+        match item {
+            ResponseItem::Message { .. } => return project_message(item, metadata),
+            ResponseItem::AgentMessage { .. } => return project_agent_message(item, metadata),
+            _ => {}
+        }
+        let mut processed = ResponseItemEnvelope {
+            item: item.clone(),
+            metadata: metadata.cloned(),
+        };
+        let original_output = match item {
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => Some(output),
+            _ => None,
+        };
+        let Some(original_output) = original_output else {
+            return model_visible_item_fits(&processed.item)
+                .then_some(processed)
+                .into_iter()
+                .collect();
+        };
+
+        // The saved override already includes the tool's serialization allowance. Both it and
+        // the model default remain subordinate to the hard per-item context ceiling.
+        let configured_policy = metadata
+            .and_then(|metadata| metadata.history_truncation_token_limit)
+            .map(TruncationPolicy::Tokens)
+            .unwrap_or_else(|| with_serialization_allowance(policy));
+        let mut effective_policy = match configured_policy {
+            TruncationPolicy::Bytes(bytes) => {
+                TruncationPolicy::Bytes(bytes.min(MODEL_VISIBLE_ITEM_MAX_BYTES))
+            }
+            TruncationPolicy::Tokens(tokens) => {
+                TruncationPolicy::Tokens(tokens.min(MODEL_VISIBLE_ITEM_MAX_TOKENS))
+            }
+        };
+
+        for _ in 0..4 {
+            let output = match &mut processed.item {
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. } => output,
+                _ => unreachable!("tool output variant changed while truncating history"),
+            };
+            *output = original_output.clone();
+            truncate_function_output_payload(output, effective_policy, estimate_audio_token_count);
+
+            let Ok(serialized_bytes) = serialized_json_bytes(&processed.item) else {
+                return Vec::new();
+            };
+            let estimated_tokens = estimate_item_token_count(&processed.item);
+            let max_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
+            if serialized_bytes <= MODEL_VISIBLE_ITEM_MAX_BYTES && estimated_tokens <= max_tokens {
+                return vec![processed];
+            }
+            let serialized_excess_bytes = serialized_bytes
+                .saturating_sub(MODEL_VISIBLE_ITEM_MAX_BYTES)
+                .saturating_add(1);
+            let estimated_excess_tokens = usize::try_from(
+                estimated_tokens
+                    .saturating_sub(max_tokens)
+                    .saturating_add(1),
+            )
+            .unwrap_or(usize::MAX);
+            let excess_bytes =
+                serialized_excess_bytes.max(approx_bytes_for_tokens(estimated_excess_tokens));
+            let reduced_policy = match effective_policy {
+                TruncationPolicy::Bytes(bytes) => {
+                    TruncationPolicy::Bytes(bytes.saturating_sub(excess_bytes))
+                }
+                TruncationPolicy::Tokens(tokens) => {
+                    TruncationPolicy::Tokens(tokens.saturating_sub(excess_bytes.div_ceil(4)))
+                }
+            };
+            if reduced_policy == effective_policy {
+                break;
+            }
+            effective_policy = reduced_policy;
+        }
+
+        // Identifiers, names, passthrough metadata, and untruncatable structured payloads count
+        // too. Never rewrite them into a synthetic model-visible history item.
+        model_visible_item_fits(&processed.item)
+            .then_some(processed)
+            .into_iter()
+            .collect()
+    }
+
+    fn record_omitted_pair(
+        items: &mut Vec<ResponseItemEnvelope>,
+        omitted_tool_pairs: &mut HashSet<ToolPairKey>,
+        review_history: Option<&mut TranscriptHistory>,
+        item: &ResponseItem,
+        pair_key: Option<ToolPairKey>,
+    ) {
+        let Some(mut pair_key) = pair_key else {
+            return;
+        };
+        let removed = normalize::remove_corresponding_for(items, item);
+        if let Some(removed) = removed {
+            if let Some(review_history) = review_history {
+                let mut removed_from_review = false;
+                let retained = review_history
+                    .items()
+                    .filter(|review_item| {
+                        if !removed_from_review && *review_item == &removed.item {
+                            removed_from_review = true;
+                            false
+                        } else {
+                            true
+                        }
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if removed_from_review {
+                    review_history.reset(retained.iter());
+                }
+            }
+        } else {
+            pair_key.side = match pair_key.side {
+                ToolPairSide::Call => ToolPairSide::Output,
+                ToolPairSide::Output => ToolPairSide::Call,
+            };
+            omitted_tool_pairs.insert(pair_key);
+        }
+    }
+
+    fn bound_replacement_items(
+        items: Vec<ResponseItemEnvelope>,
+    ) -> (Vec<ResponseItemEnvelope>, HashSet<ToolPairKey>) {
+        let mut bounded = Vec::with_capacity(items.len());
+        let mut omitted_tool_pairs = HashSet::new();
+        for envelope in items {
+            let pair_key = tool_pair_key(&envelope.item);
+            if pair_key
+                .as_ref()
+                .is_some_and(|key| omitted_tool_pairs.remove(key))
+            {
+                continue;
+            }
+            let processed = Self::process_item(
+                &envelope.item,
+                envelope.metadata.as_ref(),
+                TruncationPolicy::Tokens(MODEL_VISIBLE_ITEM_MAX_TOKENS),
+            );
+            if processed.is_empty() {
+                Self::record_omitted_pair(
+                    &mut bounded,
+                    &mut omitted_tool_pairs,
+                    /*review_history*/ None,
+                    &envelope.item,
+                    pair_key,
+                );
+            } else {
+                bounded.extend(processed);
+            }
+        }
+        (bounded, omitted_tool_pairs)
+    }
+
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
     ///
     /// Returns the adjusted cut index after removing contextual developer/user items immediately
@@ -969,9 +978,7 @@ impl ContextManager {
                     }
                     cut_idx -= 1;
                 }
-                ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content) =>
-                {
+                item if is_contextual_user_item(item) => {
                     cut_idx -= 1;
                 }
                 _ => break,
@@ -979,6 +986,667 @@ impl ContextManager {
         }
         cut_idx
     }
+}
+
+fn serialized_item_fits(item: &ResponseItem) -> bool {
+    serialized_json_bytes(item).is_ok_and(|bytes| bytes <= MODEL_VISIBLE_ITEM_MAX_BYTES)
+}
+
+fn model_visible_item_fits(item: &ResponseItem) -> bool {
+    serialized_item_fits(item)
+        && estimate_item_token_count(item)
+            <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+}
+
+fn is_projectable_message(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Message { .. } | ResponseItem::AgentMessage { .. }
+    )
+}
+
+fn project_message(
+    item: &ResponseItem,
+    metadata: Option<&CodexHarnessMetadata>,
+) -> Vec<ResponseItemEnvelope> {
+    let ResponseItem::Message {
+        id,
+        role,
+        content,
+        phase,
+        internal_chat_message_metadata_passthrough,
+    } = item
+    else {
+        unreachable!("project_message requires a message item");
+    };
+    let max_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
+    if estimate_item_token_count(item) <= max_tokens {
+        return vec![ResponseItemEnvelope {
+            item: item.clone(),
+            metadata: metadata.cloned(),
+        }];
+    }
+
+    let is_contextual_user = is_contextual_user_item(item);
+    let original_boundary = metadata
+        .and_then(|metadata| metadata.turn_boundary_override)
+        .unwrap_or_else(|| {
+            if role == "user" {
+                !is_contextual_user
+            } else {
+                is_user_turn_boundary(item)
+            }
+        });
+    let already_continuation = metadata.is_some_and(|metadata| metadata.history_only_continuation);
+    let source_indices = metadata.and_then(|metadata| metadata.projected_content_indices.as_ref());
+    let make_envelope = |indexed_content: Vec<(ContentItem, usize)>, chunk_index: usize| {
+        let mut chunk_metadata = metadata.cloned().unwrap_or_default();
+        chunk_metadata.turn_boundary_override =
+            Some(chunk_index == 0 && original_boundary && !already_continuation);
+        chunk_metadata.history_only_continuation = already_continuation || chunk_index != 0;
+        chunk_metadata.projected_content_indices = Some(
+            indexed_content
+                .iter()
+                .map(|(_, original_index)| *original_index)
+                .collect(),
+        );
+        let mut item_metadata = internal_chat_message_metadata_passthrough.clone();
+        if let Some(item_metadata) = &mut item_metadata
+            && let Some(kinds) = &internal_chat_message_metadata_passthrough
+                .as_ref()
+                .and_then(|metadata| metadata.content_item_kinds.as_ref())
+            && kinds.len() == content.len()
+        {
+            item_metadata.content_item_kinds = Some(
+                indexed_content
+                    .iter()
+                    .map(|(_, original_index)| {
+                        let kind_index = source_indices
+                            .and_then(|indices| {
+                                indices.iter().position(|index| index == original_index)
+                            })
+                            .unwrap_or(*original_index);
+                        kinds[kind_index].clone()
+                    })
+                    .collect(),
+            );
+        }
+        ResponseItemEnvelope {
+            item: ResponseItem::Message {
+                id: (chunk_index == 0).then(|| id.clone()).flatten(),
+                role: role.clone(),
+                content: indexed_content
+                    .into_iter()
+                    .map(|(content, _)| content)
+                    .collect(),
+                phase: phase.clone(),
+                internal_chat_message_metadata_passthrough: item_metadata,
+            },
+            metadata: Some(chunk_metadata),
+        }
+    };
+
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for (content_index, content_item) in content.iter().enumerate() {
+        let source_index = source_indices
+            .and_then(|indices| indices.get(content_index))
+            .copied()
+            .unwrap_or(content_index);
+        if is_contextual_user {
+            let chunk_index = chunks.len();
+            let mut candidate = current.clone();
+            candidate.push((content_item.clone(), source_index));
+            if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
+                <= max_tokens
+            {
+                current = candidate;
+                continue;
+            }
+            if !current.is_empty() {
+                chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+            }
+            let chunk_index = chunks.len();
+            let candidate = vec![(content_item.clone(), source_index)];
+            if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
+                > max_tokens
+            {
+                return Vec::new();
+            }
+            current = candidate;
+            continue;
+        }
+        match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                let is_input = matches!(content_item, ContentItem::InputText { .. });
+                if text.is_empty() {
+                    let chunk_index = chunks.len();
+                    let mut candidate = current.clone();
+                    candidate.push((content_item.clone(), source_index));
+                    if estimate_item_token_count(
+                        &make_envelope(candidate.clone(), chunk_index).item,
+                    ) <= max_tokens
+                    {
+                        current = candidate;
+                        continue;
+                    }
+                    if !current.is_empty() {
+                        chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+                    }
+                    let chunk_index = chunks.len();
+                    let candidate = vec![(content_item.clone(), source_index)];
+                    if estimate_item_token_count(
+                        &make_envelope(candidate.clone(), chunk_index).item,
+                    ) > max_tokens
+                    {
+                        return Vec::new();
+                    }
+                    current = candidate;
+                    continue;
+                }
+                let mut remaining = text.as_str();
+                while !remaining.is_empty() {
+                    let chunk_index = chunks.len();
+                    let mut boundaries = remaining
+                        .char_indices()
+                        .map(|(index, _)| index)
+                        .skip(1)
+                        .collect::<Vec<_>>();
+                    boundaries.push(remaining.len());
+                    let mut low = 0;
+                    let mut high = boundaries.len();
+                    while low < high {
+                        let mid = low + (high - low).div_ceil(2);
+                        let prefix = &remaining[..boundaries[mid - 1]];
+                        let mut candidate = current.clone();
+                        candidate.push((
+                            if is_input {
+                                ContentItem::InputText {
+                                    text: prefix.to_string(),
+                                }
+                            } else {
+                                ContentItem::OutputText {
+                                    text: prefix.to_string(),
+                                }
+                            },
+                            source_index,
+                        ));
+                        if estimate_item_token_count(&make_envelope(candidate, chunk_index).item)
+                            <= max_tokens
+                        {
+                            low = mid;
+                        } else {
+                            high = mid - 1;
+                        }
+                    }
+                    if low == 0 {
+                        if current.is_empty() {
+                            return Vec::new();
+                        }
+                        chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+                        continue;
+                    }
+                    let split_at = boundaries[low - 1];
+                    current.push((
+                        if is_input {
+                            ContentItem::InputText {
+                                text: remaining[..split_at].to_string(),
+                            }
+                        } else {
+                            ContentItem::OutputText {
+                                text: remaining[..split_at].to_string(),
+                            }
+                        },
+                        source_index,
+                    ));
+                    remaining = &remaining[split_at..];
+                    if !remaining.is_empty() {
+                        chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+                    }
+                }
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
+                let chunk_index = chunks.len();
+                let mut candidate = current.clone();
+                candidate.push((content_item.clone(), source_index));
+                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
+                    <= max_tokens
+                {
+                    current = candidate;
+                    continue;
+                }
+                if !current.is_empty() {
+                    chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+                }
+                let chunk_index = chunks.len();
+                let candidate = vec![(content_item.clone(), source_index)];
+                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
+                    > max_tokens
+                {
+                    return Vec::new();
+                }
+                current = candidate;
+            }
+        }
+    }
+    if !current.is_empty() || content.is_empty() {
+        chunks.push(make_envelope(current, chunks.len()));
+    }
+    if chunks
+        .iter()
+        .any(|envelope| estimate_item_token_count(&envelope.item) > max_tokens)
+        || (is_contextual_user
+            && chunks.iter().any(|envelope| {
+                !matches!(&envelope.item, ResponseItem::Message { content, .. }
+                    if is_contextual_user_message_content(content))
+            }))
+    {
+        return Vec::new();
+    }
+    chunks
+}
+
+fn project_agent_message(
+    item: &ResponseItem,
+    metadata: Option<&CodexHarnessMetadata>,
+) -> Vec<ResponseItemEnvelope> {
+    let ResponseItem::AgentMessage {
+        id,
+        author,
+        recipient,
+        content,
+        internal_chat_message_metadata_passthrough,
+    } = item
+    else {
+        unreachable!("project_agent_message requires an agent message item");
+    };
+    let max_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
+    if estimate_item_token_count(item) <= max_tokens {
+        return vec![ResponseItemEnvelope {
+            item: item.clone(),
+            metadata: metadata.cloned(),
+        }];
+    }
+
+    let original_boundary = metadata
+        .and_then(|metadata| metadata.turn_boundary_override)
+        .unwrap_or(true);
+    let already_continuation = metadata.is_some_and(|metadata| metadata.history_only_continuation);
+    let source_indices = metadata.and_then(|metadata| metadata.projected_content_indices.as_ref());
+    let make_envelope = |indexed_content: Vec<(AgentMessageInputContent, usize)>,
+                         chunk_index: usize| {
+        let mut chunk_metadata = metadata.cloned().unwrap_or_default();
+        chunk_metadata.turn_boundary_override =
+            Some(chunk_index == 0 && original_boundary && !already_continuation);
+        chunk_metadata.history_only_continuation = already_continuation || chunk_index != 0;
+        chunk_metadata.projected_content_indices = Some(
+            indexed_content
+                .iter()
+                .map(|(_, original_index)| *original_index)
+                .collect(),
+        );
+        let mut item_metadata = internal_chat_message_metadata_passthrough.clone();
+        if let Some(item_metadata) = &mut item_metadata
+            && let Some(kinds) = &internal_chat_message_metadata_passthrough
+                .as_ref()
+                .and_then(|metadata| metadata.content_item_kinds.as_ref())
+            && kinds.len() == content.len()
+        {
+            item_metadata.content_item_kinds = Some(
+                indexed_content
+                    .iter()
+                    .map(|(_, original_index)| {
+                        let kind_index = source_indices
+                            .and_then(|indices| {
+                                indices.iter().position(|index| index == original_index)
+                            })
+                            .unwrap_or(*original_index);
+                        kinds[kind_index].clone()
+                    })
+                    .collect(),
+            );
+        }
+        ResponseItemEnvelope {
+            item: ResponseItem::AgentMessage {
+                id: (chunk_index == 0).then(|| id.clone()).flatten(),
+                author: author.clone(),
+                recipient: recipient.clone(),
+                content: indexed_content
+                    .into_iter()
+                    .map(|(content, _)| content)
+                    .collect(),
+                internal_chat_message_metadata_passthrough: item_metadata,
+            },
+            metadata: Some(chunk_metadata),
+        }
+    };
+
+    let mut chunks = Vec::new();
+    let mut current = Vec::new();
+    for (content_index, content_item) in content.iter().enumerate() {
+        let source_index = source_indices
+            .and_then(|indices| indices.get(content_index))
+            .copied()
+            .unwrap_or(content_index);
+        match content_item {
+            AgentMessageInputContent::InputText { text } if !text.is_empty() => {
+                let mut remaining = text.as_str();
+                while !remaining.is_empty() {
+                    let chunk_index = chunks.len();
+                    let mut boundaries = remaining
+                        .char_indices()
+                        .map(|(index, _)| index)
+                        .skip(1)
+                        .collect::<Vec<_>>();
+                    boundaries.push(remaining.len());
+                    let mut low = 0;
+                    let mut high = boundaries.len();
+                    while low < high {
+                        let mid = low + (high - low).div_ceil(2);
+                        let mut candidate = current.clone();
+                        candidate.push((
+                            AgentMessageInputContent::InputText {
+                                text: remaining[..boundaries[mid - 1]].to_string(),
+                            },
+                            source_index,
+                        ));
+                        if estimate_item_token_count(&make_envelope(candidate, chunk_index).item)
+                            <= max_tokens
+                        {
+                            low = mid;
+                        } else {
+                            high = mid - 1;
+                        }
+                    }
+                    if low == 0 {
+                        if current.is_empty() {
+                            return Vec::new();
+                        }
+                        chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+                        continue;
+                    }
+                    let split_at = boundaries[low - 1];
+                    current.push((
+                        AgentMessageInputContent::InputText {
+                            text: remaining[..split_at].to_string(),
+                        },
+                        source_index,
+                    ));
+                    remaining = &remaining[split_at..];
+                    if !remaining.is_empty() {
+                        chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+                    }
+                }
+            }
+            AgentMessageInputContent::InputText { .. }
+            | AgentMessageInputContent::EncryptedContent { .. } => {
+                let chunk_index = chunks.len();
+                let mut candidate = current.clone();
+                candidate.push((content_item.clone(), source_index));
+                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
+                    <= max_tokens
+                {
+                    current = candidate;
+                    continue;
+                }
+                if !current.is_empty() {
+                    chunks.push(make_envelope(std::mem::take(&mut current), chunk_index));
+                }
+                let chunk_index = chunks.len();
+                let candidate = vec![(content_item.clone(), source_index)];
+                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
+                    > max_tokens
+                {
+                    return Vec::new();
+                }
+                current = candidate;
+            }
+        }
+    }
+    if !current.is_empty() || content.is_empty() {
+        chunks.push(make_envelope(current, chunks.len()));
+    }
+    if chunks
+        .iter()
+        .any(|envelope| estimate_item_token_count(&envelope.item) > max_tokens)
+    {
+        return Vec::new();
+    }
+    chunks
+}
+
+fn logical_items(items: &[ResponseItemEnvelope]) -> Vec<ResponseItem> {
+    logical_envelopes(items)
+        .into_iter()
+        .map(ResponseItemEnvelope::into_item)
+        .collect()
+}
+
+fn logical_envelopes(items: &[ResponseItemEnvelope]) -> Vec<ResponseItemEnvelope> {
+    let mut logical = Vec::with_capacity(items.len());
+    for envelope in items {
+        if envelope
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.history_only_continuation)
+            && let (
+                Some(ResponseItemEnvelope {
+                    item:
+                        ResponseItem::Message {
+                            content: previous_content,
+                            internal_chat_message_metadata_passthrough: previous_metadata,
+                            ..
+                        },
+                    metadata: previous_harness_metadata,
+                }),
+                ResponseItem::Message {
+                    content: continuation_content,
+                    internal_chat_message_metadata_passthrough: continuation_metadata,
+                    ..
+                },
+            ) = (logical.last_mut(), &envelope.item)
+        {
+            let previous_indices = previous_harness_metadata
+                .as_mut()
+                .and_then(|metadata| metadata.projected_content_indices.as_mut());
+            let continuation_indices = envelope
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.projected_content_indices.as_ref());
+            let merge_first = previous_indices
+                .as_deref()
+                .and_then(|indices| indices.last())
+                .zip(continuation_indices.and_then(|indices| indices.first()))
+                .is_some_and(|(previous, continuation)| previous == continuation)
+                && matches!(
+                    (previous_content.last(), continuation_content.first()),
+                    (
+                        Some(ContentItem::InputText { .. }),
+                        Some(ContentItem::InputText { .. })
+                    ) | (
+                        Some(ContentItem::OutputText { .. }),
+                        Some(ContentItem::OutputText { .. })
+                    )
+                );
+            if merge_first {
+                match (previous_content.last_mut(), continuation_content.first()) {
+                    (
+                        Some(ContentItem::InputText { text: previous }),
+                        Some(ContentItem::InputText { text: continuation }),
+                    )
+                    | (
+                        Some(ContentItem::OutputText { text: previous }),
+                        Some(ContentItem::OutputText { text: continuation }),
+                    ) => previous.push_str(continuation),
+                    _ => unreachable!("merge eligibility checked matching text variants"),
+                }
+            }
+            if let (Some(previous_kinds), Some(continuation_kinds)) = (
+                previous_metadata
+                    .as_mut()
+                    .and_then(|metadata| metadata.content_item_kinds.as_mut()),
+                continuation_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_item_kinds.as_ref()),
+            ) {
+                previous_kinds.extend(
+                    continuation_kinds
+                        .iter()
+                        .skip(usize::from(merge_first))
+                        .cloned(),
+                );
+            }
+            previous_content.extend(
+                continuation_content
+                    .iter()
+                    .skip(usize::from(merge_first))
+                    .cloned(),
+            );
+            if let (Some(previous_indices), Some(continuation_indices)) =
+                (previous_indices, continuation_indices)
+            {
+                previous_indices.extend(
+                    continuation_indices
+                        .iter()
+                        .skip(usize::from(merge_first))
+                        .copied(),
+                );
+            }
+            continue;
+        }
+        if envelope
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.history_only_continuation)
+            && let (
+                Some(ResponseItemEnvelope {
+                    item:
+                        ResponseItem::AgentMessage {
+                            content: previous_content,
+                            internal_chat_message_metadata_passthrough: previous_item_metadata,
+                            ..
+                        },
+                    metadata: previous_harness_metadata,
+                }),
+                ResponseItem::AgentMessage {
+                    content: continuation_content,
+                    internal_chat_message_metadata_passthrough: continuation_item_metadata,
+                    ..
+                },
+            ) = (logical.last_mut(), &envelope.item)
+        {
+            let previous_indices = previous_harness_metadata
+                .as_mut()
+                .and_then(|metadata| metadata.projected_content_indices.as_mut());
+            let continuation_indices = envelope
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.projected_content_indices.as_ref());
+            let merge_first = previous_indices
+                .as_deref()
+                .and_then(|indices| indices.last())
+                .zip(continuation_indices.and_then(|indices| indices.first()))
+                .is_some_and(|(previous, continuation)| previous == continuation)
+                && matches!(
+                    (previous_content.last(), continuation_content.first()),
+                    (
+                        Some(AgentMessageInputContent::InputText { .. }),
+                        Some(AgentMessageInputContent::InputText { .. })
+                    )
+                );
+            if merge_first {
+                match (previous_content.last_mut(), continuation_content.first()) {
+                    (
+                        Some(AgentMessageInputContent::InputText { text: previous }),
+                        Some(AgentMessageInputContent::InputText { text: continuation }),
+                    ) => previous.push_str(continuation),
+                    _ => unreachable!("merge eligibility checked agent text variants"),
+                }
+            }
+            if let (Some(previous_kinds), Some(continuation_kinds)) = (
+                previous_item_metadata
+                    .as_mut()
+                    .and_then(|metadata| metadata.content_item_kinds.as_mut()),
+                continuation_item_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_item_kinds.as_ref()),
+            ) {
+                previous_kinds.extend(
+                    continuation_kinds
+                        .iter()
+                        .skip(usize::from(merge_first))
+                        .cloned(),
+                );
+            }
+            previous_content.extend(
+                continuation_content
+                    .iter()
+                    .skip(usize::from(merge_first))
+                    .cloned(),
+            );
+            if let (Some(previous_indices), Some(continuation_indices)) =
+                (previous_indices, continuation_indices)
+            {
+                previous_indices.extend(
+                    continuation_indices
+                        .iter()
+                        .skip(usize::from(merge_first))
+                        .copied(),
+                );
+            }
+            continue;
+        }
+        logical.push(envelope.clone());
+    }
+    logical
+}
+
+fn tool_pair_key(item: &ResponseItem) -> Option<ToolPairKey> {
+    let (kind, call_id, side) = match item {
+        ResponseItem::FunctionCall { call_id, .. }
+        | ResponseItem::LocalShellCall {
+            call_id: Some(call_id),
+            ..
+        } => (ToolPairKind::Function, call_id, ToolPairSide::Call),
+        ResponseItem::FunctionCallOutput {
+            call_id: Some(call_id),
+            ..
+        } => (ToolPairKind::Function, call_id, ToolPairSide::Output),
+        ResponseItem::ToolSearchCall {
+            call_id: Some(call_id),
+            ..
+        } => (ToolPairKind::ToolSearch, call_id, ToolPairSide::Call),
+        ResponseItem::ToolSearchOutput {
+            call_id: Some(call_id),
+            ..
+        } => (ToolPairKind::ToolSearch, call_id, ToolPairSide::Output),
+        ResponseItem::CustomToolCall { call_id, .. } => {
+            (ToolPairKind::Custom, call_id, ToolPairSide::Call)
+        }
+        ResponseItem::CustomToolCallOutput { call_id, .. } => {
+            (ToolPairKind::Custom, call_id, ToolPairSide::Output)
+        }
+        ResponseItem::AdditionalTools { .. }
+        | ResponseItem::Message { .. }
+        | ResponseItem::AgentMessage { .. }
+        | ResponseItem::Reasoning { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger { .. }
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::ConfigurationUpdate { .. }
+        | ResponseItem::Other => return None,
+    };
+    Some(ToolPairKey {
+        kind,
+        call_id: call_id.clone(),
+        side,
+    })
 }
 
 /// Configuration updates require harness provenance; raw system messages are never retained.
@@ -1334,8 +2002,37 @@ pub(crate) fn is_user_turn_boundary(item: &ResponseItem) -> bool {
         return false;
     };
 
-    (role == "user" && !is_contextual_user_message_content(content))
+    (role == "user" && !is_contextual_user_item(item))
         || (role == "assistant" && is_inter_agent_instruction_content(content))
+}
+
+fn is_contextual_user_item(item: &ResponseItem) -> bool {
+    let ResponseItem::Message {
+        role,
+        content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = item
+    else {
+        return false;
+    };
+    if role != "user" || !is_contextual_user_message_content(content) {
+        return false;
+    }
+    internal_chat_message_metadata_passthrough
+        .as_ref()
+        .and_then(|metadata| metadata.content_item_kinds.as_ref())
+        .is_none_or(|kinds| {
+            kinds.len() != content.len() || !kinds.iter().any(|kind| kind.0.starts_with("user."))
+        })
+}
+
+pub(crate) fn is_history_turn_boundary(envelope: &ResponseItemEnvelope) -> bool {
+    envelope
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.turn_boundary_override)
+        .unwrap_or_else(|| is_user_turn_boundary(&envelope.item))
 }
 
 fn is_inter_agent_instruction_content(content: &[ContentItem]) -> bool {
@@ -1345,7 +2042,7 @@ fn is_inter_agent_instruction_content(content: &[ContentItem]) -> bool {
 fn user_message_positions(items: &[ResponseItemEnvelope]) -> Vec<usize> {
     let mut positions = Vec::new();
     for (idx, envelope) in items.iter().enumerate() {
-        if is_user_turn_boundary(&envelope.item) {
+        if is_history_turn_boundary(envelope) {
             positions.push(idx);
         }
     }

@@ -51,6 +51,9 @@ impl ContextManager {
         metadata: Option<&CodexHarnessMetadata>,
         source: UserMessageSource,
     ) {
+        if metadata.is_some_and(|metadata| metadata.turn_boundary_override == Some(false)) {
+            return;
+        }
         if !crate::context::is_user_authorization_message(item) {
             return;
         }

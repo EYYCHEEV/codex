@@ -224,7 +224,10 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ResponseItemEnvelope>) {
     }
 }
 
-pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, item: &ResponseItem) {
+pub(crate) fn remove_corresponding_for(
+    items: &mut Vec<ResponseItemEnvelope>,
+    item: &ResponseItem,
+) -> Option<ResponseItemEnvelope> {
     match item {
         ResponseItem::FunctionCall { call_id, .. } => {
             remove_first_matching(items, |i| {
@@ -235,7 +238,7 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         ..
                     } if existing == call_id
                 )
-            });
+            })
         }
         ResponseItem::FunctionCallOutput {
             call_id: Some(call_id),
@@ -244,11 +247,13 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
             if let Some(pos) = items.iter().position(|envelope| {
                 matches!(&envelope.item, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
             }) {
-                items.remove(pos);
+                Some(items.remove(pos))
             } else if let Some(pos) = items.iter().position(|envelope| {
                 matches!(&envelope.item, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
             }) {
-                items.remove(pos);
+                Some(items.remove(pos))
+            } else {
+                None
             }
         }
         ResponseItem::ToolSearchCall {
@@ -263,7 +268,7 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         ..
                     } if existing == call_id
                 )
-            });
+            })
         }
         ResponseItem::ToolSearchOutput {
             call_id: Some(call_id),
@@ -280,7 +285,7 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         } if existing == call_id
                     )
                 },
-            );
+            )
         }
         ResponseItem::CustomToolCall { call_id, .. } => {
             remove_first_matching(items, |i| {
@@ -290,13 +295,13 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         call_id: existing, ..
                     } if existing == call_id
                 )
-            });
+            })
         }
         ResponseItem::CustomToolCallOutput { call_id, .. } => {
             remove_first_matching(
                 items,
                 |i| matches!(i, ResponseItem::CustomToolCall { call_id: existing, .. } if existing == call_id),
-            );
+            )
         }
         ResponseItem::LocalShellCall {
             call_id: Some(call_id),
@@ -310,19 +315,23 @@ pub(crate) fn remove_corresponding_for(items: &mut Vec<ResponseItemEnvelope>, it
                         ..
                     } if existing == call_id
                 )
-            });
+            })
         }
-        _ => {}
+        _ => None,
     }
 }
 
-fn remove_first_matching<F>(items: &mut Vec<ResponseItemEnvelope>, predicate: F)
+fn remove_first_matching<F>(
+    items: &mut Vec<ResponseItemEnvelope>,
+    predicate: F,
+) -> Option<ResponseItemEnvelope>
 where
     F: Fn(&ResponseItem) -> bool,
 {
-    if let Some(pos) = items.iter().position(|envelope| predicate(&envelope.item)) {
-        items.remove(pos);
-    }
+    items
+        .iter()
+        .position(|envelope| predicate(&envelope.item))
+        .map(|pos| items.remove(pos))
 }
 
 /// Strip image content from messages and tool outputs when the model does not support images.

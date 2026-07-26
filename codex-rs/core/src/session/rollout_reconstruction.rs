@@ -347,7 +347,8 @@ impl Session {
         if let Some(checkpoint) = base_compaction
             && let Some(items) = &checkpoint.compacted.replacement_history
         {
-            history.replace_annotated(items.clone());
+            history
+                .record_annotated_items(items, turn_context.model_info().truncation_policy.into());
             history.restore_review_context(
                 checkpoint.compacted.retained_context.as_ref(),
                 checkpoint.compacted.guardian_history.as_ref(),
@@ -396,10 +397,9 @@ impl Session {
                             } else {
                                 compact::CompactedMessageIdentity::Regenerate
                             };
-                        let user_messages = compact::collect_annotated_user_messages(
-                            history.annotated_items(),
-                            identity,
-                        );
+                        let logical_items = history.logical_annotated_items();
+                        let user_messages =
+                            compact::collect_annotated_user_messages(&logical_items, identity);
                         let rebuilt = compact::build_compacted_history(
                             Vec::new(),
                             &user_messages,
