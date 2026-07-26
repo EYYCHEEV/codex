@@ -135,7 +135,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ResponseItem>) {
 /// outputs, so the namespace and name format must remain stable across retries
 /// and resumes to preserve prompt-cache reuse. Returning `None` when the source
 /// call has no ID preserves the legacy behavior for older history items.
-fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseItemId> {
+pub(super) fn synthetic_output_id(prefix: &str, item_id: Option<&str>) -> Option<ResponseItemId> {
     let source_id = item_id.filter(|id| !id.is_empty())?;
     let name = format!("{prefix}:{source_id}");
     Some(ResponseItemId::with_suffix(
