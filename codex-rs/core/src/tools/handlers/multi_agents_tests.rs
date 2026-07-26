@@ -1430,7 +1430,7 @@ async fn multi_agent_v2_typed_spawn_falls_back_from_unsupported_preferred_effort
         startup_prewarm.abort().await;
     }
     let mut turn = turn
-        .with_model("gpt-5.4".to_string(), &session.services.models_manager)
+        .with_model("gpt-5.6-sol".to_string(), &session.services.models_manager)
         .await;
     turn.reasoning_effort = Some(ReasoningEffort::High);
     let mut config = (*turn.config).clone();
@@ -1444,8 +1444,8 @@ async fn multi_agent_v2_typed_spawn_falls_back_from_unsupported_preferred_effort
         &mut turn,
         "unsupported_effort_role",
         r#"developer_instructions = "Follow the assigned role"
-model = "gpt-5.4"
-model_reasoning_effort = "max"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "unsupported"
 "#,
     )
     .await;
@@ -1489,7 +1489,7 @@ model_reasoning_effort = "max"
         json!({
             "task_name": "/root/unsupported_effort_worker",
             "agent_type": "unsupported_effort_role",
-            "model": "gpt-5.4",
+            "model": "gpt-5.6-sol",
             "reasoning_effort": "high",
             "route": "parent_fallback",
             "fallback_reason": "preferred reasoning effort is unsupported by the active provider catalog"
@@ -1504,7 +1504,7 @@ model_reasoning_effort = "max"
         ),
         (
             Some("unsupported_effort_role"),
-            Some("gpt-5.4"),
+            Some("gpt-5.6-sol"),
             Some(ReasoningEffort::High),
         )
     );
