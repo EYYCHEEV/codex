@@ -74,16 +74,21 @@ pub(crate) struct McpServerConnection {
     client: AsyncManagedClient,
 }
 
+enum McpServerConnectionReuse {
+    Pending,
+    Ready,
+}
+
 impl McpServerConnection {
-    async fn reusable_client(
+    async fn reuse_state(
         &self,
         desired: &McpServerConnectionIdentity,
-    ) -> Option<ManagedClient> {
+    ) -> Option<McpServerConnectionReuse> {
         let current = self.identity.as_ref()?;
-        if !current.has_same_connection_config(desired) {
-            return None;
-        }
         if !self.client.startup_complete.load(Ordering::Acquire) {
+            return (current == desired).then_some(McpServerConnectionReuse::Pending);
+        }
+        if !current.has_same_connection_config(desired) {
             return None;
         }
         let client = self.client.client().await.ok()?;
@@ -91,7 +96,7 @@ impl McpServerConnection {
             return None;
         }
         let Ok(desired_credentials) = desired.oauth_credentials() else {
-            return Some(client);
+            return Some(McpServerConnectionReuse::Ready);
         };
         let reusable = match client.client.managed_oauth_credentials().await {
             Some(live_credentials) => &live_credentials == desired_credentials,
@@ -99,7 +104,7 @@ impl McpServerConnection {
                 .oauth_credentials()
                 .is_ok_and(|startup_credentials| startup_credentials == desired_credentials),
         };
-        if reusable { Some(client) } else { None }
+        reusable.then_some(McpServerConnectionReuse::Ready)
     }
 
     pub(crate) async fn client(&self) -> Result<ManagedClient, StartupOutcomeError> {
@@ -299,69 +304,80 @@ impl McpConnectionSet {
                 client_elicitation_capability.clone(),
                 supports_openai_form_elicitation,
             );
-            if let Some(previous_view) =
+            let reused_pending_connection = if let Some(previous_view) =
                 reusable_previous.and_then(|previous| previous.servers.get(&server_name))
             {
                 let connection = Arc::clone(&previous_view.connection);
-                if connection
-                    .reusable_client(&connection_identity)
-                    .await
-                    .is_some()
-                {
-                    servers.insert(
-                        server_name.clone(),
-                        McpServerView {
-                            connection,
-                            metadata,
-                            tool_filter: configured_tool_filter,
-                            tool_timeout: configured_tool_timeout,
-                        },
-                    );
-                    reused_ready.push(server_name);
-                    continue;
+                match connection.reuse_state(&connection_identity).await {
+                    Some(McpServerConnectionReuse::Ready) => {
+                        servers.insert(
+                            server_name.clone(),
+                            McpServerView {
+                                connection,
+                                metadata,
+                                tool_filter: configured_tool_filter,
+                                tool_timeout: configured_tool_timeout,
+                            },
+                        );
+                        reused_ready.push(server_name);
+                        continue;
+                    }
+                    Some(McpServerConnectionReuse::Pending) => Some(connection),
+                    None => None,
                 }
-            }
-            let cancel_token = startup_cancellation_token.child_token();
-            let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                None
-            } else if let Ok(environment) = resolved_environment.as_ref() {
-                tool_catalog_cache.context(
-                    &server_name,
-                    &configured_config,
-                    &runtime_context,
-                    environment.as_ref(),
-                    &client_elicitation_capability,
-                    supports_openai_form_elicitation,
-                )
             } else {
                 None
             };
             let has_runtime_auth = runtime_auth_provider.is_some();
-            let async_managed_client = AsyncManagedClient::new(
-                server_name.clone(),
-                startup_submit_id.clone(),
-                server,
-                store_mode,
-                keyring_backend_kind,
-                cancel_token.clone(),
-                tx_event.clone(),
-                elicitation_requests.clone(),
-                codex_apps_tools_cache_context,
-                tool_catalog_cache_context,
-                runtime_context.clone(),
-                resolved_environment,
-                runtime_auth_provider,
-                client_elicitation_capability.clone(),
-                supports_openai_form_elicitation,
-                /*lazy_startup*/ lazy_startup,
-            );
+            let (connection, async_managed_client, cancel_token) =
+                if let Some(connection) = reused_pending_connection {
+                    let async_managed_client = connection.client.clone();
+                    let cancel_token = async_managed_client.cancel_token.clone();
+                    (connection, async_managed_client, cancel_token)
+                } else {
+                    let cancel_token = startup_cancellation_token.child_token();
+                    let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME {
+                        None
+                    } else if let Ok(environment) = resolved_environment.as_ref() {
+                        tool_catalog_cache.context(
+                            &server_name,
+                            &configured_config,
+                            &runtime_context,
+                            environment.as_ref(),
+                            &client_elicitation_capability,
+                            supports_openai_form_elicitation,
+                        )
+                    } else {
+                        None
+                    };
+                    let async_managed_client = AsyncManagedClient::new(
+                        server_name.clone(),
+                        startup_submit_id.clone(),
+                        server,
+                        store_mode,
+                        keyring_backend_kind,
+                        cancel_token.clone(),
+                        tx_event.clone(),
+                        elicitation_requests.clone(),
+                        codex_apps_tools_cache_context,
+                        tool_catalog_cache_context,
+                        runtime_context.clone(),
+                        resolved_environment,
+                        runtime_auth_provider,
+                        client_elicitation_capability.clone(),
+                        supports_openai_form_elicitation,
+                        /*lazy_startup*/ lazy_startup,
+                    );
+                    let connection = Arc::new(McpServerConnection {
+                        identity: Some(connection_identity),
+                        client: async_managed_client.clone(),
+                    });
+                    (connection, async_managed_client, cancel_token)
+                };
             servers.insert(
                 server_name.clone(),
                 McpServerView {
-                    connection: Arc::new(McpServerConnection {
-                        identity: Some(connection_identity),
-                        client: async_managed_client.clone(),
-                    }),
+                    connection,
                     metadata,
                     tool_filter: configured_tool_filter,
                     tool_timeout: configured_tool_timeout,
