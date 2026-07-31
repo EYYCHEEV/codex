@@ -132,6 +132,7 @@ impl McpConnectionSet {
                 },
                 tool_timeout: None,
                 catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
+                expected_protocol_mode: None,
             },
         );
     }
@@ -596,6 +597,66 @@ fn create_gated_async_managed_client(
         started_rx,
         release_tx,
     )
+}
+
+async fn manager_with_reusable_pending_server(
+    config: &McpServerConfig,
+    runtime_context: &McpRuntimeContext,
+    tools: Vec<ToolInfo>,
+) -> (McpConnectionSet, CancellationToken, Arc<Notify>) {
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    let cancel_token = CancellationToken::new();
+    let release = Arc::new(Notify::new());
+    let startup_complete = Arc::new(AtomicBool::new(false));
+    let client = {
+        let cancel_token = cancel_token.clone();
+        let release = Arc::clone(&release);
+        let startup_complete = Arc::clone(&startup_complete);
+        async move {
+            tokio::select! {
+                () = cancel_token.cancelled() => Err(StartupOutcomeError::Cancelled),
+                () = release.notified() => {
+                    let client = create_test_managed_client(tools).await;
+                    startup_complete.store(true, Ordering::Release);
+                    Ok(client)
+                }
+            }
+        }
+        .boxed()
+        .shared()
+    };
+    let server = EffectiveMcpServer::configured(config.clone());
+    manager.servers.insert(
+        "docs".to_string(),
+        McpServerView {
+            connection: Arc::new(McpServerConnection {
+                identity: Some(reusable_server_identity(config, runtime_context)),
+                client: AsyncManagedClient {
+                    client,
+                    is_codex_apps_mcp_server: false,
+                    cached_server_info: None,
+                    codex_apps_tools_cache_context: None,
+                    tool_catalog_cache_context: None,
+                    lazy_startup: false,
+                    startup_complete,
+                    startup_reconnect: None,
+                    cancel_token: cancel_token.clone(),
+                },
+            }),
+            metadata: McpServerMetadata::from(&server),
+            tool_filter: ToolFilter::from_config(config),
+            tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
+            catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
+            expected_protocol_mode: Some(crate::McpProtocolMode::Legacy),
+        },
+    );
+    (manager, cancel_token, release)
 }
 
 async fn create_test_manager_with_ready_apps_client(
@@ -3910,6 +3971,7 @@ async fn manager_with_reusable_ready_server(
             tool_filter: ToolFilter::from_config(config),
             tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
+            expected_protocol_mode: Some(crate::McpProtocolMode::Legacy),
         },
     );
     manager
@@ -4042,6 +4104,7 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
             tool_filter: ToolFilter::from_config(&config),
             tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
             catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
+            expected_protocol_mode: Some(crate::McpProtocolMode::Legacy),
         },
     );
     let previous = Arc::new(previous);
@@ -4234,6 +4297,55 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
     .await;
 
     assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+}
+
+#[tokio::test]
+async fn reconciliation_reuses_an_unchanged_pending_server() {
+    let runtime_context = reusable_server_runtime_context();
+    let config = reusable_server_config("http://127.0.0.1:1");
+    let (previous, cancel_token, release) = manager_with_reusable_pending_server(
+        &config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+
+    let reconciled = reconcile_reusable_server(&previous, config, runtime_context.clone()).await;
+
+    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+    drop(previous);
+    assert!(!cancel_token.is_cancelled());
+    release.notify_one();
+    let tools = tokio::time::timeout(Duration::from_secs(1), reconciled.list_all_tools())
+        .await
+        .expect("reused startup should become ready");
+    assert_eq!(
+        model_tool_names(&tools),
+        HashSet::from([ToolName::namespaced("mcp__docs", "search")])
+    );
+}
+
+#[tokio::test]
+async fn reconciliation_replaces_a_pending_server_when_identity_changes() {
+    let runtime_context = reusable_server_runtime_context();
+    let previous_config = reusable_server_config("http://127.0.0.1:1");
+    let (previous, cancel_token, _release) = manager_with_reusable_pending_server(
+        &previous_config,
+        &runtime_context,
+        vec![create_test_tool("docs", "search")],
+    )
+    .await;
+
+    let reconciled = reconcile_reusable_server(
+        &previous,
+        reusable_server_config("http://127.0.0.1:2"),
+        runtime_context,
+    )
+    .await;
+
+    assert!(!previous.shares_test_connection_with(&reconciled, "docs"));
+    drop(previous);
+    assert!(cancel_token.is_cancelled());
 }
 
 #[tokio::test]
