@@ -1302,7 +1302,7 @@ impl Session {
                 mcp_runtime_cwd,
             )
             .await?;
-            sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
+            sess.start_mcp_prewarm_worker(mcp_prewarm_rx);
             sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
                 .await;
             let session_start_source = match &initial_history {

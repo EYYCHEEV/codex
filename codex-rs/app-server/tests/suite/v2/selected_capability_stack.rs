@@ -4,10 +4,10 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
-use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::CapabilityRootLocation;
 use codex_app_server_protocol::EnvironmentAddResponse;
@@ -448,11 +448,10 @@ fn selected_capability_fixture(
     apps_url: &str,
 ) -> Result<SelectedCapabilityFixture> {
     let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        responses_server_uri,
-        apps_url,
-    )?;
+    MockResponsesConfig::new(responses_server_uri)
+        .with_root_config(&format!("chatgpt_base_url = \"{apps_url}\""))
+        .with_provider_config("requires_openai_auth = true")
+        .write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?.replacen(
         "model_provider = \"mock_provider\"",

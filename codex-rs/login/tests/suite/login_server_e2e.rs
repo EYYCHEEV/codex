@@ -698,7 +698,7 @@ async fn falls_back_to_ephemeral_port_when_fixed_port_is_occupied_by_another_pro
     let server = run_login_server(ServerOptions {
         codex_home,
         cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        auth_route_config: None,
+        auth_route_config: codex_login::test_support::transport_default_auth_route_config(),
         client_id: codex_login::CLIENT_ID.to_string(),
         issuer,
         port: occupied_port,
@@ -718,7 +718,7 @@ async fn falls_back_to_ephemeral_port_when_fixed_port_is_occupied_by_another_pro
         "auth URL should use the actual fallback port"
     );
 
-    let client = reqwest::Client::new();
+    let client = HttpClientBuilder::new().build_direct()?;
     let cancel_url = format!("http://127.0.0.1:{}/cancel", server.actual_port);
     let resp = client.get(cancel_url).send().await?;
     assert!(resp.status().is_success());

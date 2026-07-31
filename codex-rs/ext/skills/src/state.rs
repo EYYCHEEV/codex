@@ -28,7 +28,6 @@ const MAX_CACHED_ORCHESTRATOR_RESOURCES: usize = 100;
 const MAX_CACHED_ORCHESTRATOR_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) struct SkillsSessionState {
-    pub(crate) mcp_resources: Option<Arc<McpResourceClient>>,
     pub(crate) extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
 }
 

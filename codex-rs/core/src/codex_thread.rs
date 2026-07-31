@@ -709,6 +709,31 @@ impl CodexThread {
         (Arc::new(mcp_config), runtime_context)
     }
 
+    /// Captures effective auth with the current MCP configuration without awaiting MCP startup.
+    pub async fn current_mcp_config_auth_and_runtime_context(
+        &self,
+    ) -> codex_protocol::error::Result<(
+        Arc<codex_mcp::McpConfig>,
+        Option<codex_login::CodexAuth>,
+        codex_mcp::McpRuntimeContext,
+    )> {
+        let turn_context = self.session.new_default_turn().await;
+        let setup = self
+            .session
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info.slug),
+                Some(&self.session.session_id().to_string()),
+            )
+            .await?;
+        let (mcp_config, runtime_context) = self
+            .session
+            .runtime_mcp_config_and_context(&turn_context.config)
+            .await;
+        Ok((Arc::new(mcp_config), setup.effective_auth, runtime_context))
+    }
+
     /// Returns one atomic provider/auth/MCP snapshot for this thread's default turn.
     pub async fn current_runtime_snapshot(
         &self,

@@ -1357,6 +1357,7 @@ mod tests {
             success: true,
             error: None,
             onboarding_entrypoint: None,
+            managed_account_id: None,
         });
 
         assert!(matches!(

@@ -227,6 +227,7 @@ macro_rules! serialization_scope_expr {
     };
 }
 
+#[cfg(test)]
 macro_rules! export_client_param_schema {
     ($out_dir:ident, $params:ty) => {
         write_json_schema::<$params>($out_dir, stringify!($params))

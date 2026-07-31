@@ -289,6 +289,12 @@ impl McpRuntime {
         match (current.auth.as_ref(), auth) {
             (Some(previous), Some(latest)) => {
                 previous == latest
+                    && match (previous, latest) {
+                        (CodexAuth::AgentIdentity(previous), CodexAuth::AgentIdentity(latest)) => {
+                            previous.record() == latest.record()
+                        }
+                        _ => true,
+                    }
                     && previous.get_account_id() == latest.get_account_id()
                     && previous.get_chatgpt_user_id() == latest.get_chatgpt_user_id()
                     && previous.is_fedramp_account() == latest.is_fedramp_account()
@@ -571,6 +577,7 @@ mod tests {
             ))),
             auth: None,
             auth_token: None,
+            codex_apps_tools_cache_key: None,
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             cached_binding: Mutex::new(None),

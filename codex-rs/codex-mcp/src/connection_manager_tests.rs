@@ -1,9 +1,7 @@
 use super::*;
-use crate::CodexAppsToolsCache;
 use crate::CodexAppsToolsCacheKey;
 use crate::McpBinding;
 use crate::codex_apps_tools_cache_key;
-use crate::declared_openai_file_input_param_names;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationRequestRouter;
@@ -33,6 +31,7 @@ use codex_config::McpServerToolConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_connectors::ConnectorRuntimeContext;
+use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeFetchSource;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_exec_server_test_support::environment_manager_without_environments;
@@ -589,6 +588,7 @@ fn create_gated_async_managed_client(
             cached_server_info: None,
             codex_apps_tools_cache_context: None,
             tool_catalog_cache_context: None,
+            lazy_startup: false,
             startup_complete,
             startup_reconnect: None,
             cancel_token: CancellationToken::new(),
@@ -2037,6 +2037,7 @@ async fn capture_binding_skips_pending_optional_servers_after_one_shared_startup
                 cached_server_info: None,
                 codex_apps_tools_cache_context: None,
                 tool_catalog_cache_context: None,
+                lazy_startup: false,
                 startup_complete: Arc::new(AtomicBool::new(false)),
                 startup_reconnect: None,
                 cancel_token: CancellationToken::new(),
@@ -2160,6 +2161,7 @@ async fn capture_binding_shares_optional_startup_grace_across_connection_sets() 
                 cached_server_info: None,
                 codex_apps_tools_cache_context: None,
                 tool_catalog_cache_context: Some(cache_context.clone()),
+                lazy_startup: false,
                 startup_complete: Arc::new(AtomicBool::new(false)),
                 startup_reconnect: None,
                 cancel_token: CancellationToken::new(),
@@ -3473,6 +3475,7 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
         enabled: true,
         required: false,
         supports_parallel_tool_calls: false,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(1)),
         tool_timeout_sec: None,
@@ -3510,7 +3513,7 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
             codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
                 /*account_id*/ None, /*chatgpt_user_id*/ None,
             ),
-            supports_openai_form_elicitation: false,
+            client_mcp_extensions: ClientMcpExtensions::default(),
             auth: None,
             codex_apps_auth_manager: None,
             elicitation_reviewer: None,
@@ -3593,7 +3596,7 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
             codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
                 /*account_id*/ None, /*chatgpt_user_id*/ None,
             ),
-            supports_openai_form_elicitation: false,
+            client_mcp_extensions: ClientMcpExtensions::default(),
             auth: None,
             codex_apps_auth_manager: None,
             elicitation_reviewer: None,

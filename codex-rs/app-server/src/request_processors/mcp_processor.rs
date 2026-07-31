@@ -124,14 +124,13 @@ impl McpRequestProcessor {
         let (auth, mcp_config, runtime_context) = match thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
-                let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
-                    internal_error(format!("failed to capture thread runtime: {err}"))
-                })?;
-                (
-                    snapshot.effective_auth,
-                    snapshot.mcp.config().clone(),
-                    snapshot.runtime_context,
-                )
+                let (mcp_config, auth, runtime_context) = thread
+                    .current_mcp_config_auth_and_runtime_context()
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!("failed to capture thread runtime: {err}"))
+                    })?;
+                (auth, mcp_config, runtime_context)
             }
             None => {
                 let auth = self.auth_manager.auth().await;

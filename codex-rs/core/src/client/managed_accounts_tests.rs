@@ -56,7 +56,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let first_id = auth_manager
@@ -283,7 +283,7 @@ async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard(
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     auth_manager

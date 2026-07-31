@@ -5,13 +5,15 @@ use codex_config::types::McpServerTransportConfig;
 use codex_core::config::Config;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::McpServerContribution;
+use codex_extension_api::McpServerContributionContext;
+use codex_extension_api::McpServerContributor;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadStartInput;
 use codex_features::Feature;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::McpResourceClient;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
@@ -25,7 +27,11 @@ use core_test_support::apps_test_server::SEARCH_CALENDAR_CREATE_TOOL;
 use core_test_support::apps_test_server::SEARCH_CALENDAR_NAMESPACE;
 use core_test_support::apps_test_server::apps_enabled_builder;
 use core_test_support::apps_test_server::search_capable_apps_builder;
+use core_test_support::context_snapshot;
+use core_test_support::context_snapshot::ContextSnapshotOptions;
+use core_test_support::context_snapshot::ContextSnapshotRenderMode;
 use core_test_support::responses;
+use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -46,7 +52,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::Semaphore;
 use wiremock::Mock;
 use wiremock::Request;
 use wiremock::ResponseTemplate;
@@ -58,13 +63,6 @@ struct McpResourceClientCapture {
     client: Arc<Mutex<Option<McpResourceClient>>>,
 }
 
-struct CoalescingMcpContributor {
-    block_next: AtomicBool,
-    entered: Semaphore,
-    release: Semaphore,
-    observed_markers: Mutex<Vec<String>>,
-}
-
 struct AppsMcpServerContributor {
     id: &'static str,
     url: String,
@@ -72,54 +70,6 @@ struct AppsMcpServerContributor {
 
 struct SessionSourceMcpContributor {
     observed_sources: Arc<Mutex<Vec<SessionSource>>>,
-}
-
-impl CoalescingMcpContributor {
-    fn new() -> Self {
-        Self {
-            block_next: AtomicBool::new(false),
-            entered: Semaphore::new(0),
-            release: Semaphore::new(0),
-            observed_markers: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl McpServerContributor<Config> for CoalescingMcpContributor {
-    fn id(&self) -> &'static str {
-        "coalescing_mcp_refresh_test"
-    }
-
-    fn contribute<'a>(
-        &'a self,
-        context: McpServerContributionContext<'a, Config>,
-    ) -> ExtensionFuture<'a, Vec<McpServerContribution>> {
-        Box::pin(async move {
-            let marker = context
-                .config()
-                .mcp_servers
-                .get()
-                .keys()
-                .next()
-                .cloned()
-                .unwrap_or_else(|| "initial".to_string());
-            self.observed_markers
-                .lock()
-                .expect("observed markers lock should not be poisoned")
-                .push(marker.clone());
-            if marker != "initial" {
-                self.entered.add_permits(1);
-            }
-            if self.block_next.swap(false, Ordering::SeqCst) {
-                self.release
-                    .acquire()
-                    .await
-                    .expect("release semaphore should remain open")
-                    .forget();
-            }
-            Vec::new()
-        })
-    }
 }
 
 impl McpServerContributor<Config> for AppsMcpServerContributor {
@@ -214,9 +164,8 @@ impl ThreadLifecycleContributor<Config> for McpResourceClientCapture {
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let client = input
-                .session_store
-                .get::<McpResourceClient>()
-                .expect("session store should contain an MCP resource client");
+                .mcp_resource_client
+                .expect("thread start should expose an MCP resource client");
             *self
                 .client
                 .lock()
@@ -318,7 +267,7 @@ async fn root_and_spawned_subagent_receive_distinct_mcp_session_sources() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rapid_mcp_refreshes_coalesce_to_the_latest_config() -> Result<()> {
+async fn session_resource_client_retains_its_binding_after_mcp_refresh() -> Result<()> {
     let server = responses::start_mock_server().await;
     let response = responses::mount_sse_once(
         &server,
@@ -364,31 +313,28 @@ async fn rapid_mcp_refreshes_coalesce_to_the_latest_config() -> Result<()> {
         default_tools_approval_mode: None,
         enabled_tools: None,
         disabled_tools: None,
+        omit_tools_from: None,
         scopes: None,
         oauth: None,
         oauth_resource: None,
         tools: HashMap::new(),
     };
-    test.codex
-        .submit(Op::RefreshMcpServers {
-            config: McpServerRefreshConfig {
-                mcp_servers: serde_json::to_value(HashMap::from([(
-                    "refreshed".to_string(),
-                    refreshed_server,
-                )]))?,
-                mcp_oauth_credentials_store_mode: serde_json::to_value(
-                    test.config.mcp_oauth_credentials_store_mode,
-                )?,
-                auth_keyring_backend_kind: serde_json::to_value(
-                    test.config.auth_keyring_backend_kind(),
-                )?,
-            },
-        })
-        .await?;
+    let mut refreshed_config = test.config.clone();
+    refreshed_config
+        .mcp_servers
+        .set(HashMap::from([("refreshed".to_string(), refreshed_server)]))?;
+    test.codex.refresh_mcp_config(refreshed_config).await;
+    test.codex.submit(Op::RefreshMcpServers).await?;
     test.submit_turn("observe the refreshed MCP runtime")
         .await?;
 
-    assert!(resource_client.has_server("refreshed").await);
+    assert!(!resource_client.has_server("refreshed").await);
+    assert!(
+        test.codex
+            .current_mcp_runtime()
+            .await?
+            .has_server("refreshed")
+    );
     response.single_request();
     Ok(())
 }
@@ -860,9 +806,12 @@ async fn apps_guidance_and_deferred_namespace_appear_after_recovery_within_a_tur
         0
     );
 
+    release_apps_recovery
+        .send(())
+        .expect("background Apps recovery should still be waiting");
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if !mcp_runtime.manager().list_all_tools().await.is_empty() {
+            if !mcp_runtime.list_all_tools().await.is_empty() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -959,21 +908,7 @@ async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup
 
     tokio::fs::remove_dir_all(test.codex_home_path().join("cache/codex_apps_tools")).await?;
     startup_control.fail_next_initialize_attempts(/*attempts*/ 1);
-    let runtime_mcp_config = test.codex.runtime_mcp_config(&test.config).await;
-    let refresh_config = McpServerRefreshConfig {
-        mcp_servers: serde_json::to_value(codex_mcp::configured_mcp_servers(&runtime_mcp_config))?,
-        mcp_oauth_credentials_store_mode: serde_json::to_value(
-            runtime_mcp_config.mcp_oauth_credentials_store_mode,
-        )?,
-        auth_keyring_backend_kind: serde_json::to_value(
-            runtime_mcp_config.auth_keyring_backend_kind,
-        )?,
-    };
-    test.codex
-        .submit(Op::RefreshMcpServers {
-            config: refresh_config,
-        })
-        .await?;
+    test.codex.submit(Op::RefreshMcpServers).await?;
     test.submit_turn("use Calendar after transient Apps startup failures")
         .await?;
     tokio::time::timeout(Duration::from_secs(1), async {

@@ -6,6 +6,7 @@ use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::WorldStateContributionInput;
 use codex_extension_api::WorldStateSectionContribution;
+use codex_mcp::McpResourceClient;
 use codex_protocol::openai_models::ModelInfo;
 
 use crate::HostSkillsSnapshot;
@@ -23,7 +24,6 @@ use crate::sources::SkillProviders;
 use crate::state::EmittedCatalogBudgetWarnings;
 use crate::state::ExecutorSkillsStepState;
 use crate::state::HostSkillsStepState;
-use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
 use crate::world_state::CatalogRenderCallback;
 use crate::world_state::executor_skills_world_state_section;
@@ -144,11 +144,7 @@ impl<'a> CatalogContext<'a> {
             include_host_skills: false,
             include_bundled_skills: self.config.bundled_skills_enabled,
             include_orchestrator_skills: orchestrator_enabled,
-            mcp_resources: self
-                .input
-                .session_store
-                .get::<SkillsSessionState>()
-                .and_then(|state| state.mcp_resources.clone()),
+            mcp_resources: self.input.session_store.get::<McpResourceClient>(),
             executor_capability_discovery: self.input.executor_capability_discovery.cloned(),
         };
 

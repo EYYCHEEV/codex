@@ -674,6 +674,7 @@ async fn start_resource_test_app_server_with_extra_config(
         .with_root_config(&format!(
             "chatgpt_base_url = \"{apps_server_url}\"\nmcp_oauth_credentials_store = \"file\""
         ))
+        .with_provider_config("requires_openai_auth = true")
         .enable_feature(Feature::Apps)
         .with_extra_config(&format!(
             "[skills]\ninclude_instructions = true\n{extra_config}"

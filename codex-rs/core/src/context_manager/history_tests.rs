@@ -1408,6 +1408,7 @@ fn record_items_omits_oversized_stamped_message() {
         phase: None,
         internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
             turn_id: Some("turn-1".to_string()),
+            executed_tool_calls: None,
         }),
     };
     let mut history = ContextManager::new();

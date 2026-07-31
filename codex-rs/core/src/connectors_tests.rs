@@ -20,6 +20,26 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tempfile::tempdir;
 
+fn app(id: &str) -> AppInfo {
+    AppInfo {
+        id: id.to_string(),
+        name: id.to_string(),
+        description: None,
+        logo_url: None,
+        logo_url_dark: None,
+        icon_assets: None,
+        icon_dark_assets: None,
+        distribution_channel: None,
+        install_url: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        is_accessible: false,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }
+}
+
 fn plugin_names(names: &[&str]) -> Vec<String> {
     names.iter().map(ToString::to_string).collect()
 }

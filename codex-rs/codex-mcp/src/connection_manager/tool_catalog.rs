@@ -283,9 +283,6 @@ impl McpConnectionSet {
         let mut tools = Vec::with_capacity(listed_tools.len());
         let mut calls = std::collections::HashMap::with_capacity(listed_tools.len());
         for tool_info in listed_tools {
-            if !crate::tool_is_model_visible(&tool_info) {
-                continue;
-            }
             let Some(client) = clients.client(&tool_info.server_name) else {
                 tools.push(tool_info);
                 continue;
@@ -306,7 +303,9 @@ impl McpConnectionSet {
                 ),
                 call,
             );
-            tools.push(tool_info);
+            if crate::tool_is_model_visible(&tool_info) {
+                tools.push(tool_info);
+            }
         }
         McpBinding::new(
             Arc::clone(self),

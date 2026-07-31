@@ -272,6 +272,7 @@ fn non_openai_model_provider(server: &MockServer) -> ModelProviderInfo {
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
     provider.name = "OpenAI (test)".into();
     provider.requires_openai_auth = false;
+    provider.experimental_bearer_token = Some("test-token".to_string());
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider
@@ -382,6 +383,7 @@ fn remote_v2_compaction_response() -> String {
 fn local_compaction_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
     let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     provider.name = "OpenAI-compatible test provider".to_string();
+    provider.requires_openai_auth = false;
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     provider
@@ -1073,10 +1075,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
 
     let server = start_mock_server().await;
 
-    let non_openai_provider_name = non_openai_model_provider(&server).name;
+    let non_openai_provider = non_openai_model_provider(&server);
     let codex = test_codex()
         .with_config(move |config| {
-            config.model_provider.name = non_openai_provider_name;
+            config.model_provider = non_openai_provider;
         })
         .build(&server)
         .await

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::Weak;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -89,6 +90,10 @@ impl McpBinding {
 
     pub fn has_servers(&self) -> bool {
         self.connections.has_servers()
+    }
+
+    pub(crate) fn connection_cache_key(&self) -> Weak<McpConnectionSet> {
+        Arc::downgrade(&self.connections)
     }
 
     pub fn has_server(&self, server: &str) -> bool {

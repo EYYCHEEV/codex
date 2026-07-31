@@ -979,6 +979,9 @@ mod tests {
         let state_db = init_state_db(config.as_ref())
             .await
             .expect("state db should initialize for in-process test");
+        let environment_manager = Arc::new(EnvironmentManager::without_environments(
+            config.http_client_factory(),
+        ));
         let client = InProcessAppServerClient::start(InProcessClientStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),
             config,
@@ -989,7 +992,7 @@ mod tests {
             feedback: CodexFeedback::new(),
             log_db: None,
             state_db: Some(state_db),
-            environment_manager: Arc::new(EnvironmentManager::without_environments()),
+            environment_manager,
             config_warnings: Vec::new(),
             session_source,
             enable_codex_api_key_env: false,
@@ -2183,7 +2186,9 @@ mod tests {
     async fn runtime_start_args_forward_environment_manager_and_openai_form_capability() {
         let codex_home = TempDir::new().expect("temp dir");
         let config = Arc::new(build_test_config_for_codex_home(codex_home.path()).await);
-        let environment_manager = Arc::new(EnvironmentManager::without_environments());
+        let environment_manager = Arc::new(EnvironmentManager::without_environments(
+            config.http_client_factory(),
+        ));
 
         let runtime_args = InProcessClientStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),

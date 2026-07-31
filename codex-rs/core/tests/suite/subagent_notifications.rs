@@ -26,6 +26,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_response_once_match;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
@@ -908,11 +909,11 @@ async fn wait_agent_reports_terminal_once_and_keeps_unresolved_siblings_visible(
         .await?;
     let completed_thread = test
         .thread_manager
-        .start_thread(test.config.clone())
+        .start_thread(StartThreadOptions::new(test.config.clone()))
         .await?;
     let running_thread = test
         .thread_manager
-        .start_thread(test.config.clone())
+        .start_thread(StartThreadOptions::new(test.config.clone()))
         .await?;
     let completed_id = completed_thread.thread_id;
     let running_id = running_thread.thread_id;

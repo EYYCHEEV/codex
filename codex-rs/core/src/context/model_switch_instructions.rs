@@ -1,4 +1,8 @@
 use super::ContextualUserFragment;
+use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_output_truncation::truncate_text;
+
+const MODEL_SWITCH_INSTRUCTIONS_MAX_TOKENS: usize = 9_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ModelSwitchInstructions {
@@ -7,8 +11,12 @@ pub(crate) struct ModelSwitchInstructions {
 
 impl ModelSwitchInstructions {
     pub(crate) fn new(model_instructions: impl Into<String>) -> Self {
+        let model_instructions = model_instructions.into();
         Self {
-            model_instructions: model_instructions.into(),
+            model_instructions: truncate_text(
+                &model_instructions,
+                TruncationPolicy::Tokens(MODEL_SWITCH_INSTRUCTIONS_MAX_TOKENS),
+            ),
         }
     }
 }

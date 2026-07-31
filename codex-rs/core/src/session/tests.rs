@@ -2171,6 +2171,9 @@ async fn subagent_activity_emits_matching_start_and_completion() {
         kind: codex_protocol::protocol::SubAgentActivityKind::Started,
         agent_thread_id: ThreadId::new(),
         agent_path: AgentPath::root(),
+        agent_type: None,
+        model: None,
+        reasoning_effort: None,
     };
 
     crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity(&session, &turn_context, item)
@@ -8897,6 +8900,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup),
+            /*required_servers*/ &[],
         )
         .await;
     let unchanged_runtime = session
@@ -8906,9 +8910,13 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup),
+            /*required_servers*/ &[],
         )
         .await;
-    assert!(Arc::ptr_eq(&initial_runtime, &unchanged_runtime));
+    assert!(Arc::ptr_eq(
+        initial_runtime.config(),
+        unchanged_runtime.config()
+    ));
 
     let refreshed_auth = CodexAuth::from_external_chatgpt_tokens(
         "header.e30.refreshed",
@@ -8929,9 +8937,13 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup),
+            /*required_servers*/ &[],
         )
         .await;
-    assert!(!Arc::ptr_eq(&initial_runtime, &refreshed_runtime));
+    assert!(!Arc::ptr_eq(
+        initial_runtime.config(),
+        refreshed_runtime.config()
+    ));
     assert!(
         session
             .services
@@ -8946,9 +8958,13 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup),
+            /*required_servers*/ &[],
         )
         .await;
-    assert!(Arc::ptr_eq(&refreshed_runtime, &stable_refreshed_runtime));
+    assert!(Arc::ptr_eq(
+        refreshed_runtime.config(),
+        stable_refreshed_runtime.config()
+    ));
 
     Ok(())
 }
@@ -8973,7 +8989,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
                     task_id: Some(task_id.to_string()),
                 },
                 "https://auth.example.test",
-                /*auth_route_config*/ None,
+                &codex_login::test_support::transport_default_auth_route_config(),
             )
             .await?,
         ))
@@ -9008,6 +9024,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup),
+            /*required_servers*/ &[],
         )
         .await;
 
@@ -9021,9 +9038,13 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup),
+            /*required_servers*/ &[],
         )
         .await;
-    assert!(Arc::ptr_eq(&initial_runtime, &state_only_runtime));
+    assert!(Arc::ptr_eq(
+        initial_runtime.config(),
+        state_only_runtime.config()
+    ));
 
     request_setup.effective_auth = Some(auth_for_task("task-replaced").await?);
     assert_eq!(request_setup.transport_auth_binding, managed_binding);
@@ -9035,9 +9056,13 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup),
+            /*required_servers*/ &[],
         )
         .await;
-    assert!(!Arc::ptr_eq(&state_only_runtime, &replaced_runtime));
+    assert!(!Arc::ptr_eq(
+        state_only_runtime.config(),
+        replaced_runtime.config()
+    ));
     assert!(
         session
             .services
@@ -9052,9 +9077,13 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             &[],
             /*executor_capability_discovery*/ None,
             Some(&request_setup.clone()),
+            /*required_servers*/ &[],
         )
         .await;
-    assert!(Arc::ptr_eq(&replaced_runtime, &identical_clone_runtime));
+    assert!(Arc::ptr_eq(
+        replaced_runtime.config(),
+        identical_clone_runtime.config()
+    ));
 
     Ok(())
 }
@@ -11374,7 +11403,10 @@ async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
 
     assert_eq!(
         sess.input_queue.get_pending_input(&sess.active_turn).await,
-        vec![TurnInput::ResponseItem(ResponseItem::from(queued_item))]
+        (
+            vec![TurnInput::ResponseItem(ResponseItem::from(queued_item))],
+            None,
+        )
     );
 }
 
@@ -11462,17 +11494,6 @@ async fn idle_interrupt_does_not_wake_queued_next_turn_items() {
             .has_queued_response_items_for_next_turn()
             .await
     );
-}
-
-#[tokio::test]
-async fn interrupt_keeps_mcp_manager_token_reusable() {
-    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
-    let startup_token = sess.mcp_startup_cancellation_token().await;
-    *sess.active_turn.lock().await = Some(ActiveTurn::default());
-
-    sess.interrupt_task().await;
-
-    assert!(!startup_token.is_cancelled());
 }
 
 #[tokio::test]

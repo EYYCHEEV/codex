@@ -1140,7 +1140,7 @@ model_reasoning_effort = "medium"
 
     let manager = thread_manager();
     let root = manager
-        .start_thread((*turn.config).clone())
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
@@ -1227,7 +1227,7 @@ async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
 
     let manager = thread_manager();
     let root = manager
-        .start_thread(root_config)
+        .start_thread(StartThreadOptions::new(root_config))
         .await
         .expect("root thread should start");
     if let Some(startup_prewarm) = root.thread.session.take_session_startup_prewarm().await {
@@ -1252,6 +1252,7 @@ async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
             enabled: true,
             required: false,
             supports_parallel_tool_calls: false,
+            omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: Some(startup_timeout_sec),
             tool_timeout_sec: None,
@@ -1418,7 +1419,7 @@ model_reasoning_effort = "unsupported"
 
     let manager = thread_manager();
     let root = manager
-        .start_thread((*turn.config).clone())
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     if let Some(startup_prewarm) = root.thread.session.take_session_startup_prewarm().await {
@@ -1506,7 +1507,7 @@ model_reasoning_effort = "medium"
 
     let manager = thread_manager();
     let root = manager
-        .start_thread((*turn.config).clone())
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
@@ -1553,7 +1554,7 @@ async fn multi_agent_v2_configured_only_rejects_hidden_built_in_before_reservati
 
     let manager = thread_manager();
     let root = manager
-        .start_thread((*turn.config).clone())
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
@@ -2172,7 +2173,7 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
     let expected_model = turn.model_info.slug.clone();
     let expected_reasoning_effort = turn.reasoning_effort.clone();
     let root = manager
-        .start_thread((*turn.config).clone())
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
@@ -3995,7 +3996,7 @@ async fn wait_agent_latest_status_resamples_agent_after_completion() {
     let (_session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     let thread = manager
-        .start_thread(turn.config.as_ref().clone())
+        .start_thread(StartThreadOptions::new(turn.config.as_ref().clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
@@ -4138,11 +4139,11 @@ async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible
         .agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let finished_thread = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("finished thread should start");
     let running_thread = manager
-        .start_thread(config)
+        .start_thread(StartThreadOptions::new(config))
         .await
         .expect("running thread should start");
     let finished_id = finished_thread.thread_id;
@@ -4234,7 +4235,7 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
     session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
@@ -4378,7 +4379,7 @@ async fn wait_agent_clamps_long_timeouts_to_maximum() {
     session.services.agent_control = manager.agent_control();
     let config = turn.config.as_ref().clone();
     let thread = manager
-        .start_thread(config.clone())
+        .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;

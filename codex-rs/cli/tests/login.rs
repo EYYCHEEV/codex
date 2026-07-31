@@ -8,11 +8,13 @@ use std::time::Instant;
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
+use app_test_support::ChatGptIdTokenClaims;
+use app_test_support::encode_id_token;
 use app_test_support::write_chatgpt_auth;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_core::config::ConfigBuilder;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
-use codex_login::CLIENT_ID;
 use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
 use codex_login::ManagedChatgptOauthCredentials;
 use codex_login::ManagedChatgptSelectionScope;
@@ -84,7 +86,7 @@ async fn seed_managed_account(codex_home: &Path) -> Result<std::sync::Arc<AuthMa
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     manager
@@ -244,7 +246,8 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
-            "cli_auth_credentials_store = \"file\"\nchatgpt_base_url = \"{}/backend-api\"\n",
+            "cli_auth_credentials_store = \"file\"\nchatgpt_base_url = \"{}/backend-api\"\n\
+             [features]\napps = false\nplugins = false\n",
             server.uri()
         ),
     )?;
@@ -255,7 +258,7 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let mut stalled_credentials = managed_credentials(
@@ -681,18 +684,6 @@ fn login_with_access_token_rejects_invalid_jwt() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn debug_prompt_input_follows_authenticated_attribution_setting() -> Result<()> {
     let server = MockServer::start().await;
-    let request_count = Arc::new(AtomicUsize::new(0));
-    Mock::given(method("GET"))
-        .and(path("/backend-api/wham/settings/user"))
-        .and(header("chatgpt-account-id", "workspace-123"))
-        .respond_with(move |_request: &wiremock::Request| {
-            ResponseTemplate::new(200).set_body_json(json!({
-                "commit_attribution_enabled": request_count.fetch_add(1, Ordering::SeqCst) == 0,
-            }))
-        })
-        .expect(2)
-        .mount(&server)
-        .await;
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join("config.toml"),
@@ -701,26 +692,80 @@ async fn debug_prompt_input_follows_authenticated_attribution_setting() -> Resul
             server.uri()
         ),
     )?;
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await?;
+    assert_eq!(
+        config.chatgpt_base_url,
+        format!("{}/backend-api", server.uri())
+    );
+    let workspace_id = config
+        .forced_chatgpt_workspace_id
+        .as_ref()
+        .and_then(|workspace_ids| workspace_ids.first())
+        .cloned()
+        .unwrap_or_else(|| "workspace-123".to_string());
+    let request_count = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/settings/user"))
+        .and(header("chatgpt-account-id", workspace_id.clone()))
+        .respond_with({
+            let request_count = Arc::clone(&request_count);
+            move |_request: &wiremock::Request| {
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "commit_attribution_enabled": request_count.fetch_add(1, Ordering::SeqCst) == 0,
+                }))
+            }
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("user@example.com")
+            .chatgpt_account_id(&workspace_id)
+            .plan_type("enterprise"),
+    )?;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": access_token.clone(),
+            "refresh_token": "refresh-token",
+        })))
+        .mount(&server)
+        .await;
     write_chatgpt_auth(
         codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("workspace-123")
+        ChatGptAuthFixture::new(access_token)
+            .account_id(&workspace_id)
+            .chatgpt_account_id(&workspace_id)
+            .email("user@example.com")
             .plan_type("enterprise"),
         AuthCredentialsStoreMode::File,
     )?;
     for enabled in [true, false] {
         let output = codex_command(codex_home.path())?
+            .env(
+                codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+                format!("{}/oauth/token", server.uri()),
+            )
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
             .env_remove("CODEX_ACCESS_TOKEN")
             .env_remove("OPENAI_API_KEY")
             .args(["debug", "prompt-input"])
             .output()?;
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "enabled={enabled}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let prompt = String::from_utf8(output.stdout)?;
         assert_eq!(
             prompt.contains("Co-authored-by: Codex <noreply@openai.com>"),
-            enabled
+            enabled,
+            "enabled={enabled}"
         );
         assert!(!prompt.contains("attribution is disabled for the current workspace"));
     }

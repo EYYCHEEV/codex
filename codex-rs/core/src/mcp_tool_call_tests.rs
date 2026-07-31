@@ -1374,7 +1374,7 @@ async fn codex_apps_auth_elicitation_feature_disabled_returns_original_result() 
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        &turn_context,
+        &StepContext::for_test(Arc::clone(&turn_context)),
         turn_context.approval_policy(),
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
@@ -1399,7 +1399,7 @@ async fn codex_apps_auth_elicitation_disallowed_by_policy_returns_original_resul
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        &turn_context,
+        &StepContext::for_test(Arc::clone(&turn_context)),
         AskForApproval::Never,
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
@@ -1435,7 +1435,7 @@ async fn codex_apps_auth_elicitation_granular_mcp_disabled_returns_original_resu
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        &turn_context,
+        &StepContext::for_test(Arc::clone(&turn_context)),
         turn_context.approval_policy(),
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
@@ -1461,7 +1461,7 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation() {
         async move {
             maybe_request_codex_apps_auth_elicitation(
                 &session,
-                &turn_context,
+                &StepContext::for_test(Arc::clone(&turn_context)),
                 turn_context.approval_policy(),
                 "call_123",
                 CODEX_APPS_MCP_SERVER_NAME,

@@ -51,7 +51,6 @@ use codex_analytics::ImagePreparationMetadata;
 use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::TurnCodexErrorFact;
 use codex_async_utils::OrCancelExt;
-use codex_core_skills::injection::HostSkillsCatalogInWorldState;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_execpolicy::prefix_rule_migration;
@@ -3186,24 +3185,6 @@ impl Session {
         .await
     }
 
-    pub(crate) async fn capture_step_context_with_required_mcp_servers(
-        self: &Arc<Self>,
-        turn_context: Arc<TurnContext>,
-        cancellation_token: &CancellationToken,
-        required_servers: &[String],
-    ) -> CodexResult<Arc<StepContext>> {
-        let setup = self
-            .services
-            .model_client
-            .current_client_setup(
-                Some(&turn_context.model_info.slug),
-                Some(&self.session_id().to_string()),
-            )
-            .await?;
-        self.capture_step_context_inner(turn_context, &setup, cancellation_token, required_servers)
-            .await
-    }
-
     pub(crate) async fn capture_step_context_for_setup(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
@@ -3307,6 +3288,13 @@ impl Session {
         }
         .or_cancel(cancellation_token)
         .await?;
+        let mcp_resource_client = McpResourceClient::new(Arc::clone(&mcp));
+        self.services
+            .thread_extension_data
+            .insert(mcp_resource_client.clone());
+        self.services
+            .session_extension_data
+            .insert(mcp_resource_client);
         let tool_router = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
@@ -3783,14 +3771,14 @@ impl Session {
             );
         }
         // Render the active mode after the usage hint so it can override that hint.
+        let mut initial_model_switch = None;
         let mut initial_multi_agent_mode = None;
         for fragment in world_state.render_full() {
             match fragment.role() {
                 "developer"
                     if fragment.markers().0 == ModelSwitchInstructions::type_markers().0 =>
                 {
-                    // New-model instructions must precede the rest of the developer context.
-                    developer_sections.insert(0, fragment.render());
+                    initial_model_switch = Some(fragment);
                 }
                 "developer" if fragment.markers().0 == MULTI_AGENT_MODE_OPEN_TAG => {
                     initial_multi_agent_mode = Some(fragment);
@@ -3807,6 +3795,9 @@ impl Session {
         }
 
         let mut items = Vec::with_capacity(4);
+        if let Some(initial_model_switch) = initial_model_switch {
+            items.push(initial_model_switch.into_boxed_response_item());
+        }
         if let Some(developer_message) =
             crate::context_manager::updates::build_developer_update_item(developer_sections)
         {

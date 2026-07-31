@@ -8,7 +8,6 @@ use chrono::DateTime;
 use chrono::Utc;
 use codex_app_server_protocol::DesktopOnboardingEntrypoint;
 use codex_login::LoginOnboardingEntrypoint;
-use codex_model_provider::BearerAuthProvider;
 use codex_model_provider::is_supported_amazon_bedrock_region;
 
 mod managed_accounts;

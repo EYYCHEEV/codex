@@ -3446,7 +3446,9 @@ mod tests {
             thread_id: conversation_id,
             thread: conversation,
             ..
-        } = thread_manager.start_thread(config).await?;
+        } = thread_manager
+            .start_thread(codex_core::StartThreadOptions::new(config))
+            .await?;
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             tx,

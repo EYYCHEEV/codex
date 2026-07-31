@@ -424,7 +424,7 @@ async fn try_start_turn_if_idle_omits_oversized_skill_mentioned_by_trusted_goal_
         GOAL_BODY,
     ));
     test.codex
-        .try_start_turn_if_idle(vec![goal_input])
+        .try_start_turn_if_idle(vec![TurnInput::ResponseItem(goal_input)])
         .await
         .expect("idle goal should start a turn");
 

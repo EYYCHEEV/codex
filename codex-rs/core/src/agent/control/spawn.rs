@@ -287,6 +287,8 @@ impl AgentControl {
             .get_resumed_session_sources()
             .unwrap_or((stored_source, None));
         if let Some(role_name) = session_source.get_agent_role() {
+            let runtime_model_provider_id = config.model_provider_id.clone();
+            let runtime_model_provider = config.model_provider.clone();
             let runtime_approval_policy = config.permissions.approval_policy.value();
             let runtime_approvals_reviewer = config.approvals_reviewer;
             let runtime_cwd = config.cwd.clone();
@@ -306,6 +308,8 @@ impl AgentControl {
             apply_role_to_config_for_multi_agent_v2(&mut config, Some(&role_name))
                 .await
                 .map_err(CodexErr::InvalidRequest)?;
+            config.model_provider_id = runtime_model_provider_id;
+            config.model_provider = runtime_model_provider;
             config
                 .permissions
                 .approval_policy

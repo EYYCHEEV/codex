@@ -270,7 +270,7 @@ Output:
 4
 5
 6
-.*…137224 tokens truncated.*
+.*tokens truncated.*
 99999
 100000
 $"#;
@@ -339,10 +339,9 @@ async fn tool_call_output_truncated_only_once() -> Result<()> {
     Ok(())
 }
 
-// Verifies that an MCP tool call result exceeding the model formatting limits
-// is truncated before being sent back to the model.
+// Verifies that an oversized MCP call/output pair is omitted together.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> {
+async fn oversized_mcp_call_output_pair_is_omitted_from_model_context() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -427,20 +426,14 @@ async fn mcp_tool_call_output_exceeds_limit_truncated_for_model() -> Result<()> 
         )
         .await?;
 
-    // The MCP tool call output is converted to a function_call_output for the model.
-    let output = mock2
-        .single_request()
-        .function_call_output_text(call_id)
-        .context("function_call_output present for rmcp call")?;
+    let request = mock2.single_request();
+    let oversized_pair: Vec<_> = request
+        .input()
+        .into_iter()
+        .filter(|item| item.get("call_id").and_then(Value::as_str) == Some(call_id))
+        .collect();
 
-    assert!(
-        !output.contains("Total output lines:"),
-        "MCP output should not include line-based truncation header: {output}"
-    );
-
-    let truncated_pattern = r#"(?s)^Wall time: [0-9]+(?:\.[0-9]+)? seconds\nOutput:\n\{"echo":\s*"ECHOING: long-message-with-newlines-.*tokens truncated.*long-message-with-newlines-.*$"#;
-    assert_regex_match(truncated_pattern, &output);
-    assert!(output.len() < 2600, "{}", output.len());
+    assert_eq!(oversized_pair, Vec::<Value>::new());
 
     Ok(())
 }

@@ -160,7 +160,6 @@ sandbox_mode = "danger-full-access"
 {chatgpt_base_url_line}
 {forced_line}
 {forced_workspace_line}
-{chatgpt_base_url_line}
 
 model_provider = "{model_provider_id}"
 
@@ -240,7 +239,7 @@ pub(super) async fn seed_managed_accounts(
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     for (email, workspace_id) in accounts {
@@ -1172,7 +1171,7 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     manager
@@ -1310,7 +1309,7 @@ async fn account_list_usage_only_skips_oauth_and_maps_missing_plan_to_unknown() 
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let mut tokens = TokenData::default();

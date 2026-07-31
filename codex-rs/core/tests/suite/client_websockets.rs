@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use codex_api::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 use codex_api::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
-use codex_core::CodexErr;
 use codex_core::CodexResponsesMetadata;
 use codex_core::ModelClient;
 use codex_core::ModelClientSession;
@@ -26,6 +25,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -1600,7 +1600,7 @@ async fn websocket_handshake_usage_limit_preserves_rate_limits() {
         Err(error) => error,
     };
 
-    let CodexErr::UsageLimitReached(error) = error else {
+    let CodexErrorDetails::UsageLimitReached(error) = error.details() else {
         panic!("expected usage-limit error");
     };
     let snapshot = error.rate_limits.as_deref().expect("rate-limit snapshot");
