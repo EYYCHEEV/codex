@@ -314,6 +314,7 @@ async fn current_time_reminder_is_refreshed_after_compaction() -> Result<()> {
     .await;
     let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     model_provider.name = "OpenAI-compatible test provider".to_string();
+    model_provider.requires_openai_auth = false;
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;
     let test = test_codex()

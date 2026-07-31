@@ -1754,10 +1754,7 @@ async fn stdio_image_responses_resize_large_image() -> anyhow::Result<()> {
         "data:image/png;base64,{}",
         BASE64_STANDARD.encode(encoded.into_inner())
     );
-    let tool_arguments = serde_json::to_string(&json!({
-        "scenario": "image_only",
-        "data_url": image_data_url,
-    }))?;
+    let tool_arguments = serde_json::to_string(&json!({"scenario": "image_only"}))?;
 
     mount_sse_once(
         &server,
@@ -1788,7 +1785,14 @@ async fn stdio_image_responses_resize_large_image() -> anyhow::Result<()> {
             insert_mcp_server(
                 config,
                 server_name,
-                stdio_transport(rmcp_test_server_bin, /*env*/ None, Vec::new()),
+                stdio_transport(
+                    rmcp_test_server_bin,
+                    Some(HashMap::from([(
+                        "MCP_TEST_IMAGE_DATA_URL".to_string(),
+                        image_data_url,
+                    )])),
+                    Vec::new(),
+                ),
                 TestMcpServerOptions {
                     environment_id: remote_aware_environment_id(),
                     ..Default::default()

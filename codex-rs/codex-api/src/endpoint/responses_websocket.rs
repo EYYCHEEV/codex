@@ -6,6 +6,7 @@ use crate::common::SafetyBufferingTreatment;
 use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 use crate::error::ApiError;
 use crate::provider::Provider;
+use crate::rate_limits::has_rate_limit_data;
 use crate::rate_limits::parse_all_rate_limits;
 use crate::rate_limits::parse_rate_limit_event;
 use crate::safety_buffering::treatment_from_headers;
@@ -591,7 +592,10 @@ async fn connect_websocket(
         .get(OPENAI_MODEL_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(ToString::to_string);
-    let rate_limits = parse_all_rate_limits(response.headers());
+    let rate_limits = parse_all_rate_limits(response.headers())
+        .into_iter()
+        .filter(has_rate_limit_data)
+        .collect();
     if let Some(turn_state) = turn_state
         && let Some(header_value) = response
             .headers()

@@ -155,6 +155,7 @@ async fn refresh_token_honors_respect_system_proxy() -> Result<()> {
         agent_identity: None,
         personal_access_token: None,
         bedrock_api_key: None,
+        managed_chatgpt: None,
     };
     save_auth(
         codex_home.path(),
@@ -1516,7 +1517,7 @@ impl RefreshTokenTestContext {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await
     }

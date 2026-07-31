@@ -47,8 +47,8 @@ use rmcp::model::ReadResourceResult;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::ResolvedMcpCatalog;
 use crate::CodexAppsToolsCacheKey;
+use crate::ResolvedMcpCatalog;
 use crate::connection_manager::McpConnectionSet;
 use crate::runtime::McpPublicationGate;
 use crate::runtime::McpRuntimeContext;

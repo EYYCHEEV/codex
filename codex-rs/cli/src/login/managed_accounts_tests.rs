@@ -369,7 +369,7 @@ async fn malformed_chatgpt_tokens_do_not_report_logged_in() {
         None,
         None,
         super::AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let auth = manager
@@ -421,7 +421,7 @@ async fn external_chatgpt_status_hides_preserved_managed_pool() {
         None,
         None,
         super::AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let managed = managed_oauth_credentials(
@@ -464,7 +464,7 @@ async fn external_chatgpt_status_hides_preserved_managed_pool() {
         None,
         None,
         super::AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
 
@@ -546,7 +546,7 @@ async fn logout_all_removes_file_api_key_revealed_by_external_overlay() {
         None,
         None,
         super::AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
 
@@ -587,7 +587,7 @@ async fn cached_non_pooled_auth_does_not_bypass_terminal_pool_picker() {
         None,
         None,
         super::AuthKeyringBackendKind::Direct,
-        None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     for credentials in [

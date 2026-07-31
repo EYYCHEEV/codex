@@ -124,6 +124,7 @@ where
 async fn fetch_managed_login_status_account(
     auth_manager: Arc<AuthManager>,
     chatgpt_base_url: &str,
+    http_client_factory: codex_http_client::HttpClientFactory,
     account: ManagedChatgptAccountView,
 ) -> Option<ManagedStatusFetch> {
     const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -154,24 +155,11 @@ async fn fetch_managed_login_status_account(
         }
     };
     let identity = snapshot.identity_key.clone();
-    let client = match BackendClient::from_auth(chatgpt_base_url.to_string(), &snapshot.auth) {
-        Ok(client) => client,
-        Err(_) => {
-            return Some(ManagedStatusFetch {
-                identity,
-                credential_revision: snapshot.account_revision,
-                state_revision: snapshot.account_state_revision,
-                observation: ManagedChatgptStatusObservation {
-                    observed_at: chrono::Utc::now(),
-                    rate: ManagedChatgptRateObservation::Unavailable {
-                        reason: "backend client unavailable".to_string(),
-                    },
-                    token: ManagedChatgptTokenObservation::NotObserved,
-                },
-                reset_credits: None,
-            });
-        }
-    };
+    let client = BackendClient::from_auth(
+        chatgpt_base_url.to_string(),
+        &snapshot.auth,
+        http_client_factory,
+    );
 
     let (rate, reset_credits) = match tokio::time::timeout(
         FETCH_TIMEOUT,
@@ -246,6 +234,7 @@ async fn fetch_managed_login_status_account(
 async fn refresh_managed_login_status(
     auth_manager: Arc<AuthManager>,
     chatgpt_base_url: &str,
+    http_client_factory: codex_http_client::HttpClientFactory,
     accounts: &[ManagedChatgptAccountView],
 ) -> HashMap<String, ResetCreditPresentation> {
     const CONCURRENCY_LIMIT: usize = 3;
@@ -254,7 +243,16 @@ async fn refresh_managed_login_status(
     let fetched = run_bounded(accounts.to_vec(), CONCURRENCY_LIMIT, move |account| {
         let auth_manager = Arc::clone(&task_auth_manager);
         let base_url = base_url.clone();
-        async move { fetch_managed_login_status_account(auth_manager, &base_url, account).await }
+        let http_client_factory = http_client_factory.clone();
+        async move {
+            fetch_managed_login_status_account(
+                auth_manager,
+                &base_url,
+                http_client_factory,
+                account,
+            )
+            .await
+        }
     })
     .await;
     let mut reset_credits = HashMap::new();
@@ -370,6 +368,7 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
         let reset_credits = refresh_managed_login_status(
             Arc::clone(&auth_projection.auth_manager),
             &config.chatgpt_base_url,
+            config.http_client_factory(),
             &managed.accounts,
         )
         .await;

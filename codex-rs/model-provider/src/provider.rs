@@ -269,7 +269,7 @@ pub(crate) async fn resolve_provider_request_setup(
     scope: ProviderAuthScope,
 ) -> codex_protocol::error::Result<ProviderRequestSetup> {
     let first_party_auth = provider_uses_first_party_auth_path(provider);
-    let effective_manager_auth = if first_party_auth {
+    let effective_manager_auth = if first_party_auth || provider.has_command_auth() {
         match auth_manager.as_ref() {
             Some(manager) => match manager.auth_cached() {
                 Some(auth) => Some(auth),
@@ -730,7 +730,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let managed_id = auth_manager
@@ -788,7 +788,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let identity = auth_manager
@@ -839,7 +839,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let identity = auth_manager
@@ -895,7 +895,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         let first_id = pool_manager
@@ -1042,7 +1042,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         pool_manager
@@ -1096,7 +1096,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         auth_manager
@@ -1171,7 +1171,7 @@ mod tests {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await;
         auth_manager

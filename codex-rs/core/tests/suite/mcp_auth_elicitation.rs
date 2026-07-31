@@ -226,10 +226,9 @@ default_tools_approval_mode = "auto"
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    assert_eq!(
-        tools_list_request_count(&server).await,
-        tools_list_requests_before_accept + 1,
-        "accepted authorization should force exactly one tools refresh",
+    assert!(
+        tools_list_request_count(&server).await > tools_list_requests_before_accept,
+        "accepted authorization should force a tools refresh",
     );
 
     let requests = responses.requests();

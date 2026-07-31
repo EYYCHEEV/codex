@@ -35,9 +35,9 @@ pub struct McpResourceClient {
     binding: Arc<McpBinding>,
 }
 
-/// Opaque identity for the manager currently used by an MCP resource client.
+/// Opaque identity for the connection set currently used by an MCP resource client.
 #[derive(Clone)]
-pub struct McpResourceClientCacheKey(Weak<McpBinding>);
+pub struct McpResourceClientCacheKey(Weak<crate::connection_manager::McpConnectionSet>);
 
 impl PartialEq for McpResourceClientCacheKey {
     fn eq(&self, other: &Self) -> bool {
@@ -61,9 +61,9 @@ impl McpResourceClient {
         Self { binding }
     }
 
-    /// Returns the identity of the captured binding.
+    /// Returns the identity of the captured connection set.
     pub fn cache_key(&self) -> McpResourceClientCacheKey {
-        McpResourceClientCacheKey(Arc::downgrade(&self.binding))
+        McpResourceClientCacheKey(self.binding.connection_cache_key())
     }
 
     /// Returns whether the captured binding contains the named server.
@@ -120,31 +120,25 @@ fn resource_content_from_rmcp(content: rmcp::model::ResourceContents) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_config::Constrained;
-    use codex_protocol::models::PermissionProfile;
-    use codex_protocol::protocol::AskForApproval;
 
-    fn test_manager() -> Arc<McpConnectionManager> {
-        Arc::new(
-            McpConnectionManager::new_uninitialized_with_permission_profile(
-                &Constrained::allow_any(AskForApproval::OnRequest),
-                &PermissionProfile::default(),
-                /*prefix_mcp_tool_names*/ true,
-            ),
-        )
+    fn test_binding() -> Arc<McpBinding> {
+        let config = crate::mcp::tests::test_mcp_config(
+            std::env::temp_dir().join("codex-resource-client-test"),
+        );
+        Arc::new(McpBinding::empty(Arc::new(config)))
     }
 
     #[tokio::test]
-    async fn resource_client_retains_exact_manager_snapshot_and_cache_identity() {
-        let first_manager = test_manager();
-        let first = McpResourceClient::new(Arc::clone(&first_manager));
+    async fn resource_client_retains_exact_binding_and_cache_identity() {
+        let first_binding = test_binding();
+        let first = McpResourceClient::new(Arc::clone(&first_binding));
         let first_clone = first.clone();
-        let replacement = McpResourceClient::new(test_manager());
+        let replacement = McpResourceClient::new(test_binding());
 
         assert!(first.cache_key() == first_clone.cache_key());
         assert!(first.cache_key() != replacement.cache_key());
 
-        drop(first_manager);
+        drop(first_binding);
         assert!(first.cache_key().0.upgrade().is_some());
         assert!(!first.has_server("replacement-only").await);
     }

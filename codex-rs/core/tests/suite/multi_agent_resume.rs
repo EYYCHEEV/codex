@@ -27,8 +27,8 @@ const INITIAL_TASK: &str = "inspect the repository";
 const FOLLOWUP_PROMPT: &str = "continue the durable worker";
 const FOLLOWUP_TASK: &str = "inspect the tests too";
 const ROLE_NAME: &str = "durable_worker";
-const ROLE_MODEL: &str = "gpt-5.4";
-const ROLE_MODEL_PROVIDER_ID: &str = "mock";
+const ROLE_MODEL: &str = "gpt-5.6-sol";
+const ROLE_MODEL_PROVIDER_ID: &str = "openai";
 const ROLE_DEVELOPER_INSTRUCTIONS: &str = "Keep the durable worker role configuration.";
 
 fn decoded_body(request: &wiremock::Request) -> Option<Vec<u8>> {
@@ -65,10 +65,7 @@ fn request_has_input_type(request: &wiremock::Request, input_type: &str) -> bool
         })
 }
 
-fn configure_multi_agent_v2_with_role(
-    config: &mut codex_core::config::Config,
-    model_provider_base_url: &str,
-) {
+fn configure_multi_agent_v2_with_role(config: &mut codex_core::config::Config) {
     config
         .features
         .enable(Feature::Collab)
@@ -81,7 +78,7 @@ fn configure_multi_agent_v2_with_role(
     std::fs::write(
         &role_path,
         format!(
-            "model = \"{ROLE_MODEL}\"\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"{ROLE_DEVELOPER_INSTRUCTIONS}\"\nsandbox_mode = \"read-only\"\nmodel_provider = \"mock\"\n\n[model_providers.mock]\nname = \"mock\"\nbase_url = \"{model_provider_base_url}\"\nenv_key = \"PATH\"\nwire_api = \"responses\"\n"
+            "model = \"{ROLE_MODEL}\"\nmodel_reasoning_effort = \"high\"\ndeveloper_instructions = \"{ROLE_DEVELOPER_INSTRUCTIONS}\"\nsandbox_mode = \"read-only\"\n"
         ),
     )
     .expect("write durable worker role config");
@@ -145,10 +142,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     )
     .await;
 
-    let initial_model_provider_base_url = format!("{}/v1", server.uri());
-    let mut initial_builder = test_codex().with_config(move |config| {
-        configure_multi_agent_v2_with_role(config, &initial_model_provider_base_url);
-    });
+    let mut initial_builder = test_codex().with_config(configure_multi_agent_v2_with_role);
     let initial = initial_builder.build_with_auto_env(&server).await?;
     let root_thread_id = initial.session_configured.thread_id;
     let home = initial.home.clone();
@@ -260,10 +254,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     )
     .await;
 
-    let resumed_model_provider_base_url = format!("{}/v1", server.uri());
-    let mut resume_builder = test_codex().with_config(move |config| {
-        configure_multi_agent_v2_with_role(config, &resumed_model_provider_base_url);
-    });
+    let mut resume_builder = test_codex().with_config(configure_multi_agent_v2_with_role);
     let resumed = resume_builder.resume(&server, home, rollout_path).await?;
     assert_eq!(
         resumed.thread_manager.list_thread_ids().await,

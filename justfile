@@ -111,6 +111,7 @@ bench-e2e:
     bazel test --compilation_mode=opt --cache_test_results=no --test_output=streamed //codex-rs:e2e-benchmarks
 
 # Run Bazel-backed end-to-end macrobenchmarks once per case with release-like
+
 # Rust cfg paths but fastbuild codegen.
 bench-e2e-smoke:
     # Avoid optimizer cost because smoke runs only check that benchmarks work.

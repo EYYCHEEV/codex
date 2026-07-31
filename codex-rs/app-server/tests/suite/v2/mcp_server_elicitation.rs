@@ -867,6 +867,7 @@ apps = true
 name = "Mock provider for test"
 base_url = "{responses_server_uri}/v1"
 wire_api = "responses"
+requires_openai_auth = true
 request_max_retries = 0
 stream_max_retries = 0
 "#

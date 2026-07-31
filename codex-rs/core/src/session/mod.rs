@@ -3207,6 +3207,13 @@ impl Session {
             )
             .or_cancel(cancellation_token)
             .await?;
+        let mcp_resource_client = McpResourceClient::new(Arc::clone(&mcp));
+        self.services
+            .thread_extension_data
+            .insert(mcp_resource_client.clone());
+        self.services
+            .session_extension_data
+            .insert(mcp_resource_client);
         let (mcp_tools, tool_router) = turn::built_tools(
             self.as_ref(),
             turn_context.as_ref(),
@@ -3714,14 +3721,14 @@ impl Session {
             }
         }
         // Render the active mode after the usage hint so it can override that hint.
+        let mut initial_model_switch = None;
         let mut initial_multi_agent_mode = None;
         for fragment in world_state.render_full() {
             match fragment.role() {
                 "developer"
                     if fragment.markers().0 == ModelSwitchInstructions::type_markers().0 =>
                 {
-                    // New-model instructions must precede the rest of the developer context.
-                    developer_sections.insert(0, fragment.render());
+                    initial_model_switch = Some(fragment);
                 }
                 "developer" if fragment.markers().0 == MULTI_AGENT_MODE_OPEN_TAG => {
                     initial_multi_agent_mode = Some(fragment);
@@ -3736,6 +3743,9 @@ impl Session {
             multi_agents::usage_hint_text(turn_context, &session_source);
 
         let mut items = Vec::with_capacity(4);
+        if let Some(initial_model_switch) = initial_model_switch {
+            items.push(initial_model_switch.into_boxed_response_item());
+        }
         if let Some(developer_message) =
             crate::context_manager::updates::build_developer_update_item(developer_sections)
         {

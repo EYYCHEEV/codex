@@ -10,9 +10,7 @@ pub(super) struct ManagedChatgptAttemptContext {
 pub(super) fn managed_chatgpt_failure(error: &CodexErr) -> Option<ManagedChatgptFailure> {
     match error.details() {
         CodexErrorDetails::RefreshTokenFailed(_) => Some(ManagedChatgptFailure::AuthInvalid),
-        CodexErrorDetails::UnexpectedStatus(error)
-            if error.status == StatusCode::UNAUTHORIZED =>
-        {
+        CodexErrorDetails::UnexpectedStatus(error) if error.status == StatusCode::UNAUTHORIZED => {
             Some(ManagedChatgptFailure::AuthInvalid)
         }
         CodexErrorDetails::UsageLimitReached(error) => match error.rate_limit_reached_type {

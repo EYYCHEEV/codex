@@ -5124,6 +5124,13 @@ fn write_remote_plugin_catalog_config(
         format!(
             r#"
 chatgpt_base_url = "{base_url}"
+model_provider = "mock_provider"
+
+[model_providers.mock_provider]
+name = "Mock provider for plugin catalog tests"
+base_url = "{base_url}"
+wire_api = "responses"
+requires_openai_auth = false
 
 [features]
 plugins = true

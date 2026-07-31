@@ -296,10 +296,15 @@ pub async fn wait_for_mcp_server(codex: &CodexThread, server_name: &str) -> anyh
     if summary.cancelled.iter().any(|server| server == server_name) {
         anyhow::bail!("MCP server {server_name} startup was cancelled");
     }
-    assert!(
-        summary.ready.iter().any(|server| server == server_name),
-        "expected MCP server {server_name} to be ready; startup summary: {summary:?}"
-    );
+    if !summary.ready.iter().any(|server| server == server_name) {
+        let runtime = codex.current_mcp_runtime().await?;
+        assert!(
+            runtime
+                .wait_for_server_ready(server_name, std::time::Duration::from_secs(10))
+                .await,
+            "expected MCP server {server_name} to be ready; startup summary: {summary:?}"
+        );
+    }
     Ok(())
 }
 

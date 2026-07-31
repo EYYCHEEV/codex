@@ -337,9 +337,7 @@ impl AuthManager {
 
     pub async fn logout_all_managed_chatgpt(&self) -> std::io::Result<Vec<String>> {
         if let Some(overlay) = load_external_chatgpt_auth(&self.codex_home)? {
-            if let Err(err) =
-                revoke_auth_tokens(Some(&overlay), &self.auth_route_config).await
-            {
+            if let Err(err) = revoke_auth_tokens(Some(&overlay), &self.auth_route_config).await {
                 tracing::warn!("failed to revoke external ChatGPT auth during logout-all: {err}");
             }
             self.clear_external_auth();

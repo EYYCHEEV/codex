@@ -1,7 +1,6 @@
 use super::*;
-use crate::McpBinding;
-use crate::CodexAppsToolsCache;
 use crate::CodexAppsToolsCacheKey;
+use crate::McpBinding;
 use crate::codex_apps_tools_cache_key;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestManager;
@@ -31,6 +30,7 @@ use codex_config::McpServerToolConfig;
 use codex_config::types::AuthKeyringBackendKind;
 use codex_config::types::OAuthCredentialsStoreMode;
 use codex_connectors::ConnectorRuntimeContext;
+use codex_connectors::ConnectorRuntimeContextKey;
 use codex_connectors::ConnectorRuntimeFetchSource;
 use codex_connectors::ConnectorRuntimeManager;
 use codex_exec_server_test_support::environment_manager_without_environments;
@@ -1863,12 +1863,7 @@ fn cancel_active_startups_preserves_lazy_and_completed_clients() {
     let completed_token = CancellationToken::new();
     for (name, lazy_startup, startup_complete, cancel_token) in [
         ("active", false, false, active_token.clone()),
-        (
-            CODEX_APPS_MCP_SERVER_NAME,
-            true,
-            false,
-            lazy_token.clone(),
-        ),
+        (CODEX_APPS_MCP_SERVER_NAME, true, false, lazy_token.clone()),
         ("completed", false, true, completed_token.clone()),
     ] {
         manager.insert_test_client(
@@ -2588,10 +2583,7 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
         oauth_resource: None,
         tools: HashMap::new(),
     };
-    let mcp_servers = HashMap::from([(
-        "slow".to_string(),
-        EffectiveMcpServer::configured(config),
-    )]);
+    let mcp_servers = HashMap::from([("slow".to_string(), EffectiveMcpServer::configured(config))]);
     let (tx_event, rx_event) = async_channel::unbounded();
     let codex_home = tempdir().expect("tempdir");
     let cancel_token = CancellationToken::new();
@@ -2615,8 +2607,7 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
             codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                /*account_id*/ None,
-                /*chatgpt_user_id*/ None,
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
             ),
             supports_openai_form_elicitation: false,
             auth: None,
@@ -2699,8 +2690,7 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
             codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
-                /*account_id*/ None,
-                /*chatgpt_user_id*/ None,
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
             ),
             supports_openai_form_elicitation: false,
             auth: None,

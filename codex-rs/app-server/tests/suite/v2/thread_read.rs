@@ -736,6 +736,9 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         .loader_overrides(loader_overrides.clone())
         .build()
         .await?;
+    let environment_manager = Arc::new(EnvironmentManager::without_environments(
+        config.http_client_factory(),
+    ));
     let client = in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
         config: Arc::new(config),
@@ -749,7 +752,7 @@ async fn thread_turns_list_reads_store_history_without_rollout_path() -> Result<
         state_db: None,
         // This store-backed read regression only needs thread metadata and
         // history, so avoid registering host-local skill watchers.
-        environment_manager: Arc::new(EnvironmentManager::without_environments()),
+        environment_manager,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),
         enable_codex_api_key_env: false,

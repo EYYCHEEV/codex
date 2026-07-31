@@ -2360,6 +2360,7 @@ impl AuthManager {
 
     /// Create an AuthManager with a specific CodexAuth, for testing only.
     pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
+        let test_auth_manager_id = NEXT_DUMMY_AUTH_ID.fetch_add(1, Ordering::Relaxed);
         let cached = CachedAuth {
             external_chatgpt_fingerprint: auth_external_chatgpt_fingerprint(Some(&auth)),
             auth: Some(auth),
@@ -2369,11 +2370,11 @@ impl AuthManager {
         let (auth_change_tx, _auth_change_rx) = watch::channel(0);
 
         Arc::new(Self {
-            codex_home: PathBuf::from("non-existent"),
+            codex_home: PathBuf::from(format!("dummy-auth-manager-{test_auth_manager_id}")),
             inner: RwLock::new(cached),
             auth_change_tx,
             enable_codex_api_key_env: false,
-            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+            auth_credentials_store_mode: AuthCredentialsStoreMode::Ephemeral,
             keyring_backend_kind: AuthKeyringBackendKind::default(),
             forced_chatgpt_workspace_id: RwLock::new(None),
             chatgpt_base_url: None,
@@ -2859,13 +2860,20 @@ impl AuthManager {
     }
 
     pub fn clear_external_auth(&self) {
-        if let Ok(mut external_auth) = self.external_auth.write() {
-            external_auth.take();
+        let cleared_external_auth = self
+            .external_auth
+            .write()
+            .is_ok_and(|mut external_auth| external_auth.take().is_some());
+        let cleared_overlay = match delete_external_chatgpt_auth(&self.codex_home) {
+            Ok(cleared) => cleared,
+            Err(err) => {
+                tracing::warn!("failed to clear external ChatGPT auth overlay: {err}");
+                false
+            }
+        };
+        if cleared_external_auth || cleared_overlay {
+            self.set_cached_auth(/*new_auth*/ None);
         }
-        if let Err(err) = delete_external_chatgpt_auth(&self.codex_home) {
-            tracing::warn!("failed to clear external ChatGPT auth overlay: {err}");
-        }
-        self.set_cached_auth(/*new_auth*/ None);
     }
 
     pub fn set_forced_chatgpt_workspace_id(&self, workspace_id: Option<Vec<String>>) {

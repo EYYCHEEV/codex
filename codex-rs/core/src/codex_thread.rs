@@ -215,8 +215,7 @@ pub struct ThreadRuntimeSnapshot {
     pub effective_auth: Option<codex_login::CodexAuth>,
     pub mcp: Arc<codex_mcp::McpBinding>,
     pub runtime_context: codex_mcp::McpRuntimeContext,
-    pub connector_directory_cache_key:
-        Option<codex_connectors::ConnectorDirectoryCacheKey>,
+    pub connector_directory_cache_key: Option<codex_connectors::ConnectorDirectoryCacheKey>,
     pub codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
 }
 
@@ -671,6 +670,31 @@ impl CodexThread {
         let config = self.session.get_config().await;
         let (mcp_config, runtime_context) = self.runtime_mcp_config_and_context(&config).await;
         (Arc::new(mcp_config), runtime_context)
+    }
+
+    /// Captures effective auth with the current MCP configuration without awaiting MCP startup.
+    pub async fn current_mcp_config_auth_and_runtime_context(
+        &self,
+    ) -> codex_protocol::error::Result<(
+        Arc<codex_mcp::McpConfig>,
+        Option<codex_login::CodexAuth>,
+        codex_mcp::McpRuntimeContext,
+    )> {
+        let turn_context = self.session.new_default_turn().await;
+        let setup = self
+            .session
+            .services
+            .model_client
+            .current_client_setup(
+                Some(&turn_context.model_info.slug),
+                Some(&self.session.session_id().to_string()),
+            )
+            .await?;
+        let (mcp_config, runtime_context) = self
+            .session
+            .runtime_mcp_config_and_context(&turn_context.config)
+            .await;
+        Ok((Arc::new(mcp_config), setup.effective_auth, runtime_context))
     }
 
     /// Returns one atomic provider/auth/MCP snapshot for this thread's default turn.

@@ -710,7 +710,6 @@ impl App {
         if self.chat_widget.managed_accounts().is_some() {
             self.refresh_managed_accounts_cache(app_server);
         }
-        self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
     }
 

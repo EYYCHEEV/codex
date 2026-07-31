@@ -89,7 +89,7 @@ mod tests {
     use codex_client::Response;
     use codex_client::StreamResponse;
     use codex_client::TransportError;
-    use codex_protocol::error::CodexErr;
+    use codex_protocol::error::CodexErrorDetails;
     use http::HeaderMap;
     use http::Method;
     use http::StatusCode;
@@ -334,13 +334,21 @@ mod tests {
         .await
         .expect_err("summarize request should fail");
 
-        let CodexErr::UsageLimitReached(usage_limit) = crate::map_api_error(error) else {
+        let mapped_error = crate::map_api_error(error);
+        let CodexErrorDetails::UsageLimitReached(usage_limit) = mapped_error.details() else {
             panic!("expected usage limit error");
         };
-        let rate_limits = usage_limit.rate_limits.expect("rate limit snapshot");
+        let rate_limits = usage_limit
+            .rate_limits
+            .as_ref()
+            .expect("rate limit snapshot");
         assert_eq!(rate_limits.limit_id.as_deref(), Some("codex_other"));
         assert_eq!(
-            rate_limits.primary.expect("primary window").used_percent,
+            rate_limits
+                .primary
+                .as_ref()
+                .expect("primary window")
+                .used_percent,
             100.0
         );
     }

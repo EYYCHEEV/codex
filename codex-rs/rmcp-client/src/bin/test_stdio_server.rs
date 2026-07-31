@@ -732,7 +732,10 @@ impl TestToolServer {
     }
 
     fn image_scenario_result(args: ImageScenarioArgs) -> Result<CallToolResult, McpError> {
-        let (mime_type, valid_data_b64) = if let Some(data_url) = &args.data_url {
+        let data_url = args
+            .data_url
+            .or_else(|| std::env::var("MCP_TEST_IMAGE_DATA_URL").ok());
+        let (mime_type, valid_data_b64) = if let Some(data_url) = data_url.as_deref() {
             parse_data_url(data_url).ok_or_else(|| {
                 McpError::invalid_params(
                     format!("invalid data_url for image_scenario tool: {data_url}"),

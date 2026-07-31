@@ -23,8 +23,7 @@ pub(crate) struct StepContext {
     /// Effective authentication selected atomically with this request step.
     pub(crate) effective_auth: Option<CodexAuth>,
     /// Exact connector directory identity selected with this request step.
-    pub(crate) connector_directory_cache_key:
-        Option<codex_connectors::ConnectorDirectoryCacheKey>,
+    pub(crate) connector_directory_cache_key: Option<codex_connectors::ConnectorDirectoryCacheKey>,
     /// Exact Codex Apps tool-catalog identity selected with this request step.
     pub(crate) codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
     /// The fixed MCP tool list used for this exact sampling request.

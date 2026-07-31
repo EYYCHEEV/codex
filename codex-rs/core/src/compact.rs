@@ -336,8 +336,7 @@ async fn run_compact_task_inner_impl(
                 return Err(e);
             }
             Err(e)
-                if committed
-                    && matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) =>
+                if committed && matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) =>
             {
                 sess.set_total_tokens_full(turn_context.as_ref()).await;
                 sess.track_turn_codex_error(turn_context.as_ref(), &e);
@@ -924,9 +923,7 @@ mod replay_safety_tests {
             Ok(ResponseEvent::OutputItemDone(compact_output(
                 "partial-compaction",
             ))),
-            Err(CodexErr::Stream(
-                "retryable committed failure".to_string(),
-            )),
+            Err(CodexErr::Stream("retryable committed failure".to_string())),
         ]);
         let should_not_run = response_stream(vec![Ok(completed())]);
 

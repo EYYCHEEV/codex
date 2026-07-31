@@ -114,7 +114,9 @@ async fn selected_executor_plugin_exposes_its_mcps_only_to_that_thread() -> Resu
     });
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&responses_server.uri())
-        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 1024")
+        .with_root_config(
+            "compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 1024\nmcp_oauth_credentials_store = \"file\"",
+        )
         .with_provider_config("supports_websockets = false")
         .write(codex_home.path())?;
     let codex_bin = toml::Value::String(

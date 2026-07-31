@@ -1,9 +1,9 @@
 use anyhow::Result;
 use app_test_support::ChatGptIdTokenClaims;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::encode_id_token;
 use app_test_support::to_response;
-use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::RequestId;
@@ -59,11 +59,13 @@ async fn first_turn_after_external_login_waits_for_recommended_plugins() -> Resu
     let responses_mock = responses::mount_sse_once(&server, response).await;
 
     let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        &server.uri(),
-        &apps_server.chatgpt_base_url,
-    )?;
+    MockResponsesConfig::new(&server.uri())
+        .with_root_config(&format!(
+            "chatgpt_base_url = \"{}\"",
+            apps_server.chatgpt_base_url
+        ))
+        .with_provider_config("requires_openai_auth = true")
+        .write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(

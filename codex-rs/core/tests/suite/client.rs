@@ -37,6 +37,7 @@ use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -272,6 +273,7 @@ async fn non_openai_responses_requests_include_item_ids_without_passthrough_meta
     let mut provider =
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
     provider.name = "Test Responses".to_string();
+    provider.requires_openai_auth = false;
     provider.base_url = Some(format!("{}/v1", server.uri()));
     provider.supports_websockets = false;
     let codex = test_codex()
@@ -1544,7 +1546,7 @@ async fn managed_chatgpt_refresh_retries_with_refreshed_account_header() {
         AuthCredentialsStoreMode::File,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
-        /*auth_route_config*/ None,
+        &codex_login::test_support::transport_default_auth_route_config(),
     )
     .await
     {
@@ -1611,7 +1613,7 @@ async fn current_mcp_runtime_returns_error_when_managed_pool_has_no_eligible_acc
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     auth_manager
@@ -1656,7 +1658,9 @@ async fn current_mcp_runtime_returns_error_when_managed_pool_has_no_eligible_acc
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
     );
-    let NewThread { thread: codex, .. } = thread_manager.start_thread(config).await?;
+    let NewThread { thread: codex, .. } = thread_manager
+        .start_thread(StartThreadOptions::new(config))
+        .await?;
 
     let recovery = auth_manager
         .recover_failed_attempt(
@@ -1677,8 +1681,8 @@ async fn current_mcp_runtime_returns_error_when_managed_pool_has_no_eligible_acc
         .expect_err("an ineligible managed pool should return an error");
     assert!(
         matches!(
-            &error,
-            CodexErr::Io(error)
+            error.details(),
+            CodexErrorDetails::Io(error)
                 if error.to_string()
                     == "managed ChatGPT account pool has no eligible account for this request"
         ),

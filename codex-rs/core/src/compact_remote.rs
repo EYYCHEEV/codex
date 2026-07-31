@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::compact::CompactedHistoryMetadata;
 use crate::client::ModelClientSession;
+use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;

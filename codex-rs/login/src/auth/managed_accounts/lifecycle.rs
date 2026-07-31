@@ -376,35 +376,33 @@ impl AuthManager {
             auth_change_tx: self.auth_change_tx.clone(),
             armed: true,
         };
-        let response = match create_default_auth_client(
-            &refresh_token_endpoint(),
-            &self.auth_route_config,
-        ) {
-            Ok(client) => request_chatgpt_token_refresh(refresh_token, &client)
-                .await
-                .and_then(|response| {
-                    for (field, token) in [
-                        ("access_token", response.access_token.as_deref()),
-                        ("refresh_token", response.refresh_token.as_deref()),
-                    ] {
-                        if token.is_some_and(|token| token.trim().is_empty()) {
-                            return Err(RefreshTokenError::Transient(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!("managed ChatGPT refresh returned a blank {field}"),
-                            )));
+        let response =
+            match create_default_auth_client(&refresh_token_endpoint(), &self.auth_route_config) {
+                Ok(client) => request_chatgpt_token_refresh(refresh_token, &client)
+                    .await
+                    .and_then(|response| {
+                        for (field, token) in [
+                            ("access_token", response.access_token.as_deref()),
+                            ("refresh_token", response.refresh_token.as_deref()),
+                        ] {
+                            if token.is_some_and(|token| token.trim().is_empty()) {
+                                return Err(RefreshTokenError::Transient(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("managed ChatGPT refresh returned a blank {field}"),
+                                )));
+                            }
                         }
-                    }
-                    let refreshed_id_token = response
-                        .id_token
-                        .as_deref()
-                        .map(parse_chatgpt_jwt_claims)
-                        .transpose()
-                        .map_err(std::io::Error::other)
-                        .map_err(RefreshTokenError::Transient)?;
-                    Ok((response, refreshed_id_token))
-                }),
-            Err(err) => Err(RefreshTokenError::Transient(std::io::Error::other(err))),
-        };
+                        let refreshed_id_token = response
+                            .id_token
+                            .as_deref()
+                            .map(parse_chatgpt_jwt_claims)
+                            .transpose()
+                            .map_err(std::io::Error::other)
+                            .map_err(RefreshTokenError::Transient)?;
+                        Ok((response, refreshed_id_token))
+                    }),
+                Err(err) => Err(RefreshTokenError::Transient(std::io::Error::other(err))),
+            };
         let (response, refreshed_id_token) = match response {
             Ok(response) => response,
             Err(err) => {
@@ -687,8 +685,7 @@ impl AuthManager {
         let Some(revoke_document) = tombstoned else {
             return Ok(false);
         };
-        if let Err(err) =
-            revoke_auth_tokens(Some(&revoke_document), &self.auth_route_config).await
+        if let Err(err) = revoke_auth_tokens(Some(&revoke_document), &self.auth_route_config).await
         {
             tracing::warn!("failed to revoke targeted managed ChatGPT account: {err}");
         }

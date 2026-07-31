@@ -198,7 +198,7 @@ pub(crate) async fn run_turn(
             Some(&sess.session_id().to_string()),
         )
         .await?;
-    let first_step_context = match sess
+    let mut first_step_context = match sess
         .capture_step_context_for_setup(Arc::clone(&turn_context), &first_request_setup)
         .or_cancel(&cancellation_token)
         .await
@@ -212,22 +212,31 @@ pub(crate) async fn run_turn(
     };
     if turn_context.apps_enabled()
         && !collect_explicit_app_ids(&collect_capability_mention_inputs(&input)).is_empty()
-        && let Err(err) = first_step_context
+    {
+        match first_step_context
             .mcp
             .hard_refresh_codex_apps_tools_cache()
             .await
-    {
-        warn!("failed to load explicitly requested Codex Apps tools: {err:#}");
+        {
+            Ok(_) => {
+                first_step_context = match sess
+                    .capture_step_context_for_setup(Arc::clone(&turn_context), &first_request_setup)
+                    .or_cancel(&cancellation_token)
+                    .await
+                {
+                    Ok(Ok(step_context)) => step_context,
+                    Ok(Err(err)) => return Err(err),
+                    Err(codex_async_utils::CancelErr::Cancelled) => {
+                        run_hooks_and_record_inputs(&sess, &turn_context, &input).await;
+                        return Err(CodexErr::TurnAborted);
+                    }
+                };
+            }
+            Err(err) => {
+                warn!("failed to load explicitly requested Codex Apps tools: {err:#}");
+            }
+        }
     }
-    let first_resource_client =
-        codex_mcp::McpResourceClient::new(Arc::clone(&first_step_context.mcp));
-    turn_extension_data.insert(first_resource_client.clone());
-    sess.services
-        .thread_extension_data
-        .insert(first_resource_client.clone());
-    sess.services
-        .session_extension_data
-        .insert(first_resource_client);
     // Keep the exact model-visible state used by this turn and its inline compactions.
     let (mut world_state, display_roots) = tokio::join!(
         sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),
@@ -1275,14 +1284,6 @@ async fn run_sampling_request(
                 (step_context, setup)
             }
         };
-        let resource_client = codex_mcp::McpResourceClient::new(Arc::clone(
-            &attempt_step_context.mcp,
-        ));
-        turn_store.insert(resource_client.clone());
-        sess.services
-            .thread_extension_data
-            .insert(resource_client.clone());
-        sess.services.session_extension_data.insert(resource_client);
         let router = Arc::clone(&attempt_step_context.tool_router);
         let tool_runtime = ToolCallRuntime::new(
             Arc::clone(&router),
@@ -1791,7 +1792,7 @@ fn can_fallback_rewindable_websocket_attempt(
     replay_state.is_rewindable()
         && matches!(err.details(), CodexErrorDetails::WebsocketClosed(_))
         && err.is_retryable()
-        && client_session.websocket_http_fallback_allowed()
+        && client_session.rewindable_websocket_fallback_allowed()
 }
 
 pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
@@ -2536,6 +2537,7 @@ async fn try_run_sampling_request(
         sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.as_ref())
             .await;
         let mut stream = stream_result??;
+        let defer_rewindable_output = client_session.rewindable_websocket_fallback_allowed();
         let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
             FuturesOrdered::new();
         let mut needs_follow_up = false;
@@ -2651,10 +2653,12 @@ async fn try_run_sampling_request(
                         )
                         .await;
                     }
-                    if response_item_replay_state(&item).is_rewindable() {
-                        let preempt_for_mailbox_mail =
-                            response_item_preempts_for_mailbox_mail(&item, plan_mode)
-                                && sess.input_queue.has_pending_mailbox_items().await;
+                    let preempt_for_mailbox_mail =
+                        response_item_preempts_for_mailbox_mail(&item, plan_mode)
+                            && sess.input_queue.has_pending_mailbox_items().await;
+                    if response_item_replay_state(&item).is_rewindable()
+                        && (defer_rewindable_output || preempt_for_mailbox_mail)
+                    {
                         pending_completed_response_items.push(PendingCompletedResponseItem {
                             item,
                             previously_streamed_item,

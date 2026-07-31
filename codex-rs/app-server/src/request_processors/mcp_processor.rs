@@ -124,14 +124,13 @@ impl McpRequestProcessor {
         let (auth, mcp_config, runtime_context) = match thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
-                let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
-                    internal_error(format!("failed to capture thread runtime: {err}"))
-                })?;
-                (
-                    snapshot.effective_auth,
-                    snapshot.mcp.config().clone(),
-                    snapshot.runtime_context,
-                )
+                let (mcp_config, auth, runtime_context) = thread
+                    .current_mcp_config_auth_and_runtime_context()
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!("failed to capture thread runtime: {err}"))
+                    })?;
+                (auth, mcp_config, runtime_context)
             }
             None => {
                 let auth = self.auth_manager.auth().await;
@@ -271,46 +270,41 @@ impl McpRequestProcessor {
         let request = request_id.clone();
 
         let outgoing = Arc::clone(&self.outgoing);
-        let (
-            mcp_config,
-            auth,
-            runtime_context,
-            threadless_mcp_manager,
-            codex_apps_tools_cache_key,
-        ) = match params.thread_id.as_deref() {
-            Some(thread_id) => {
-                let (_, thread) = self.load_thread(thread_id).await?;
-                let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
-                    internal_error(format!("failed to capture thread runtime: {err}"))
-                })?;
-                (
-                    snapshot.mcp.config().clone(),
-                    snapshot.effective_auth,
-                    snapshot.runtime_context,
-                    Some(self.thread_manager.mcp_manager()),
-                    Some(snapshot.codex_apps_tools_cache_key),
-                )
-            }
-            None => {
-                let mcp_manager = self.thread_manager.mcp_manager();
-                let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
-                let mcp_config = mcp_manager.runtime_config(&config).await;
-                let (auth, cache_key) = self
-                    .threadless_auth_and_codex_apps_cache_key(&mcp_config.chatgpt_base_url)
-                    .await?;
-                let runtime_context = McpRuntimeContext::new(
-                    self.thread_manager.environment_manager(),
-                    config.cwd.to_path_buf(),
-                );
-                (
-                    Arc::new(mcp_config),
-                    auth,
-                    runtime_context,
-                    Some(mcp_manager),
-                    Some(cache_key),
-                )
-            }
-        };
+        let (mcp_config, auth, runtime_context, threadless_mcp_manager, codex_apps_tools_cache_key) =
+            match params.thread_id.as_deref() {
+                Some(thread_id) => {
+                    let (_, thread) = self.load_thread(thread_id).await?;
+                    let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
+                        internal_error(format!("failed to capture thread runtime: {err}"))
+                    })?;
+                    (
+                        snapshot.mcp.config().clone(),
+                        snapshot.effective_auth,
+                        snapshot.runtime_context,
+                        Some(self.thread_manager.mcp_manager()),
+                        Some(snapshot.codex_apps_tools_cache_key),
+                    )
+                }
+                None => {
+                    let mcp_manager = self.thread_manager.mcp_manager();
+                    let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+                    let mcp_config = mcp_manager.runtime_config(&config).await;
+                    let (auth, cache_key) = self
+                        .threadless_auth_and_codex_apps_cache_key(&mcp_config.chatgpt_base_url)
+                        .await?;
+                    let runtime_context = McpRuntimeContext::new(
+                        self.thread_manager.environment_manager(),
+                        config.cwd.to_path_buf(),
+                    );
+                    (
+                        Arc::new(mcp_config),
+                        auth,
+                        runtime_context,
+                        Some(mcp_manager),
+                        Some(cache_key),
+                    )
+                }
+            };
 
         tokio::spawn(async move {
             Self::list_mcp_server_status_task(

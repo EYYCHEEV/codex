@@ -11,6 +11,7 @@ use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::TestAppServer;
 use app_test_support::write_chatgpt_auth;
+use app_test_support::write_models_cache;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
@@ -273,6 +274,7 @@ async fn send_installed_request(
 
 fn configured_codex_home(base_url: &str) -> Result<TempDir> {
     let codex_home = TempDir::new()?;
+    write_models_cache(codex_home.path())?;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(

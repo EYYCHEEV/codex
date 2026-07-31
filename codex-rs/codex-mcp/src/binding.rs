@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::Weak;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -91,12 +92,18 @@ impl McpBinding {
         self.connections.has_servers()
     }
 
+    pub(crate) fn connection_cache_key(&self) -> Weak<McpConnectionSet> {
+        Arc::downgrade(&self.connections)
+    }
+
     pub fn has_server(&self, server: &str) -> bool {
         self.connections.contains_server(server)
     }
 
     pub async fn wait_for_server_ready(&self, server: &str, timeout: std::time::Duration) -> bool {
-        self.connections.wait_for_server_ready(server, timeout).await
+        self.connections
+            .wait_for_server_ready(server, timeout)
+            .await
     }
 
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
@@ -104,9 +111,7 @@ impl McpBinding {
     }
 
     pub async fn hard_refresh_codex_apps_tools_cache(&self) -> Result<Vec<ToolInfo>> {
-        self.connections
-            .hard_refresh_codex_apps_tools_cache()
-            .await
+        self.connections.hard_refresh_codex_apps_tools_cache().await
     }
 
     pub async fn list_resources(

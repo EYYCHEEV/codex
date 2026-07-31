@@ -1970,6 +1970,7 @@ mod tests {
                 thread_id,
                 turn_id: "turn-1".to_string(),
                 item: canonical,
+                started_at_ms: None,
                 completed_at_ms: 0,
             }),
             EventMsg::SubAgentActivity(codex_protocol::protocol::SubAgentActivityEvent {

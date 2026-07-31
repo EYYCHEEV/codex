@@ -1063,6 +1063,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
                     .is_ok()
             );
             config.model_provider.name = "OpenAI (test)".to_string();
+            config.model_provider.requires_openai_auth = false;
             config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
             config.model_context_window = Some(100);
             config.model_auto_compact_token_limit = Some(90);

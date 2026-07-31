@@ -4,7 +4,6 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use rmcp::model::ListResourcesResult;
 use rmcp::model::PaginatedRequestParams;
 use rmcp::model::ReadResourceRequestParams;
 use rmcp::model::ReadResourceResult;
@@ -139,19 +138,6 @@ impl McpConnectionSet {
             }
         }
         templates
-    }
-
-    pub async fn list_resources(
-        &self,
-        server: &str,
-        params: Option<PaginatedRequestParams>,
-    ) -> Result<ListResourcesResult> {
-        let (managed, timeout) = self.client_by_name(server).await?;
-        managed
-            .client
-            .list_resources(params, timeout)
-            .await
-            .with_context(|| format!("resources/list failed for `{server}`"))
     }
 
     pub async fn read_resource(

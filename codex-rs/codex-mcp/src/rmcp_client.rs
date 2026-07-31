@@ -312,8 +312,8 @@ impl ManagedClientStartup {
         async move {
             let refresh_start = is_codex_apps_mcp_server.then(Instant::now);
             let startup_timeout = server
-                .configured_config()
-                .and_then(|config| config.startup_timeout_sec)
+                .config()
+                .startup_timeout_sec
                 .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
             let startup = run_with_startup_deadline(startup_timeout, async {
                 if let Err(error) = validate_mcp_server_name(&server_name) {

@@ -140,8 +140,7 @@ pub(crate) async fn handle_mcp_tool_call(
         arguments: arguments_value.clone(),
     };
 
-    let Some(prepared_call) = step_context.mcp.prepare_call(&server, &tool_name)
-    else {
+    let Some(prepared_call) = step_context.mcp.prepare_call(&server, &tool_name) else {
         let item_metadata =
             McpToolCallItemMetadata::from_tool_metadata(&server, /*metadata*/ None);
         let result = notify_mcp_tool_call_skip(

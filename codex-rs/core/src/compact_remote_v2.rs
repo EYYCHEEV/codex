@@ -29,7 +29,6 @@ use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
-use codex_protocol::auth::AuthMode;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -337,15 +336,6 @@ async fn run_remote_compaction_request_v2(
     responses_metadata: &CodexResponsesMetadata,
     request_setup: CurrentClientSetup,
 ) -> AttemptOutcome<RemoteCompactionV2Output> {
-    let service_tier = if request_setup
-        .effective_auth
-        .as_ref()
-        .is_some_and(|auth| auth.auth_mode() == AuthMode::ApiKey)
-    {
-        None
-    } else {
-        turn_context.config.service_tier.clone()
-    };
     let stream_result = client_session
         .stream_attempt_with_setup(
             prompt,
@@ -353,7 +343,7 @@ async fn run_remote_compaction_request_v2(
             &turn_context.session_telemetry,
             turn_context.reasoning_effort.clone(),
             turn_context.reasoning_summary,
-            service_tier,
+            turn_context.config.service_tier.clone(),
             responses_metadata,
             &InferenceTraceContext::disabled(),
             request_setup,
@@ -373,20 +363,16 @@ async fn run_remote_compaction_request_v2(
         }
         Err(err) => AttemptOutcome::uncommitted(Err(err)),
     };
-    match &outcome.result {
-        Err(error) => {
-            if let CodexErrorDetails::UsageLimitReached(details) = error.details()
-                && let Some(rate_limits) = details.rate_limits.as_ref()
-            {
-                sess.update_rate_limits(
-                    turn_context,
-                    (**rate_limits).clone(),
-                    managed_rate_limit_binding,
-                )
-                .await;
-            }
-        }
-        Ok(_) => {}
+    if let Err(error) = &outcome.result
+        && let CodexErrorDetails::UsageLimitReached(details) = error.details()
+        && let Some(rate_limits) = details.rate_limits.as_ref()
+    {
+        sess.update_rate_limits(
+            turn_context,
+            (**rate_limits).clone(),
+            managed_rate_limit_binding,
+        )
+        .await;
     }
     outcome
 }
@@ -411,10 +397,6 @@ async fn collect_compaction_output_inner(
             Ok(event) => event,
             Err(err) => return AttemptOutcome::new(Err(err), replay_state),
         };
-        replay_state = std::cmp::max(
-            replay_state,
-            crate::session::turn::response_event_replay_state(&event),
-        );
         match event {
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
@@ -444,6 +426,7 @@ async fn collect_compaction_output_inner(
                 saw_completed = true;
                 completed_response_id = Some(response_id);
                 completed_token_usage = token_usage;
+                replay_state = crate::session::turn::AttemptReplayState::Irreversible;
                 break;
             }
             _ => {}
@@ -870,7 +853,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffered_output_failure_is_committed_and_not_retryable_by_owner() {
+    async fn buffered_output_failure_is_uncommitted_and_retryable_by_owner() {
         let compaction = ResponseItem::Compaction {
             id: None,
             encrypted_content: "buffered".to_string(),
@@ -878,14 +861,12 @@ mod tests {
         };
         let stream = response_stream(vec![
             Ok(ResponseEvent::OutputItemDone(compaction)),
-            Err(CodexErr::Stream(
-                "retryable buffered failure".to_string(),
-            )),
+            Err(CodexErr::Stream("retryable buffered failure".to_string())),
         ]);
 
         let outcome = collect_compaction_output(stream).await;
 
-        assert!(outcome.replay_state.is_committed());
+        assert!(outcome.replay_state.is_uncommitted());
         let Err(err) = outcome.result else {
             panic!("buffered stream failure should be returned");
         };

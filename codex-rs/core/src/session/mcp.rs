@@ -273,13 +273,14 @@ impl Session {
                 executor_capability_discovery.as_deref(),
             )
             .await;
-        let input = self.build_mcp_runtime_input(
-            &desired,
-            mcp_projection,
-            &ready_selected_capability_roots,
-            Some(self.mcp_elicitation_reviewer()),
-        )
-        .await;
+        let input = self
+            .build_mcp_runtime_input(
+                &desired,
+                mcp_projection,
+                &ready_selected_capability_roots,
+                Some(self.mcp_elicitation_reviewer()),
+            )
+            .await;
         anyhow::ensure!(
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
@@ -323,7 +324,10 @@ impl Session {
         let cache_key = codex_apps_tools_cache_key_for_setup(turn_context, request_setup);
         let runtime_matches = || {
             !self.mcp_refresh.is_pending()
-                && self.services.mcp_runtime.current_auth_matches(auth.as_ref())
+                && self
+                    .services
+                    .mcp_runtime
+                    .current_auth_matches(auth.as_ref())
                 && self
                     .services
                     .mcp_runtime

@@ -114,6 +114,10 @@ impl ModelClientSession {
         self.client.websocket_http_fallback_allowed()
     }
 
+    pub(crate) fn rewindable_websocket_fallback_allowed(&self) -> bool {
+        self.client.responses_websocket_enabled() && self.websocket_http_fallback_allowed()
+    }
+
     pub(super) fn reset_websocket_session(&mut self) {
         self.websocket_session.reset_transport_state();
     }

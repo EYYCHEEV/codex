@@ -109,13 +109,14 @@ impl Session {
         ready_selected_capability_roots: &[SelectedCapabilityRoot],
         elicitation_reviewer: Option<ElicitationReviewerHandle>,
     ) {
-        let input = self.build_mcp_runtime_input(
-            desired,
-            mcp_projection,
-            ready_selected_capability_roots,
-            elicitation_reviewer,
-        )
-        .await;
+        let input = self
+            .build_mcp_runtime_input(
+                desired,
+                mcp_projection,
+                ready_selected_capability_roots,
+                elicitation_reviewer,
+            )
+            .await;
         self.services.mcp_runtime.replace(input).await;
     }
 

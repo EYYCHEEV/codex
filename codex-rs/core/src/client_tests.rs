@@ -46,6 +46,7 @@ use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::UnexpectedResponseError;
 use codex_protocol::error::UsageLimitReachedError;
 use codex_protocol::error::WebsocketCloseDetails;
@@ -158,7 +159,7 @@ async fn managed_accounts_model_client(
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     for &(email, account_id) in accounts {
@@ -194,7 +195,6 @@ async fn managed_accounts_model_client(
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -649,7 +649,10 @@ async fn response_stream_attempt_rotates_before_replay_after_account_quota() -> 
         Ok(_) => panic!("first account should be quota blocked"),
         Err(error) => error,
     };
-    assert!(matches!(first_error, CodexErr::UsageLimitReached(_)));
+    assert!(matches!(
+        first_error.details(),
+        CodexErrorDetails::UsageLimitReached(_)
+    ));
     assert!(
         client_session
             .recover_last_managed_attempt(&first_error, /*committed*/ false)

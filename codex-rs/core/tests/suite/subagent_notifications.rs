@@ -906,11 +906,11 @@ async fn wait_agent_reports_terminal_once_and_keeps_unresolved_siblings_visible(
         .await?;
     let completed_thread = test
         .thread_manager
-        .start_thread(test.config.clone())
+        .start_thread(StartThreadOptions::new(test.config.clone()))
         .await?;
     let running_thread = test
         .thread_manager
-        .start_thread(test.config.clone())
+        .start_thread(StartThreadOptions::new(test.config.clone()))
         .await?;
     let completed_id = completed_thread.thread_id;
     let running_id = running_thread.thread_id;
