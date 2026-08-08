@@ -2721,9 +2721,10 @@ async fn list_all_tools_does_not_start_lazy_codex_apps_without_cache() {
         },
     );
 
-    let timeout_result =
-        tokio::time::timeout(Duration::from_millis(10), manager.list_all_tools()).await;
-    let tools = timeout_result.expect("lazy codex_apps should not block without a cache");
+    let tools = manager
+        .list_all_tools()
+        .now_or_never()
+        .expect("lazy codex_apps should not block without a cache");
     assert!(tools.is_empty());
 }
 
@@ -3625,23 +3626,30 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
 async fn host_owned_codex_apps_is_registered_without_startup_status() {
     let (tx_event, rx_event) = async_channel::unbounded();
     let codex_home = tempdir().expect("tempdir");
+    let apps_config = crate::codex_apps_mcp_server_config(
+        "http://127.0.0.1:1",
+        /*apps_mcp_product_sku*/ None,
+        /*originator*/ None,
+    );
     let mcp_servers = HashMap::from([(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        EffectiveMcpServer::configured(crate::codex_apps_mcp_server_config(
-            "http://127.0.0.1:1",
-            /*apps_mcp_product_sku*/ None,
-            /*originator*/ None,
-        )),
+        EffectiveMcpServer::configured(apps_config.clone()),
     )]);
+    let mut catalog = crate::ResolvedMcpCatalog::builder();
+    catalog.register(crate::McpServerRegistration::from_compatibility(
+        CODEX_APPS_MCP_SERVER_NAME.to_string(),
+        "legacy_codex_apps",
+        apps_config,
+    ));
+    let mut config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
+    config.mcp_server_catalog = catalog.build();
 
     let cancel_token = CancellationToken::new();
     let manager = McpConnectionSet::new(
         /*previous*/ None,
         McpPublicationGate::already_published(),
         McpRuntimeInput {
-            config: Arc::new(crate::mcp::tests::test_mcp_config(
-                codex_home.path().to_path_buf(),
-            )),
+            config: Arc::new(config),
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             mcp_servers,
@@ -3668,12 +3676,19 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
     .await;
 
     assert!(manager.contains_server(CODEX_APPS_MCP_SERVER_NAME));
-    let tools = tokio::time::timeout(Duration::from_millis(10), manager.list_all_tools())
+    let tools = tokio::time::timeout(Duration::from_secs(1), manager.list_all_tools())
         .await
         .expect("lazy codex_apps should not block tool listing");
     assert!(tools.is_empty());
+    assert!(
+        !manager.servers[CODEX_APPS_MCP_SERVER_NAME]
+            .connection
+            .client
+            .startup_complete
+            .load(Ordering::Acquire)
+    );
 
-    let event = tokio::time::timeout(Duration::from_millis(100), rx_event.recv())
+    let event = tokio::time::timeout(Duration::from_secs(1), rx_event.recv())
         .await
         .expect("startup complete event")
         .expect("event channel open");
