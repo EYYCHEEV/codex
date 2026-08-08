@@ -190,6 +190,7 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
@@ -313,7 +314,7 @@ async fn login_with_agent_identity_jwt_enforces_workspace_before_write() {
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/agent-identities/jwks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
-        .expect(2)
+        .expect(0)
         .mount(&server)
         .await;
     let chatgpt_base_url = format!("{}/backend-api", server.uri());
@@ -408,6 +409,7 @@ async fn env_agent_identity_jwt_rejects_workspace_before_task_registration() {
         codex_home.path(),
         false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         Some(&allowed),
         Some(&format!("{authapi_base_url}/backend-api")),
         AuthKeyringBackendKind::Direct,
@@ -451,7 +453,7 @@ async fn persisted_agent_identity_jwt_rejects_workspace_without_mutation_or_regi
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/agent-identities/jwks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -465,6 +467,7 @@ async fn persisted_agent_identity_jwt_rejects_workspace_without_mutation_or_regi
         codex_home.path(),
         false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         Some(&allowed),
         Some(&format!("{authapi_base_url}/backend-api")),
         AuthKeyringBackendKind::Direct,
@@ -2182,6 +2185,7 @@ async fn forced_login_restriction_clears_external_overlay_and_ephemeral_pool() {
         keyring_backend_kind: AuthKeyringBackendKind::default(),
         forced_login_method: Some(ForcedLoginMethod::Api),
         forced_chatgpt_workspace_id: None,
+        managed_auth_policy: ManagedAuthPolicy::default(),
         chatgpt_base_url: None,
         auth_route_config: crate::test_support::transport_default_auth_route_config(),
     };
