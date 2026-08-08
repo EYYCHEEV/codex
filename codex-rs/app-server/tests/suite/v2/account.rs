@@ -3353,7 +3353,7 @@ async fn login_account_chatgpt_redirects_to_hosted_success_page() -> Result<()> 
             success: true,
             error: None,
             onboarding_entrypoint: Some(DesktopOnboardingEntrypoint::LifeSciences),
-            managed_account_id: Some("email:user@example.com".to_string()),
+            managed_account_id: Some("email:hosted@example.com".to_string()),
         }
     );
     Ok(())
