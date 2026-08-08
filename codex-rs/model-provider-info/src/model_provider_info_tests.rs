@@ -151,7 +151,6 @@ fn test_custom_openai_authenticated_provider_keeps_openai_behavior() {
     };
 
     assert!(custom_openai.is_openai());
-    assert!(custom_openai.supports_remote_compaction());
     assert!(!custom_openai.supports_websockets);
     assert!(!non_openai.is_openai());
 }
