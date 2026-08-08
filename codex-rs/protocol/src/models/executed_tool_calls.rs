@@ -16,6 +16,7 @@ pub const MAX_TOOL_RESULT_SOURCE_FIELD_BYTES: usize = 128;
 /// Maximum serialized warehouse-only attempted-tool metadata in one request.
 const MAX_EXECUTED_TOOL_CALL_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const RESOURCE_ACCESS_METADATA_KEY: &str = "openai/resource_access";
+const MAX_MODEL_VISIBLE_ITEM_BYTES: usize = 40_000;
 const EXECUTED_TOOL_CALL_METADATA_FIELD_BYTES: usize = b"\"executed_tool_calls\":".len();
 const INTERNAL_CHAT_MESSAGE_METADATA_PASSTHROUGH_FIELD_BYTES: usize =
     b"\"internal_chat_message_metadata_passthrough\":".len();
@@ -78,6 +79,7 @@ impl InternalChatMessageMetadataPassthrough {
 /// Bounds attempted-tool metadata fairly across the complete serialized request.
 pub fn bound_executed_tool_calls_for_prompt(items: &mut [ResponseItem]) {
     bound_executed_tool_calls_for_prompt_with_priority(items, /*prioritize_recent*/ false);
+    clear_executed_tool_calls_from_oversized_items(items);
 }
 
 /// Bounds retained history without letting older calls displace the newest calls.
@@ -85,6 +87,23 @@ pub fn bound_executed_tool_calls_for_prompt_prioritizing_recent(items: &mut [Res
     items.reverse();
     bound_executed_tool_calls_for_prompt_with_priority(items, /*prioritize_recent*/ true);
     items.reverse();
+    clear_executed_tool_calls_from_oversized_items(items);
+}
+
+fn clear_executed_tool_calls_from_oversized_items(items: &mut [ResponseItem]) {
+    let mut damaged_cells = HashSet::new();
+    for item in items.iter_mut() {
+        if serde_json::to_vec(&*item)
+            .map_or(true, |bytes| bytes.len() > MAX_MODEL_VISIBLE_ITEM_BYTES)
+        {
+            damaged_cells.extend(
+                item.executed_tool_call_metadata()
+                    .and_then(|metadata| metadata.cell_id.clone()),
+            );
+            item.clear_executed_tool_calls();
+        }
+    }
+    clear_damaged_cell_completeness(items, &damaged_cells);
 }
 
 fn bound_executed_tool_calls_for_prompt_with_priority(
