@@ -2804,12 +2804,6 @@ async fn stopping_resume_leaves_compact_session_start_queued() -> Result<()> {
             }
         });
     let initial = builder.build(&server).await?;
-    let home = initial.home.clone();
-    let rollout_path = initial
-        .session_configured
-        .rollout_path
-        .clone()
-        .context("rollout path")?;
 
     initial.submit_turn("hello before resume").await?;
 
@@ -2817,7 +2811,7 @@ async fn stopping_resume_leaves_compact_session_start_queued() -> Result<()> {
         config.model_provider = model_provider;
         trust_discovered_hooks(config);
     });
-    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
+    let resumed = resume_builder.restart(&server, &initial).await?;
     resumed.codex.submit(Op::Compact).await?;
     wait_for_event(&resumed.codex, |event| {
         matches!(event, EventMsg::TurnAborted(_))
