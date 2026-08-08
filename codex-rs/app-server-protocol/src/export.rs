@@ -2475,8 +2475,8 @@ mod tests {
         assert!(rate_limits_update_ts.contains("managedAccountId: string | null"));
         assert!(rate_limits_update_ts.contains("accountRevision: number | null"));
         assert!(
-            !v2::AccountLoginCompletedNotification::export_to_string()?
-                .contains("managedAccountId")
+            v2::AccountLoginCompletedNotification::export_to_string()?
+                .contains("managedAccountId: string | null")
         );
         assert!(
             v2::AccountUsageUpdatedNotification::export_to_string()?
