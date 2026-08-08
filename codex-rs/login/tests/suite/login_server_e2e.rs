@@ -166,7 +166,7 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
         callback_result,
         LoginCallbackResult {
             onboarding_entrypoint: Some(LoginOnboardingEntrypoint::LifeSciences),
-            ..Default::default()
+            managed_account_id: Some("email:user@example.com".to_string()),
         }
     );
 

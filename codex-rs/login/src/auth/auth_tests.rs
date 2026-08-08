@@ -345,7 +345,7 @@ async fn login_with_agent_identity_jwt_enforces_workspace_before_write() {
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/agent-identities/jwks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
-        .expect(2)
+        .expect(0)
         .mount(&server)
         .await;
     let chatgpt_base_url = format!("{}/backend-api", server.uri());
@@ -485,7 +485,7 @@ async fn persisted_agent_identity_jwt_rejects_workspace_without_mutation_or_regi
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/agent-identities/jwks"))
         .respond_with(ResponseTemplate::new(200).set_body_json(test_jwks_body()))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
