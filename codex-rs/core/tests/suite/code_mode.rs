@@ -1767,7 +1767,11 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
 
     let request = second_mock.single_request();
     let whole_output_item = serde_json::to_string(&request.custom_tool_call_output("call-1"))?;
-    assert!(approx_token_count(&whole_output_item) <= 10_000);
+    let whole_output_tokens = approx_token_count(&whole_output_item);
+    assert!(
+        whole_output_tokens <= 10_000,
+        "serialized output item should not exceed 10,000 tokens, got {whole_output_tokens}"
+    );
     let items = custom_tool_output_items(&request, "call-1");
     let output = text_item(&items, /*index*/ 1);
     assert_regex_match(

@@ -9,6 +9,7 @@ use super::ResponseItem;
 const MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES: usize = 8 * 1024;
 /// Maximum serialized warehouse-only attempted-tool metadata in one request.
 const MAX_EXECUTED_TOOL_CALL_METADATA_BYTES: usize = 32 * 1024;
+const MAX_MODEL_VISIBLE_ITEM_BYTES: usize = 40_000;
 const EXECUTED_TOOL_CALL_METADATA_FIELD_BYTES: usize = b"\"executed_tool_calls\":".len();
 const INTERNAL_CHAT_MESSAGE_METADATA_PASSTHROUGH_FIELD_BYTES: usize =
     b"\"internal_chat_message_metadata_passthrough\":".len();
@@ -98,6 +99,7 @@ fn bound_executed_tool_calls_for_prompt_with_priority(
     }
 
     if original_metadata_bytes <= MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
+        clear_executed_tool_calls_from_oversized_items(items);
         return;
     }
 
@@ -158,6 +160,7 @@ fn bound_executed_tool_calls_for_prompt_with_priority(
         })
         .sum::<usize>();
     if represented_calls == original_calls {
+        clear_executed_tool_calls_from_oversized_items(items);
         return;
     }
 
@@ -184,6 +187,7 @@ fn bound_executed_tool_calls_for_prompt_with_priority(
             );
             items[index].append_executed_tool_calls(vec![call]);
         }
+        clear_executed_tool_calls_from_oversized_items(items);
         return;
     }
 
@@ -216,6 +220,17 @@ fn bound_executed_tool_calls_for_prompt_with_priority(
                 previous_omissions.saturating_add(original_calls.saturating_sub(represented_calls)),
             ),
         );
+    }
+    clear_executed_tool_calls_from_oversized_items(items);
+}
+
+fn clear_executed_tool_calls_from_oversized_items(items: &mut [ResponseItem]) {
+    for item in items {
+        if serde_json::to_vec(&*item)
+            .map_or(true, |bytes| bytes.len() > MAX_MODEL_VISIBLE_ITEM_BYTES)
+        {
+            item.clear_executed_tool_calls();
+        }
     }
 }
 
