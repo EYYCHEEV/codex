@@ -61,7 +61,6 @@ use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::TurnCodexErrorFact;
 use codex_async_utils::OrCancelExt;
 use codex_context_fragments::RenderedFragment;
-use codex_core_skills::injection::HostSkillsCatalogInWorldState;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_execpolicy::prefix_rule_migration;
@@ -2344,6 +2343,9 @@ impl Session {
                             kind: SubAgentActivityKind::Completed,
                             agent_thread_id: self.thread_id,
                             agent_path: child_agent_path.clone(),
+                            agent_type: turn_context.session_source.get_agent_role(),
+                            model: Some(turn_context.model_info().slug.clone()),
+                            reasoning_effort: turn_context.reasoning_effort().cloned(),
                         },
                     )
                     .await
@@ -3626,34 +3628,6 @@ impl Session {
         .await
     }
 
-    pub(crate) async fn capture_step_context_with_required_mcp_servers(
-        self: &Arc<Self>,
-        turn_context: Arc<TurnContext>,
-        cancellation_token: &CancellationToken,
-        required_servers: &[String],
-        required_plugins: &HashSet<String>,
-    ) -> CodexResult<Arc<StepContext>> {
-        let setup = self
-            .services
-            .model_client
-            .current_client_setup(
-                Some(&turn_context.model_info().slug),
-                Some(&self.session_id().to_string()),
-            )
-            .await?;
-        let step_context = self
-            .capture_step_context_inner(
-                turn_context,
-                &setup,
-                cancellation_token,
-                required_servers,
-                required_plugins,
-            )
-            .await?;
-        self.set_last_known_step_context(&step_context).await;
-        Ok(step_context)
-    }
-
     /// Prepares a candidate step without replacing the active turn's retained context.
     /// The caller must retain it explicitly if it is selected for execution.
     async fn capture_speculative_step_context(
@@ -4298,6 +4272,7 @@ impl Session {
                         Some(serde_json::json!({
                             "threadId": self.thread_id().to_string(),
                         })),
+                        /*timeout*/ None,
                     )
                     .await
                     .ok()
@@ -4330,6 +4305,7 @@ impl Session {
             );
         }
         // Render the active mode after the usage hint so it can override that hint.
+        let mut initial_model_switch = None;
         let mut initial_multi_agent_mode = None;
         let mut managed_developer_instructions = None;
         for fragment in world_state.render_full() {
@@ -4337,8 +4313,7 @@ impl Session {
                 "developer"
                     if fragment.markers().0 == ModelSwitchInstructions::type_markers().0 =>
                 {
-                    // New-model instructions must precede the rest of the developer context.
-                    developer_sections.insert(0, fragment.render_fragment());
+                    initial_model_switch = Some(fragment);
                 }
                 "developer" if fragment.markers().0 == MULTI_AGENT_MODE_OPEN_TAG => {
                     initial_multi_agent_mode = Some(fragment);
@@ -4364,7 +4339,14 @@ impl Session {
             }
         }
 
-        let mut items = Vec::with_capacity(4);
+        let mut items = Vec::with_capacity(5);
+        if let Some(initial_model_switch) = initial_model_switch
+            && let Some(message) = crate::context_manager::updates::build_rendered_message(vec![
+                initial_model_switch.render_fragment(),
+            ])
+        {
+            items.push(message);
+        }
         if let Some(developer_message) =
             crate::context_manager::updates::build_rendered_message(developer_sections)
         {

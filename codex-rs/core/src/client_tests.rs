@@ -170,7 +170,7 @@ async fn managed_accounts_model_client(
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     for &(email, account_id) in accounts {
@@ -203,10 +203,10 @@ async fn managed_accounts_model_client(
         SessionSource::Cli,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
+        /*content_item_kinds_enabled*/ true,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
-        /*item_ids_enabled*/ false,
         /*concurrent_reasoning_summaries_enabled*/ false,
         /*attestation_provider*/ None,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
@@ -280,6 +280,7 @@ async fn websocket_close_diagnostic_captures_single_and_pooled_account_snapshots
             }],
             base_instructions: BaseInstructions {
                 text: "base instructions".to_string(),
+                provenance: None,
             },
             ..Default::default()
         };
@@ -532,6 +533,7 @@ async fn compact_rotates_to_a_sibling_after_uncommitted_account_quota() -> anyho
         }],
         base_instructions: BaseInstructions {
             text: "base instructions".to_string(),
+            provenance: None,
         },
         ..Default::default()
     };
@@ -635,6 +637,7 @@ async fn response_stream_attempt_rotates_before_replay_after_account_quota() -> 
         }],
         base_instructions: BaseInstructions {
             text: "base instructions".to_string(),
+            provenance: None,
         },
         ..Default::default()
     };
@@ -663,7 +666,10 @@ async fn response_stream_attempt_rotates_before_replay_after_account_quota() -> 
         Ok(_) => panic!("first account should be quota blocked"),
         Err(error) => error,
     };
-    assert!(matches!(first_error, CodexErr::UsageLimitReached(_)));
+    assert!(matches!(
+        first_error.details(),
+        CodexErrorDetails::UsageLimitReached(_)
+    ));
     assert!(
         client_session
             .recover_last_managed_attempt(&first_error, /*committed*/ false)
@@ -1868,7 +1874,7 @@ async fn non_chatgpt_codex_endpoints_omit_attestation_generation() {
 #[test]
 fn managed_account_failure_classification_is_narrow() {
     let unauthorized = CodexErr::UnexpectedStatus(UnexpectedResponseError {
-        status: reqwest::StatusCode::UNAUTHORIZED,
+        status: http::StatusCode::UNAUTHORIZED,
         body: String::new(),
         user_message: None,
         url: None,

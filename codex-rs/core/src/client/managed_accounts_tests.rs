@@ -56,7 +56,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     let first_id = auth_manager
@@ -88,6 +88,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
     let snapshot = RateLimitSnapshot {
         limit_id: Some("codex".to_string()),
         limit_name: Some("Codex".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 25.0,
             window_minutes: Some(60),
@@ -112,6 +113,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
     );
     recorder.observe(&snapshot);
     recorder.observe(&RateLimitSnapshot {
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 15.0,
             window_minutes: Some(60),
@@ -127,6 +129,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
     recorder.observe(&RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("Other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 40.0,
             window_minutes: Some(120),
@@ -142,6 +145,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
     recorder.observe(&RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("Other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 30.0,
             window_minutes: Some(120),
@@ -183,6 +187,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
     let empty = RateLimitSnapshot {
         limit_id: None,
         limit_name: None,
+        normal_model_slug: None,
         primary: None,
         secondary: None,
         credits: None,
@@ -231,6 +236,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
     recorder.observe(&RateLimitSnapshot {
         limit_id: Some("codex_other".to_string()),
         limit_name: Some("Other".to_string()),
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 5.0,
             window_minutes: Some(120),
@@ -283,7 +289,7 @@ async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard(
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
-        /*auth_route_config*/ None,
+        codex_login::test_support::transport_default_auth_route_config(),
     )
     .await;
     auth_manager
@@ -325,6 +331,7 @@ async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard(
     recorder.observe(&RateLimitSnapshot {
         limit_id: Some("codex".to_string()),
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 20.0,
             window_minutes: Some(60),
@@ -387,6 +394,7 @@ async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard(
     stale_recorder.observe(&RateLimitSnapshot {
         limit_id: Some("codex".to_string()),
         limit_name: None,
+        normal_model_slug: None,
         primary: Some(RateLimitWindow {
             used_percent: 10.0,
             window_minutes: Some(60),

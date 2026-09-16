@@ -244,13 +244,13 @@ fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, FunctionCallE
 
 pub(crate) fn capture_spawn_agent_parent_route(turn: &TurnContext) -> SpawnAgentParentRoute {
     SpawnAgentParentRoute {
-        model: turn.model_info.slug.clone(),
+        model: turn.model_info().slug.clone(),
         model_provider_id: turn.config.model_provider_id.clone(),
         model_provider: turn.provider.info().clone(),
         reasoning_effort: turn
-            .reasoning_effort
-            .clone()
-            .or_else(|| turn.model_info.default_reasoning_level.clone()),
+            .reasoning_effort()
+            .cloned()
+            .or_else(|| turn.model_info().default_reasoning_level.clone()),
     }
 }
 

@@ -337,7 +337,7 @@ impl Session {
                 McpThreadIdentity {
                     session_source: &desired.session_source,
                     originator: &desired.originator,
-                    environments: McpEnvironmentScope::Live(&self.services.turn_environments),
+                    environments: McpEnvironmentScope::Snapshot(&desired.environments),
                 },
                 &ready_selected_capability_roots,
                 executor_capability_discovery.as_deref(),
@@ -480,9 +480,6 @@ impl Session {
             return binding;
         }
         let _ = self.mcp_refresh.claim();
-        self.services
-            .plugins_manager
-            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
         let desired = McpDesiredState {
             config: Arc::clone(&turn_context.config),
             auth,

@@ -702,7 +702,7 @@ impl ThreadEnvironments {
                 environment.selection.config,
                 EnvironmentConfigState::Failed(_)
             ) {
-                environments.push(TurnEnvironmentState::Failed);
+                environments.push(TurnEnvironmentState::Failed(environment.selection.clone()));
                 continue;
             }
             let pending = matches!(
@@ -737,7 +737,7 @@ pub(crate) enum TurnEnvironmentState {
     Ready(TurnEnvironment),
     Starting(StartingTurnEnvironment),
     /// Unavailable for execution, but still selected when evaluating permissions.
-    Failed,
+    Failed(TurnEnvironmentSelection),
 }
 
 impl TurnEnvironmentState {
@@ -750,7 +750,10 @@ impl TurnEnvironmentState {
                 let mut selection = starting.selection;
                 if matches!(selection.config, EnvironmentConfigState::Pending) {
                     let Some(config) = environment.installed_config else {
-                        return Self::Failed;
+                        selection.config = EnvironmentConfigState::Failed(
+                            "environment did not return installed configuration".to_string(),
+                        );
+                        return Self::Failed(selection);
                     };
                     selection.config = EnvironmentConfigState::Ready(config);
                 }
@@ -773,7 +776,9 @@ impl TurnEnvironmentState {
                     environment_id = %starting.selection.environment_id,
                     "skipping failed turn environment: {err}"
                 );
-                Self::Failed
+                let mut selection = starting.selection;
+                selection.config = EnvironmentConfigState::Failed(err.to_string());
+                Self::Failed(selection)
             }
             None => Self::Starting(starting),
         }
@@ -800,7 +805,7 @@ impl TurnEnvironmentSnapshot {
                 .iter()
                 .map(|environment| match environment {
                     TurnEnvironmentState::Ready(environment) => &environment.selection.config,
-                    TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed => {
+                    TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed(_) => {
                         &EnvironmentConfigState::Pending
                     }
                 }),
@@ -822,7 +827,9 @@ impl TurnEnvironmentSnapshot {
                         environment.resolution.clone().now_or_never(),
                     )
                 }
-                TurnEnvironmentState::Failed => TurnEnvironmentState::Failed,
+                TurnEnvironmentState::Failed(selection) => {
+                    TurnEnvironmentState::Failed(selection.clone())
+                }
             })
             .collect();
         Self { environments }
@@ -897,7 +904,7 @@ impl TurnEnvironmentSnapshot {
                 {
                     environment.selection.cwd.to_abs_path().ok()
                 }
-                TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed => None,
+                TurnEnvironmentState::Starting(_) | TurnEnvironmentState::Failed(_) => None,
             })
     }
 
@@ -910,6 +917,19 @@ impl TurnEnvironmentSnapshot {
     pub(crate) fn to_selections(&self) -> Vec<TurnEnvironmentSelection> {
         self.turn_environments()
             .map(TurnEnvironment::selection)
+            .collect()
+    }
+
+    /// Returns the captured selections whose identity is still available, including environments
+    /// that were still starting when this snapshot was taken.
+    pub(crate) fn configuration_selections(&self) -> Vec<TurnEnvironmentSelection> {
+        self.environments
+            .iter()
+            .filter_map(|environment| match environment {
+                TurnEnvironmentState::Ready(environment) => Some(environment.selection.clone()),
+                TurnEnvironmentState::Starting(environment) => Some(environment.selection.clone()),
+                TurnEnvironmentState::Failed(selection) => Some(selection.clone()),
+            })
             .collect()
     }
 
@@ -1460,6 +1480,10 @@ url = "ws://127.0.0.1:8765"
             config: EnvironmentConfigState::Ready(expected_config.clone()),
             ..remote.clone()
         };
+        let resolved_local = TurnEnvironmentSelection {
+            config: EnvironmentConfigState::Ready(expected_config.clone()),
+            ..local.clone()
+        };
         assert_eq!(
             starting
                 .turn_environments()
@@ -1482,6 +1506,10 @@ url = "ws://127.0.0.1:8765"
             vec![resolved_remote.clone()]
         );
         assert_eq!(starting.to_selections(), vec![local.clone()]);
+        assert_eq!(
+            starting.configuration_selections(),
+            vec![resolved_remote.clone(), resolved_local]
+        );
         assert!(starting.single_local_environment().is_none());
 
         let next_config = EnvironmentConfig {
@@ -1596,6 +1624,16 @@ url = "ws://127.0.0.1:8765"
         // Failed selections must not turn an empty executable snapshot into Full Access.
         for snapshot in [starting.refresh_readiness(), environments.snapshot().await] {
             assert!(!snapshot.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
+            let configuration_selections = snapshot.configuration_selections();
+            assert_eq!(configuration_selections.len(), 1);
+            assert_eq!(
+                configuration_selections[0].environment_id,
+                selection.environment_id
+            );
+            assert!(matches!(
+                configuration_selections[0].config,
+                EnvironmentConfigState::Failed(_)
+            ));
         }
         let selected_root = SelectedCapabilityRoot {
             id: "failed-root".to_string(),

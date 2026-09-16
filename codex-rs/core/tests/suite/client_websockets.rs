@@ -1,7 +1,6 @@
 #![allow(clippy::unwrap_used)]
 use codex_api::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
 use codex_api::WS_REQUEST_HEADER_TRACESTATE_CLIENT_METADATA_KEY;
-use codex_core::CodexErr;
 use codex_core::CodexResponsesMetadata;
 use codex_core::ModelClient;
 use codex_core::ModelClientSession;
@@ -12,6 +11,7 @@ use codex_core::X_CODEX_ROUTING_HINT_HEADER;
 use codex_core::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
 use codex_core::test_support::with_parent_turn;
 use codex_features::Feature;
+use codex_history::RolloutItem;
 use codex_http_client::OutboundProxyPolicy;
 use codex_login::CodexAuth;
 use codex_login::auth::AgentIdentityAuthPolicy;
@@ -28,6 +28,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -38,8 +39,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResponsesWebsocketCloseDiagnostic;
 use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::UserInput;
@@ -56,7 +55,6 @@ use core_test_support::responses::WebSocketTestServer;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_exec_command_call;
-use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_reasoning_item;
@@ -104,7 +102,7 @@ fn websocket_close_diagnostics(
     std::fs::read_to_string(rollout_path)
         .expect("read rollout")
         .lines()
-        .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse rollout line"))
+        .map(|line| codex_rollout::parse_rollout_line(line).expect("parse rollout line"))
         .filter_map(|line| match line.item {
             RolloutItem::EventMsg(EventMsg::StreamError(event)) => event
                 .websocket_close_diagnostic()
@@ -1093,6 +1091,10 @@ async fn responses_websocket_prewarm_includes_model_and_tier_routing_hint() {
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
+    let request_setup = client_session
+        .current_client_setup(Some(&model_info.slug), None)
+        .await
+        .expect("current client setup");
     client_session
         .prewarm_websocket(
             &prompt,
@@ -1102,6 +1104,7 @@ async fn responses_websocket_prewarm_includes_model_and_tier_routing_hint() {
             harness.summary,
             Some(service_tier.to_string()),
             &responses_metadata,
+            request_setup,
         )
         .await
         .expect("websocket prewarm failed");
@@ -1771,7 +1774,7 @@ async fn websocket_handshake_usage_limit_preserves_rate_limits() {
         Err(error) => error,
     };
 
-    let CodexErr::UsageLimitReached(error) = error else {
+    let CodexErrorDetails::UsageLimitReached(error) = error.details() else {
         panic!("expected usage-limit error");
     };
     let snapshot = error.rate_limits.as_deref().expect("rate-limit snapshot");
@@ -1972,16 +1975,10 @@ async fn responses_websocket_close_after_completed_tool_does_not_replay() {
         .expect("build websocket codex");
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit turn");
     let mut exec_starts = 0;
@@ -2035,12 +2032,12 @@ async fn responses_websocket_close_after_completed_tool_does_not_replay() {
     let rollout = std::fs::read_to_string(rollout_path).expect("read rollout");
     let completed_tool_deliveries = rollout
         .lines()
-        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+        .filter_map(|line| codex_rollout::parse_rollout_line(line).ok())
         .filter(|line| {
             matches!(
                 &line.item,
-                RolloutItem::ResponseItem(ResponseItem::FunctionCall { call_id, .. })
-                    if call_id == "call-1"
+                RolloutItem::ResponseItem(item)
+                    if matches!(&item.item, ResponseItem::FunctionCall { call_id, .. } if call_id == "call-1")
             )
         })
         .count();
@@ -2124,16 +2121,10 @@ async fn assert_incomplete_output_replays_once_over_http(
         .expect("build websocket codex");
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "recover this turn".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "recover this turn".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit turn");
     let reset = wait_for_event(&test.codex, |msg| {
@@ -2293,16 +2284,10 @@ async fn responses_websocket_operator_cancellation_does_not_replay() {
         .expect("build websocket codex");
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "cancel the turn".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "cancel the turn".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit turn");
     wait_for_event(&test.codex, |msg| {
@@ -2378,16 +2363,10 @@ async fn responses_websocket_partial_output_attempts_http_replacement_once() {
         .expect("build websocket codex");
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "replace once".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "replace once".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit turn");
     wait_for_event(&test.codex, |msg| {
@@ -2534,16 +2513,10 @@ async fn responses_websocket_zero_retry_budget_does_not_fallback_to_http() {
         .expect("build websocket codex");
 
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit turn");
     wait_for_event(&test.codex, |msg| matches!(msg, EventMsg::Error(_))).await;

@@ -913,7 +913,9 @@ impl ModelClient {
         &self,
         mut extra_headers: ApiHeaderMap,
     ) -> Result<ApiHeaderMap> {
-        let client_setup = self.current_client_setup().await?;
+        let client_setup = self
+            .current_client_setup(/*model*/ None, /*session_id*/ None)
+            .await?;
         if let Some(header_value) = self.generate_attestation_header_for().await {
             extra_headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
         }
