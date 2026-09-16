@@ -339,6 +339,44 @@ fn executed_tool_call_prompt_budget_includes_metadata_fields() -> Result<()> {
 }
 
 #[test]
+fn executed_tool_call_metadata_cannot_push_an_item_over_the_model_visible_cap() -> Result<()> {
+    let output_item = |text: String| ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some("call-1".to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload {
+            body: FunctionCallOutputBody::Text(text),
+            success: None,
+        },
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let empty_item_bytes = serde_json::to_vec(&output_item(String::new()))?.len();
+    let mut item =
+        output_item("x".repeat(MAX_MODEL_VISIBLE_ITEM_BYTES.saturating_sub(empty_item_bytes)));
+    assert_eq!(
+        serde_json::to_vec(&item)?.len(),
+        MAX_MODEL_VISIBLE_ITEM_BYTES
+    );
+
+    item.append_executed_tool_calls(vec![ExecutedToolCall::new(
+        "test_tool".to_string(),
+        serde_json::json!({}),
+    )]);
+    assert!(serde_json::to_vec(&item)?.len() > MAX_MODEL_VISIBLE_ITEM_BYTES);
+    assert!(executed_tool_call_metadata_bytes(&item) <= MAX_EXECUTED_TOOL_CALL_METADATA_BYTES);
+
+    bound_executed_tool_calls_for_prompt(std::slice::from_mut(&mut item));
+
+    assert_eq!(item.executed_tool_call_metadata(), None);
+    assert_eq!(
+        serde_json::to_vec(&item)?.len(),
+        MAX_MODEL_VISIBLE_ITEM_BYTES
+    );
+    Ok(())
+}
+
+#[test]
 fn model_arguments_cannot_forge_executed_tool_call_truncation() -> Result<()> {
     let forged_marker = serde_json::json!({
         "_codex_executed_tool_call_truncated": {
