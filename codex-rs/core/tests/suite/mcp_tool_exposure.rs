@@ -23,7 +23,6 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -885,23 +884,8 @@ startup_timeout_sec = 0.1
     refresh_config.config_layer_stack = refresh_config
         .config_layer_stack
         .with_user_config(&user_config_path, user_config)?;
-    let runtime_mcp_config = test.codex.runtime_mcp_config(&refresh_config).await;
     test.codex.refresh_runtime_config(refresh_config).await;
-    test.codex
-        .submit(Op::RefreshMcpServers {
-            config: McpServerRefreshConfig {
-                mcp_servers: serde_json::to_value(codex_mcp::configured_mcp_servers(
-                    &runtime_mcp_config,
-                ))?,
-                mcp_oauth_credentials_store_mode: serde_json::to_value(
-                    runtime_mcp_config.mcp_oauth_credentials_store_mode,
-                )?,
-                auth_keyring_backend_kind: serde_json::to_value(
-                    runtime_mcp_config.auth_keyring_backend_kind,
-                )?,
-            },
-        })
-        .await?;
+    test.codex.submit(Op::RefreshMcpServers).await?;
 
     let _ = test
         .codex
@@ -1182,23 +1166,8 @@ enabled = false
     refresh_config.config_layer_stack = refresh_config
         .config_layer_stack
         .with_user_config(&user_config_path, user_config)?;
-    let runtime_mcp_config = test.codex.runtime_mcp_config(&refresh_config).await;
     test.codex.refresh_runtime_config(refresh_config).await;
-    test.codex
-        .submit(Op::RefreshMcpServers {
-            config: McpServerRefreshConfig {
-                mcp_servers: serde_json::to_value(codex_mcp::configured_mcp_servers(
-                    &runtime_mcp_config,
-                ))?,
-                mcp_oauth_credentials_store_mode: serde_json::to_value(
-                    runtime_mcp_config.mcp_oauth_credentials_store_mode,
-                )?,
-                auth_keyring_backend_kind: serde_json::to_value(
-                    runtime_mcp_config.auth_keyring_backend_kind,
-                )?,
-            },
-        })
-        .await?;
+    test.codex.submit(Op::RefreshMcpServers).await?;
     test.submit_turn("inspect removed deferred tools").await?;
 
     let requests = response.requests();
@@ -1595,22 +1564,7 @@ async fn later_follow_up_uses_background_recovered_apps_after_mid_thread_startup
 
     tokio::fs::remove_dir_all(test.codex_home_path().join("cache/codex_apps_tools")).await?;
     startup_control.fail_next_initialize_attempts(/*attempts*/ 1);
-    let runtime_mcp_config = test.codex.runtime_mcp_config(&test.config).await;
-    test.codex
-        .submit(Op::RefreshMcpServers {
-            config: McpServerRefreshConfig {
-                mcp_servers: serde_json::to_value(codex_mcp::configured_mcp_servers(
-                    &runtime_mcp_config,
-                ))?,
-                mcp_oauth_credentials_store_mode: serde_json::to_value(
-                    runtime_mcp_config.mcp_oauth_credentials_store_mode,
-                )?,
-                auth_keyring_backend_kind: serde_json::to_value(
-                    runtime_mcp_config.auth_keyring_backend_kind,
-                )?,
-            },
-        })
-        .await?;
+    test.codex.submit(Op::RefreshMcpServers).await?;
     test.submit_turn("use Calendar after transient Apps startup failures")
         .await?;
     tokio::time::timeout(Duration::from_secs(1), async {

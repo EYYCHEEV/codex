@@ -1,5 +1,6 @@
 use super::*;
 use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
+use crate::context::ModelSwitchInstructions;
 use crate::context::UserInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSection;
@@ -1846,8 +1847,9 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
             turn_id: Some(turn_id.to_string()),
             content_item_kinds: Some(vec![
                 ContentItemKind("generic.developer_instructions".to_string()),
-                ContentItemKind("model_switch.instructions".to_string()),
-                ContentItemKind("persistent_mode.instructions".to_string()),
+                // Legacy persisted fragments may not have a specific classification.
+                ContentItemKind("unknown".to_string()),
+                ContentItemKind("unknown".to_string()),
                 ContentItemKind("environments.instructions".to_string()),
             ]),
             ..Default::default()
@@ -1884,6 +1886,147 @@ fn drop_last_n_user_turns_preserves_annotations_for_surviving_developer_fragment
                 },
             ),
         }],
+    );
+}
+
+#[test]
+fn drop_last_n_user_turns_removes_projected_switch_fragments_from_a_later_turn() {
+    let earlier_turn_id = "earlier-turn";
+    let rolled_back_turn_id = "rolled-back-turn";
+    let model_switch = ModelSwitchInstructions::new("switch instructions ".repeat(8_000)).render();
+    let developer_message = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "projected-switch")),
+        role: "developer".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "persistent generic developer instructions".to_string(),
+            },
+            ContentItem::InputText { text: model_switch },
+            ContentItem::InputText {
+                text: "<persistent_mode>\nFollow up on the completed task.\n</persistent_mode>"
+                    .to_string(),
+            },
+            ContentItem::InputText {
+                text: format!(
+                    "{ENVIRONMENTS_INSTRUCTIONS_OPEN_TAG}\nROLLED_BACK_ENVIRONMENT_INSTRUCTIONS"
+                ),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(rolled_back_turn_id.to_string()),
+            content_item_kinds: Some(vec![
+                ContentItemKind("generic.developer_instructions".to_string()),
+                ContentItemKind("model_switch.instructions".to_string()),
+                ContentItemKind("persistent_mode.instructions".to_string()),
+                ContentItemKind("environments.instructions".to_string()),
+            ]),
+            ..Default::default()
+        }),
+    };
+    let mut earlier_user = user_input_text_msg("earlier user");
+    earlier_user.set_turn_id_if_missing(earlier_turn_id);
+    let earlier_assistant = assistant_msg("earlier assistant");
+    let mut later_user = user_input_text_msg("later user");
+    later_user.set_turn_id_if_missing(rolled_back_turn_id);
+    let later_assistant = assistant_msg("later assistant");
+    let original_items = vec![
+        earlier_user.clone(),
+        earlier_assistant.clone(),
+        developer_message,
+        later_user,
+        later_assistant,
+    ];
+    let mut history = create_history_with_items(original_items.clone());
+
+    assert_eq!(history.logical_items(), original_items);
+    assert!(history.annotated_items().iter().all(|item| {
+        estimate_item_token_count(&item.item)
+            <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+    }));
+    assert!(
+        history
+            .annotated_items()
+            .iter()
+            .filter(|item| {
+                matches!(
+                    &item.item,
+                    ResponseItem::Message {
+                        internal_chat_message_metadata_passthrough: Some(metadata),
+                        ..
+                    } if metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+                        kinds.iter().any(|kind| kind.0 == "model_switch.instructions")
+                    })
+                )
+            })
+            .count()
+            > 1
+    );
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    let expected_developer = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "projected-switch")),
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "persistent generic developer instructions".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some(rolled_back_turn_id.to_string()),
+            content_item_kinds: Some(vec![ContentItemKind(
+                "generic.developer_instructions".to_string(),
+            )]),
+            ..Default::default()
+        }),
+    };
+    assert_eq!(
+        history.logical_items(),
+        vec![earlier_user, earlier_assistant, expected_developer]
+    );
+    assert!(history.annotated_items().iter().all(|item| {
+        let ResponseItem::Message {
+            internal_chat_message_metadata_passthrough: Some(metadata),
+            ..
+        } = &item.item
+        else {
+            return true;
+        };
+        metadata.content_item_kinds.as_ref().is_none_or(|kinds| {
+            kinds.iter().all(|kind| {
+                !matches!(
+                    kind.0.as_str(),
+                    "model_switch.instructions" | "persistent_mode.instructions"
+                )
+            })
+        })
+    }));
+}
+
+#[test]
+fn drop_last_n_user_turns_preserves_switch_fragments_for_a_same_turn_steer() {
+    let turn_id = "shared-turn";
+    let mut developer_message: ResponseItem =
+        ContextualUserFragment::into(ModelSwitchInstructions::new("switched model instructions"));
+    developer_message.set_turn_id_if_missing(turn_id);
+    let mut initial_user = user_input_text_msg("initial user");
+    initial_user.set_turn_id_if_missing(turn_id);
+    let initial_assistant = assistant_msg("initial assistant");
+    let mut steer = user_input_text_msg("same-turn steer");
+    steer.set_turn_id_if_missing(turn_id);
+    let mut history = create_history_with_items(vec![
+        developer_message.clone(),
+        initial_user.clone(),
+        initial_assistant.clone(),
+        steer,
+        assistant_msg("steer assistant"),
+    ]);
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+
+    assert_eq!(
+        history.logical_items(),
+        vec![developer_message, initial_user, initial_assistant]
     );
 }
 

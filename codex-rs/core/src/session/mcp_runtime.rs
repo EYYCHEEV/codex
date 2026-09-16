@@ -7,6 +7,7 @@
 use super::session::SessionConfiguration;
 use super::*;
 use crate::mcp::McpRuntimeProjection;
+use crate::mcp::mcp_environment_authority_for_selections;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerTransportConfig;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
@@ -301,11 +302,10 @@ impl Session {
             }
 
             if let Some(catalog) = catalog {
-                let selections = environments.all_selections();
-                let environment_scope = McpEnvironmentScope::Selected(&selections);
+                let selections = environments.configuration_selections();
                 projection.config.mcp_server_catalog =
                     catalog.build_with_environment_authority(|environment_id| {
-                        environment_scope.authority_for(environment_id)
+                        mcp_environment_authority_for_selections(&selections, environment_id)
                     });
             }
             projection
@@ -386,7 +386,7 @@ impl Session {
             desired.local_process_cwd.clone(),
         )
         .with_selected_environments(
-            desired.environments.all_selections().into(),
+            desired.environments.configuration_selections().into(),
             desired.environments.ready_environment_handles(),
         );
         McpRuntimeInput {

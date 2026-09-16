@@ -214,7 +214,6 @@ async fn managed_refresh_succeeds_updates_storage_and_revision() -> Result<()> {
         bedrock_api_key: None,
         managed_chatgpt: None,
         bedrock_access_keys: None,
-        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
     ctx.auth_manager.managed_chatgpt_accounts()?;
@@ -309,6 +308,7 @@ async fn refresh_token_succeeds_updates_account_id_when_id_token_changes() -> Re
         personal_access_token: None,
         bedrock_api_key: None,
         managed_chatgpt: None,
+        bedrock_access_keys: None,
     };
     ctx.write_auth(&initial_auth).await?;
 
@@ -1682,7 +1682,7 @@ impl RefreshTokenTestContext {
             /*forced_chatgpt_workspace_id*/ None,
             /*chatgpt_base_url*/ None,
             AuthKeyringBackendKind::default(),
-            /*auth_route_config*/ None,
+            codex_login::test_support::transport_default_auth_route_config(),
         )
         .await
     }

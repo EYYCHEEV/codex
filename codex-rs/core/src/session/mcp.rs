@@ -171,7 +171,7 @@ impl Session {
                         session_source: &session_source,
                         originator: &originator,
                         disabled_plugin_ids: &disabled_plugin_ids,
-                        environments: McpEnvironmentScope::Selected(&environment_selections),
+                        environments: McpEnvironmentScope::Snapshot(&environments),
                     },
                     &ready_selected_capability_roots,
                     executor_capability_discovery.as_deref(),
@@ -279,7 +279,7 @@ impl Session {
                         session_source: &desired.session_source,
                         originator: &desired.originator,
                         disabled_plugin_ids: &desired.disabled_plugin_ids,
-                        environments: McpEnvironmentScope::Selected(&environment_selections),
+                        environments: McpEnvironmentScope::Snapshot(&desired.environments),
                     },
                     &ready_selected_capability_roots,
                     executor_capability_discovery.as_deref(),
@@ -352,7 +352,7 @@ impl Session {
                     session_source: &desired.session_source,
                     originator: &desired.originator,
                     disabled_plugin_ids: &desired.disabled_plugin_ids,
-                    environments: McpEnvironmentScope::Selected(&environment_selections),
+                    environments: McpEnvironmentScope::Snapshot(&desired.environments),
                 },
                 &ready_selected_capability_roots,
                 executor_capability_discovery.as_deref(),
@@ -498,9 +498,6 @@ impl Session {
             return binding;
         }
         let _ = self.mcp_refresh.claim();
-        self.services
-            .plugins_manager
-            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
         let desired = McpDesiredState {
             config: Arc::clone(&turn_context.config),
             auth,
@@ -860,7 +857,7 @@ impl Session {
                     session_source: &turn_context.session_source,
                     originator: &turn_context.originator,
                     disabled_plugin_ids: &disabled_plugin_ids,
-                    environments: McpEnvironmentScope::Selected(&environment_selections),
+                    environments: McpEnvironmentScope::Snapshot(&desired.environments),
                 },
                 &ready_selected_capability_roots,
                 executor_capability_discovery.as_deref(),

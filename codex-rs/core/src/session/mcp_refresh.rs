@@ -22,7 +22,6 @@ impl McpRefresh {
         self.pending.store(true, Ordering::Release);
     }
 
-    #[cfg(test)]
     pub(super) fn is_pending(&self) -> bool {
         self.pending.load(Ordering::Acquire)
     }

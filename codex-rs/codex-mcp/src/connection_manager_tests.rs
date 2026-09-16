@@ -5672,8 +5672,26 @@ async fn reconcile_reusable_server_with_mcp_config(
     runtime_context: McpRuntimeContext,
     mcp_config: crate::McpConfig,
 ) -> McpConnectionSet {
-    let (tx_event, _rx_event) = async_channel::unbounded();
-    McpConnectionSet::new(
+    reconcile_reusable_server_with_mcp_config_and_events(
+        previous,
+        server_name,
+        config,
+        runtime_context,
+        mcp_config,
+    )
+    .await
+    .0
+}
+
+async fn reconcile_reusable_server_with_mcp_config_and_events(
+    previous: &McpConnectionSet,
+    server_name: &str,
+    config: McpServerConfig,
+    runtime_context: McpRuntimeContext,
+    mcp_config: crate::McpConfig,
+) -> (McpConnectionSet, async_channel::Receiver<Event>) {
+    let (tx_event, rx_event) = async_channel::unbounded();
+    let manager = McpConnectionSet::new(
         Some(previous),
         McpPublicationGate::already_published(),
         McpRuntimeInput {
@@ -5702,7 +5720,8 @@ async fn reconcile_reusable_server_with_mcp_config(
         },
         ElicitationRequestRouter::default(),
     )
-    .await
+    .await;
+    (manager, rx_event)
 }
 
 #[tokio::test]
@@ -6172,18 +6191,63 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() -> 
     config.enabled_tools = Some(vec!["search".to_string()]);
     config.startup_timeout_sec = Some(DEFAULT_STARTUP_TIMEOUT);
 
-    let reconciled = tokio::time::timeout(
+    let codex_home = tempdir()?;
+    let (reconciled, rx_event) = tokio::time::timeout(
         Duration::from_millis(100),
-        reconcile_reusable_server(&previous, config, runtime_context),
+        reconcile_reusable_server_with_mcp_config_and_events(
+            &previous,
+            "docs",
+            config,
+            runtime_context,
+            crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf()),
+        ),
     )
     .await
     .expect("reconciliation must not wait for an unchanged pending MCP server");
 
     assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+    let starting = rx_event.recv().await?;
+    assert_eq!(starting.id, "refresh");
+    let EventMsg::McpStartupUpdate(starting) = starting.msg else {
+        panic!("expected MCP startup update");
+    };
+    assert_eq!(
+        starting,
+        McpStartupUpdateEvent {
+            server: "docs".to_string(),
+            status: McpStartupStatus::Starting,
+        }
+    );
+    assert!(rx_event.try_recv().is_err());
     release_startup
         .send(())
         .map_err(|()| anyhow!("pending startup should still be running"))?;
     startup.await??;
+    let ready = rx_event.recv().await?;
+    assert_eq!(ready.id, "refresh");
+    let EventMsg::McpStartupUpdate(ready) = ready.msg else {
+        panic!("expected MCP startup update");
+    };
+    assert_eq!(
+        ready,
+        McpStartupUpdateEvent {
+            server: "docs".to_string(),
+            status: McpStartupStatus::Ready,
+        }
+    );
+    let complete = rx_event.recv().await?;
+    assert_eq!(complete.id, "refresh");
+    let EventMsg::McpStartupComplete(complete) = complete.msg else {
+        panic!("expected MCP startup complete event");
+    };
+    assert_eq!(
+        complete,
+        McpStartupCompleteEvent {
+            ready: vec!["docs".to_string()],
+            failed: Vec::new(),
+            cancelled: Vec::new(),
+        }
+    );
     assert_eq!(
         model_tool_names(&reconciled.list_all_tools().await),
         HashSet::from([ToolName::namespaced("mcp__docs", "search")])

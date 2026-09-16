@@ -10,6 +10,10 @@ use crate::catalog_prompt::render_available_skills_body;
 use crate::tools::SkillToolAuthority;
 
 pub(crate) const MAX_SKILL_INSTRUCTION_TOKENS: usize = 10_000;
+// History recording adds a response-item ID, turn ID, and creation timestamp after skills have
+// decided whether an instruction fragment is safe to inject. Keep enough room for that framing so
+// an accepted fragment does not cross the model-visible per-item limit when it is recorded.
+const SKILL_INSTRUCTION_STAMPING_HEADROOM_TOKENS: usize = 128;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AvailableSkillsInstructions {
@@ -81,7 +85,11 @@ impl SkillInstructions {
     pub(crate) fn exceeds_model_visible_token_limit(&self) -> bool {
         let item = ResponseItem::from(self.render_fragment());
         serde_json::to_string(&item)
-            .map(|serialized| approx_token_count(&serialized) > MAX_SKILL_INSTRUCTION_TOKENS)
+            .map(|serialized| {
+                approx_token_count(&serialized)
+                    > MAX_SKILL_INSTRUCTION_TOKENS
+                        .saturating_sub(SKILL_INSTRUCTION_STAMPING_HEADROOM_TOKENS)
+            })
             .unwrap_or(true)
     }
 }

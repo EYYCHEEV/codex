@@ -239,7 +239,10 @@ async fn set_rate_limits_carries_account_metadata_from_codex_to_codex_other() {
     );
 
     assert_eq!(
-        state.latest_rate_limits.map(|latest| latest.snapshot),
+        state
+            .latest_rate_limits
+            .as_ref()
+            .map(|latest| latest.snapshot.clone()),
         Some(RateLimitSnapshot {
             limit_id: Some("codex_other".to_string()),
             limit_name: None,

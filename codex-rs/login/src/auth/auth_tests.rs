@@ -220,11 +220,12 @@ async fn load_auth_repairs_stale_account_id_for_managed_chatgpt_auth() {
         codex_home.path(),
         /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         /*forced_chatgpt_workspace_id*/ None,
         /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::default(),
         /*agent_identity_authapi_base_url*/ None,
-        /*auth_route_config*/ None,
+        &crate::test_support::transport_default_auth_route_config(),
     )
     .await
     .expect("load_auth should succeed")
@@ -361,7 +362,7 @@ async fn login_with_agent_identity_jwt_enforces_workspace_before_write() {
             Some(&allowed),
             Some(&chatgpt_base_url),
             AuthKeyringBackendKind::Direct,
-            None,
+            &crate::test_support::transport_default_auth_route_config(),
         )
         .await
         .expect_err("disallowed workspace must be rejected");
@@ -397,7 +398,7 @@ async fn login_with_agent_identity_jwt_allows_same_workspace_when_fedramp() {
         Some(&allowed),
         Some(&format!("{}/backend-api", server.uri())),
         AuthKeyringBackendKind::Direct,
-        None,
+        &crate::test_support::transport_default_auth_route_config(),
     )
     .await
     .expect("same workspace FedRAMP JWT should be allowed");
@@ -439,11 +440,12 @@ async fn env_agent_identity_jwt_rejects_workspace_before_task_registration() {
         codex_home.path(),
         false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         Some(&allowed),
         Some(&format!("{authapi_base_url}/backend-api")),
         AuthKeyringBackendKind::Direct,
         Some(&authapi_base_url),
-        None,
+        &crate::test_support::transport_default_auth_route_config(),
     )
     .await
     .expect_err("disallowed env JWT must fail");
@@ -497,11 +499,12 @@ async fn persisted_agent_identity_jwt_rejects_workspace_without_mutation_or_regi
         codex_home.path(),
         false,
         AuthCredentialsStoreMode::File,
+        /*allowed_login_methods*/ None,
         Some(&allowed),
         Some(&format!("{authapi_base_url}/backend-api")),
         AuthKeyringBackendKind::Direct,
         Some(&authapi_base_url),
-        None,
+        &crate::test_support::transport_default_auth_route_config(),
     )
     .await
     .expect_err("disallowed persisted JWT must fail");
@@ -1901,6 +1904,36 @@ async fn external_header_auth_rejects_a_disallowed_workspace_on_refresh() {
     assert_eq!(manager.auth_cached(), Some(allowed_auth));
 }
 
+#[test]
+fn clearing_absent_external_auth_preserves_cached_auth() {
+    let auth = CodexAuth::from_api_key("ordinary-api-key");
+    let manager = AuthManager::from_auth_for_testing(auth.clone());
+
+    manager.clear_external_auth();
+
+    assert_eq!(manager.auth_cached(), Some(auth));
+}
+
+#[tokio::test]
+async fn test_auth_managers_isolate_external_chatgpt_overlays() {
+    let ordinary_auth = CodexAuth::from_api_key("ordinary-api-key");
+    let ordinary_manager = AuthManager::from_auth_for_testing(ordinary_auth.clone());
+    let access_token = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("enterprise".to_string()),
+        chatgpt_account_id: Some("workspace-one".to_string()),
+    })
+    .expect("fake access token");
+    let external_auth =
+        CodexAuth::from_external_chatgpt_tokens(&access_token, "workspace-one", Some("enterprise"))
+            .expect("external ChatGPT auth");
+    let external_manager = AuthManager::from_auth_for_testing(external_auth.clone());
+
+    assert_eq!(external_manager.auth_cached(), Some(external_auth.clone()));
+    assert_eq!(external_manager.auth().await, Some(external_auth));
+    assert_eq!(ordinary_manager.auth().await, Some(ordinary_auth));
+}
+
 #[tokio::test]
 async fn workload_identity_auth_is_immutable_and_process_local() {
     let codex_home = tempdir().expect("tempdir");
@@ -2843,7 +2876,7 @@ async fn forced_login_restriction_clears_external_overlay_and_ephemeral_pool() {
         None,
         None,
         AuthKeyringBackendKind::default(),
-        None,
+        crate::test_support::transport_default_auth_route_config(),
     )
     .await;
     manager
@@ -2867,8 +2900,9 @@ async fn forced_login_restriction_clears_external_overlay_and_ephemeral_pool() {
         keyring_backend_kind: AuthKeyringBackendKind::default(),
         forced_login_method: Some(ForcedLoginMethod::Api),
         forced_chatgpt_workspace_id: None,
+        managed_auth_policy: ManagedAuthPolicy::default(),
         chatgpt_base_url: None,
-        auth_route_config: None,
+        auth_route_config: crate::test_support::transport_default_auth_route_config(),
     };
 
     super::enforce_login_restrictions(&config)
@@ -3576,7 +3610,7 @@ async fn file_pool_manager(codex_home: &std::path::Path) -> Arc<AuthManager> {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        crate::test_support::transport_default_auth_route_config(),
     )
     .await
 }
@@ -4577,7 +4611,7 @@ async fn long_lived_managers_observe_external_chatgpt_overlay_replacement() {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        crate::test_support::transport_default_auth_route_config(),
     )
     .await;
     let ephemeral_manager = AuthManager::shared(
@@ -4587,7 +4621,7 @@ async fn long_lived_managers_observe_external_chatgpt_overlay_replacement() {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        crate::test_support::transport_default_auth_route_config(),
     )
     .await;
 
@@ -4662,7 +4696,7 @@ async fn direct_refresh_accepts_reloaded_external_overlay_replacement() {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        crate::test_support::transport_default_auth_route_config(),
     )
     .await;
     assert_eq!(
@@ -4717,7 +4751,7 @@ async fn external_chatgpt_overlay_logout_preserves_persistent_pool() {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        crate::test_support::transport_default_auth_route_config(),
     )
     .await;
     let ephemeral_identity = ephemeral_manager
@@ -4743,7 +4777,7 @@ async fn external_chatgpt_overlay_logout_preserves_persistent_pool() {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        crate::test_support::transport_default_auth_route_config(),
     )
     .await;
     assert!(overlay_manager.is_external_chatgpt_auth_active());
@@ -4852,7 +4886,7 @@ async fn free_logout_with_revoke_revokes_canonical_pool_credentials() {
             codex_home.path(),
             AuthCredentialsStoreMode::File,
             AuthKeyringBackendKind::Direct,
-            None,
+            &crate::test_support::transport_default_auth_route_config(),
         )
         .await
         .expect("free logout with revoke")

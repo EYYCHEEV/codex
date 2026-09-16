@@ -4683,6 +4683,7 @@ impl Session {
             );
         }
         // Render the active mode after the usage hint so it can override that hint.
+        let mut initial_model_switch = None;
         let mut initial_multi_agent_mode = None;
         let mut managed_developer_instructions = None;
         for fragment in world_state.render_full() {
@@ -4690,8 +4691,7 @@ impl Session {
                 "developer"
                     if fragment.markers().0 == ModelSwitchInstructions::type_markers().0 =>
                 {
-                    // New-model instructions must precede the rest of the developer context.
-                    developer_sections.insert(0, fragment.render_fragment());
+                    initial_model_switch = Some(fragment);
                 }
                 "developer" if fragment.markers().0 == MULTI_AGENT_MODE_OPEN_TAG => {
                     initial_multi_agent_mode = Some(fragment);
@@ -4724,7 +4724,14 @@ impl Session {
             developer_sections.push(recommended_plugins.render_fragment());
         }
 
-        let mut items = Vec::with_capacity(4);
+        let mut items = Vec::with_capacity(5);
+        if let Some(initial_model_switch) = initial_model_switch
+            && let Some(message) = crate::context_manager::updates::build_rendered_message(vec![
+                initial_model_switch.render_fragment(),
+            ])
+        {
+            items.push(message);
+        }
         if let Some(developer_message) =
             crate::context_manager::updates::build_rendered_message(developer_sections)
         {
