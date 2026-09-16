@@ -1064,23 +1064,20 @@ async fn wait_agent_reports_terminal_once_and_keeps_unresolved_siblings_visible(
     let complete_child = async {
         completed_thread
             .thread
-            .submit(Op::UserInput {
-                items: vec![UserInput::Text {
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(vec![UserInput::Text {
                     text: "finish child for wait".to_string(),
                     text_elements: Vec::new(),
-                }],
-                final_output_json_schema: None,
-                responsesapi_client_metadata: None,
-                additional_context: Default::default(),
-                thread_settings: ThreadSettingsOverrides {
+                }])
+                .with_thread_settings(ThreadSettingsOverrides {
                     environments: Some(local_selections(test.config.cwd.clone())),
                     approval_policy: Some(AskForApproval::Never),
                     sandbox_policy: Some(sandbox_policy),
                     permission_profile,
                     model: Some(completed_thread.session_configured.model.clone()),
                     ..Default::default()
-                },
-            })
+                }),
+            )
             .await?;
         wait_for_event_match(completed_thread.thread.as_ref(), |event| match event {
             EventMsg::TurnComplete(event) => event
@@ -1748,6 +1745,9 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
         config.agent_default_subagent_model = Some(V2_DEFAULT_MODEL.to_string());
         config.agent_default_subagent_reasoning_effort = Some(V2_DEFAULT_REASONING_EFFORT);
+        if matches!(selection, FullHistoryV2ModelSelection::ExplicitOverride) {
+            config.multi_agent_v2.hide_spawn_agent_metadata = false;
+        }
     });
     if matches!(selection, FullHistoryV2ModelSelection::WorldStateIdentity) {
         builder = builder.with_history_mode(ThreadHistoryMode::Paginated);
@@ -2049,21 +2049,22 @@ async fn spawned_v2_children_use_fork_and_typed_route_defaults() -> Result<()> {
             "spawn-typed",
         ),
     ] {
-        let (spawn_args, expected_model, expected_reasoning_effort, inherits_parent_context) =
+        let (spawn_args, expected_model, expected_reasoning_effort, inherits_seed_history) =
             match selection {
                 V2LifecycleSelection::ConfiguredDefault => (
                     json!({
                         "message": child_prompt,
-                        "task_name": "worker",
+                        "task_name": "configured_default",
+                        "fork_turns": "none",
                     }),
                     V2_DEFAULT_MODEL,
                     V2_DEFAULT_REASONING_EFFORT,
-                    true,
+                    false,
                 ),
                 V2LifecycleSelection::TypedRole => (
                     json!({
                         "message": child_prompt,
-                        "task_name": "worker",
+                        "task_name": "typed",
                         "agent_type": "custom",
                     }),
                     ROLE_MODEL,
@@ -2128,7 +2129,7 @@ async fn spawned_v2_children_use_fork_and_typed_route_defaults() -> Result<()> {
             parent_prompt,
             expected_model,
             expected_reasoning_effort,
-            inherits_parent_context,
+            inherits_seed_history,
             spawn_turn,
             child_request_log,
         ));
@@ -2162,7 +2163,7 @@ async fn spawned_v2_children_use_fork_and_typed_route_defaults() -> Result<()> {
                 "custom".to_string(),
                 AgentRoleConfig {
                     description: Some("Custom role".to_string()),
-                    config_file: Some(role_path),
+                    config_file: Some(role_path.to_path_buf()),
                     nickname_candidates: None,
                 },
             );
@@ -2176,21 +2177,17 @@ async fn spawned_v2_children_use_fork_and_typed_route_defaults() -> Result<()> {
         parent_prompt,
         expected_model,
         expected_reasoning_effort,
-        inherits_parent_context,
+        inherits_seed_history,
         spawn_turn,
         child_request_log,
     ) in scenario_mocks
     {
         test.submit_turn(parent_prompt).await?;
-        let _ = spawn_turn.single_request();
-        let child_request = wait_for_requests(&child_request_log)
-            .await?
-            .into_iter()
-            .next()
-            .expect("child request should exist");
+        drop(spawn_turn);
+        let child_request = wait_for_request_with_model(&child_request_log, expected_model).await?;
         assert_eq!(
-            child_request.body_contains_text(parent_prompt),
-            inherits_parent_context
+            child_request.body_contains_text(TURN_0_FORK_PROMPT),
+            inherits_seed_history
         );
         let child_body = child_request.body_json();
         assert_eq!(
@@ -2994,6 +2991,9 @@ async fn plaintext_multi_agent_v2_completion_sends_agent_message(
                 agent_path: codex_protocol::AgentPath::root()
                     .join("worker")
                     .expect("worker path"),
+                agent_type: None,
+                model: Some("koffing".to_string()),
+                reasoning_effort: None,
             }
         );
     } else {
@@ -3252,6 +3252,9 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn() -> R
                 agent_path: codex_protocol::AgentPath::root()
                     .join("worker")
                     .expect("worker path"),
+                agent_type: None,
+                model: Some("gpt-5.6-sol".to_string()),
+                reasoning_effort: Some(ReasoningEffort::Low),
             },
         )
     );

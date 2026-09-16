@@ -376,7 +376,8 @@ async fn wait_for_analytics_events(
         }
         assert!(
             Instant::now() < deadline,
-            "timed out waiting for {event_type} analytics"
+            "timed out waiting for {expected_count} {event_type} analytics events; observed {}",
+            events.len(),
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -3141,8 +3142,10 @@ async fn production_turn_suppresses_only_the_superseded_host_skill_prompt() -> R
     )?;
     let first_skill_path = codex_home.path().join("skills/first-host/SKILL.md");
     let second_skill_path = codex_home.path().join("skills/second-host/SKILL.md");
-    let first_host_contents =
-        "---\nname: first-host\ndescription: First host skill.\n---\n\nFIRST_HOST_BODY\n";
+    let first_host_contents = format!(
+        "---\nname: first-host\ndescription: First host skill.\n---\n\n{}\n",
+        "OVERSIZED_RAW_HOST_BODY".repeat(20_000)
+    );
     let second_host_contents =
         "---\nname: second-host\ndescription: Second host skill.\n---\n\nSECOND_HOST_BODY\n";
     std::fs::write(&first_skill_path, first_host_contents)?;
@@ -3186,14 +3189,31 @@ async fn production_turn_suppresses_only_the_superseded_host_skill_prompt() -> R
             shadow_selection_enabled: false,
         },
     );
+    let chatgpt_base_url = server.uri();
     let mut builder = test_codex()
         .with_home(codex_home)
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_extensions(Arc::new(extensions.build()))
-        .with_config(configure_catalog_test);
+        .with_config(move |config| {
+            configure_catalog_test(config);
+            config.chatgpt_base_url = chatgpt_base_url;
+        });
     let test = builder.build_with_auto_env(&server).await?;
 
-    test.submit_turn("Use $first-host and $second-host.")
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Use $first-host and $second-host.".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
+    let mut warnings = Vec::new();
+    loop {
+        match core_test_support::wait_for_event(&test.codex, |_| true).await {
+            EventMsg::Warning(warning) => warnings.push(warning.message),
+            EventMsg::TurnComplete(_) => break,
+            _ => {}
+        }
+    }
 
     let user_messages = response.single_request().message_input_texts("user");
     let skill_messages = user_messages
@@ -3218,6 +3238,21 @@ async fn production_turn_suppresses_only_the_superseded_host_skill_prompt() -> R
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner),
         vec![second_skill_path.display().to_string()]
+    );
+    assert!(
+        warnings.is_empty(),
+        "extension-injected host skills must not be reread or warned about: {warnings:?}"
+    );
+    let mut invoked_skill_names =
+        wait_for_analytics_events(&server, "skill_invocation", /*expected_count*/ 3)
+            .await
+            .into_iter()
+            .filter_map(|event| event["skill_name"].as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+    invoked_skill_names.sort();
+    assert_eq!(
+        invoked_skill_names,
+        vec!["first-host", "first-host", "second-host"]
     );
 
     Ok(())

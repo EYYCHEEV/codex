@@ -7,17 +7,16 @@
 use super::session::SessionConfiguration;
 use super::*;
 use crate::mcp::McpRuntimeProjection;
+use crate::mcp::mcp_environment_authority_for_selections;
 use codex_config::McpServerDisabledReason;
 use codex_config::McpServerTransportConfig;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::ElicitationReviewerHandle;
-use codex_mcp::McpEnvironmentAuthority;
 use codex_mcp::McpServerRegistration;
 use codex_mcp::McpServerSource;
 use codex_mcp::McpStartupPolicy;
 use codex_mcp::PreparedMcpCall;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
-use codex_protocol::protocol::EnvironmentConfigState;
 use std::collections::HashSet;
 
 pub(super) struct McpDesiredState {
@@ -293,35 +292,10 @@ impl Session {
             }
 
             if let Some(catalog) = catalog {
-                let selections = self.services.turn_environments.selections();
+                let selections = environments.configuration_selections();
                 projection.config.mcp_server_catalog =
                     catalog.build_with_environment_authority(|environment_id| {
-                        let Some(selection) = selections
-                            .iter()
-                            .find(|selection| selection.environment_id == environment_id)
-                        else {
-                            return if environment_id
-                                == codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID
-                            {
-                                McpEnvironmentAuthority::Unrestricted
-                            } else {
-                                McpEnvironmentAuthority::SelectedPluginsOnly
-                            };
-                        };
-                        match &selection.config {
-                            EnvironmentConfigState::FromThread => {
-                                McpEnvironmentAuthority::Unrestricted
-                            }
-                            EnvironmentConfigState::Pending | EnvironmentConfigState::Failed(_) => {
-                                McpEnvironmentAuthority::Unavailable
-                            }
-                            EnvironmentConfigState::Ready(config) => config
-                                .mcp_policy
-                                .as_ref()
-                                .map_or(McpEnvironmentAuthority::Unrestricted, |policy| {
-                                    McpEnvironmentAuthority::Restricted(policy)
-                                }),
-                        }
+                        mcp_environment_authority_for_selections(&selections, environment_id)
                     });
             }
             projection

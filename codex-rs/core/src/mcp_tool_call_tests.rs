@@ -1604,10 +1604,11 @@ async fn codex_apps_auth_elicitation_feature_disabled_returns_original_result() 
     Arc::make_mut(&mut mutable_turn_context.config).features = ManagedFeatures::from(features);
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        &turn_context,
+        &step_context,
         turn_context.approval_policy(),
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
@@ -1629,10 +1630,11 @@ async fn codex_apps_auth_elicitation_disallowed_by_policy_returns_original_resul
     Arc::make_mut(&mut mutable_turn_context.config).features = ManagedFeatures::from(features);
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        &turn_context,
+        &step_context,
         AskForApproval::Never,
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
@@ -1665,10 +1667,11 @@ async fn codex_apps_auth_elicitation_granular_mcp_disabled_returns_original_resu
         .expect("test setup should allow updating approval policy");
     let result = codex_apps_auth_failure_result();
     let metadata = codex_apps_auth_failure_metadata();
+    let step_context = StepContext::for_test(Arc::clone(&turn_context));
 
     let returned = maybe_request_codex_apps_auth_elicitation(
         &session,
-        &turn_context,
+        &step_context,
         turn_context.approval_policy(),
         "call_123",
         CODEX_APPS_MCP_SERVER_NAME,
@@ -1692,9 +1695,10 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation() {
         let session = Arc::clone(&session);
         let turn_context = Arc::clone(&turn_context);
         async move {
+            let step_context = StepContext::for_test(Arc::clone(&turn_context));
             maybe_request_codex_apps_auth_elicitation(
                 &session,
-                &turn_context,
+                &step_context,
                 turn_context.approval_policy(),
                 "call_123",
                 CODEX_APPS_MCP_SERVER_NAME,

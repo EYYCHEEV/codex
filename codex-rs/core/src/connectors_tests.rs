@@ -295,7 +295,7 @@ fn managed_accessible_connectors_cache_isolates_identity_and_credential_revision
         12,
         true,
     );
-    let cached = vec![app("calendar")];
+    let cached = vec![plugin_connector_to_app_info("calendar".to_string())];
 
     with_accessible_connectors_cache_cleared(|| {
         write_cached_accessible_connectors(first_key.clone(), &cached);

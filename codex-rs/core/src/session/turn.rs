@@ -80,6 +80,7 @@ use codex_extension_api::TurnInputEnvironment;
 use codex_features::Feature;
 use codex_file_system::FindUpErrorPolicy;
 use codex_file_system::find_nearest_ancestor_with_markers;
+use codex_history::RolloutItem;
 use codex_login::CodexAuth;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::ResponseItemId;
@@ -109,7 +110,6 @@ use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::ResponseAttemptResetEvent;
 use codex_protocol::protocol::ResponsesWebsocketCloseRecovery;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::StreamErrorEvent;
@@ -1092,16 +1092,25 @@ async fn build_skills_and_plugins(
     let injected_host_skill_prompts = turn_context
         .extension_data
         .get::<InjectedHostSkillPrompts>();
+    let (mut extension_injected_host_skills, core_selected_host_skills): (Vec<_>, Vec<_>) =
+        mentioned_skills.iter().cloned().partition(|skill| {
+            injected_host_skill_prompts.as_ref().is_some_and(|prompts| {
+                prompts.contains_path(&skill.path_to_skills_md.to_string_lossy())
+            })
+        });
     let HostSkillPrompts {
         fragments,
         injected: injected_host_skills,
         warnings: host_skill_warnings,
-    } = skills_snapshot.load_skill_prompts(&mentioned_skills).await;
+    } = skills_snapshot
+        .load_skill_prompts(&core_selected_host_skills)
+        .await;
+    extension_injected_host_skills.extend(injected_host_skills.iter().cloned());
     emit_explicit_skill_invocations(
         sess,
         turn_context,
         &mentioned_skills,
-        &injected_host_skills,
+        &extension_injected_host_skills,
         tracking.clone(),
     )
     .await;
@@ -1113,8 +1122,22 @@ async fn build_skills_and_plugins(
         .into_iter()
         .map(ContextualUserFragment::into_boxed_response_item)
         .collect::<Vec<_>>();
+    let extension_skill_items = extension_injection_items.iter().filter(|item| {
+        let ResponseItem::Message {
+            internal_chat_message_metadata_passthrough: Some(metadata),
+            ..
+        } = *item
+        else {
+            return false;
+        };
+        metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+            kinds
+                .iter()
+                .any(|kind| kind.0 == "skills.selected_skill_instructions")
+        })
+    });
     let skill_connector_ids = collect_explicit_app_ids_from_skill_items(
-        &skill_items,
+        skill_items.iter().chain(extension_skill_items),
         &available_connectors,
         &skill_name_counts_lower,
     );
@@ -1150,18 +1173,7 @@ async fn build_skills_and_plugins(
         }
     }
 
-    let mut injection_items = match injected_host_skill_prompts {
-        Some(injected_host_skill_prompts) => skill_items
-            .into_iter()
-            .zip(injected_host_skills.iter())
-            .filter_map(|(item, skill)| {
-                (!injected_host_skill_prompts
-                    .contains_path(&skill.path_to_skills_md.to_string_lossy()))
-                .then_some(item)
-            })
-            .collect(),
-        None => skill_items,
-    };
+    let mut injection_items = skill_items;
     injection_items.extend(plugin_items);
     injection_items.extend(extension_injection_items);
     Some((injection_items, explicitly_enabled_connectors))
@@ -1492,7 +1504,7 @@ async fn run_auto_compact(
                 Arc::clone(sess),
                 step_context,
                 fallback_step_context,
-                client_session.turn_state(),
+                client_session,
                 initial_context_injection,
                 reason,
                 phase,
@@ -1518,17 +1530,17 @@ async fn run_auto_compact(
     Ok(())
 }
 
-pub(super) fn collect_explicit_app_ids_from_skill_items(
-    skill_items: &[ResponseItem],
+pub(super) fn collect_explicit_app_ids_from_skill_items<'a>(
+    skill_items: impl IntoIterator<Item = &'a ResponseItem>,
     connectors: &[connectors::AppInfo],
     skill_name_counts_lower: &HashMap<String, usize>,
 ) -> HashSet<String> {
-    if skill_items.is_empty() || connectors.is_empty() {
+    if connectors.is_empty() {
         return HashSet::new();
     }
 
     let skill_messages = skill_items
-        .iter()
+        .into_iter()
         .filter_map(|item| match item {
             ResponseItem::Message { content, .. } => {
                 content.iter().find_map(|content_item| match content_item {
@@ -1793,7 +1805,7 @@ async fn run_sampling_request(
             }
             client_session.try_switch_fallback_transport(
                 &turn_context.session_telemetry,
-                &turn_context.model_info,
+                turn_context.model_info(),
             );
             sess.send_event(
                 &turn_context,
@@ -2175,7 +2187,7 @@ fn can_fallback_rewindable_websocket_attempt(
     replay_state.is_rewindable()
         && matches!(err.details(), CodexErrorDetails::WebsocketClosed(_))
         && err.is_retryable()
-        && client_session.websocket_http_fallback_allowed()
+        && client_session.rewindable_websocket_fallback_allowed()
 }
 
 pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
@@ -2441,6 +2453,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::DeprecationNotice(_)
         | EventMsg::StreamError(_)
         | EventMsg::TurnDiff(_)
+        | EventMsg::ManagedAccountSelected(_)
         | EventMsg::RealtimeConversationListVoicesResponse(_)
         | EventMsg::PlanUpdate(_)
         | EventMsg::TurnAborted(_)
@@ -2955,6 +2968,7 @@ async fn try_run_sampling_request(
         sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.as_ref())
             .await;
         let mut stream = stream_result??;
+        let defer_rewindable_output = client_session.rewindable_websocket_fallback_allowed();
         let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
         let mut needs_follow_up = false;
         let mut last_agent_message: Option<String> = None;
@@ -3106,10 +3120,12 @@ async fn try_run_sampling_request(
                         )
                         .await;
                     }
-                    if response_item_replay_state(&item).is_rewindable() {
-                        let preempt_for_mailbox_mail =
-                            response_item_preempts_for_mailbox_mail(&item, plan_mode)
-                                && sess.input_queue.has_pending_mailbox_items().await;
+                    let preempt_for_mailbox_mail =
+                        response_item_preempts_for_mailbox_mail(&item, plan_mode)
+                            && sess.input_queue.has_pending_mailbox_items().await;
+                    if response_item_replay_state(&item).is_rewindable()
+                        && (defer_rewindable_output || preempt_for_mailbox_mail)
+                    {
                         pending_completed_response_items.push(PendingCompletedResponseItem {
                             item,
                             previously_streamed_item,

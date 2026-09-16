@@ -455,10 +455,6 @@ async fn collect_compaction_output_inner(
             Ok(event) => event,
             Err(err) => return AttemptOutcome::new(Err(err), replay_state),
         };
-        replay_state = std::cmp::max(
-            replay_state,
-            crate::session::turn::response_event_replay_state(&event),
-        );
         match event {
             ResponseEvent::OutputItemDone(item) => {
                 output_item_count += 1;
@@ -486,6 +482,7 @@ async fn collect_compaction_output_inner(
                 usage_metadata,
                 ..
             } => {
+                replay_state = crate::session::turn::AttemptReplayState::Irreversible;
                 if let Some((sess, turn_context, _)) = &rate_target {
                     sess.record_observed_response_completed(
                         turn_context,
@@ -1222,7 +1219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn buffered_output_failure_is_committed_and_not_retryable_by_owner() {
+    async fn buffered_output_failure_is_uncommitted_and_retryable_by_owner() {
         let compaction = ResponseItem::Compaction {
             id: None,
             encrypted_content: "buffered".to_string(),
@@ -1235,7 +1232,8 @@ mod tests {
 
         let outcome = collect_compaction_output(stream).await;
 
-        assert!(outcome.replay_state.is_committed());
+        assert!(outcome.replay_state.is_uncommitted());
+        assert!(outcome.retry_allowed());
         let Err(err) = outcome.result else {
             panic!("buffered stream failure should be returned");
         };

@@ -1002,7 +1002,6 @@ mod replay_safety_tests {
         let history = session.clone_history().await;
         history
             .raw_items()
-            .iter()
             .filter(|item| {
                 matches!(
                     item,

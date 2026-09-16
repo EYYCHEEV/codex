@@ -854,7 +854,7 @@ impl CodexThread {
             .services
             .model_client
             .current_client_setup(
-                Some(&turn_context.model_info.slug),
+                Some(&turn_context.model_info().slug),
                 Some(&self.session.session_id().to_string()),
             )
             .await?;

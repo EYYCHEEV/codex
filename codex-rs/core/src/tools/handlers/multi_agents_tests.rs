@@ -13,6 +13,8 @@ use crate::local_agent_graph_store_from_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::tests::make_session_and_context_with_rx;
+use crate::session::tests::update_selected_settings_for_test;
+use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
@@ -182,6 +184,28 @@ model_reasoning_effort = "medium"
 fn set_turn_config(turn: &mut TurnContext, config: crate::config::Config) {
     turn.multi_agent_version = config.multi_agent_version_from_features();
     turn.config = Arc::new(config);
+}
+
+fn set_turn_reasoning_effort_for_test(turn: &mut TurnContext, effort: ReasoningEffort) {
+    update_turn_settings_for_test(turn, |settings| {
+        update_selected_settings_for_test(settings, |selected| {
+            selected.collaboration_mode.settings.reasoning_effort = Some(effort);
+        });
+    });
+}
+
+fn set_turn_model_and_reasoning_effort_for_test(
+    turn: &mut TurnContext,
+    model: &str,
+    effort: ReasoningEffort,
+) {
+    update_turn_settings_for_test(turn, |settings| {
+        Arc::make_mut(&mut settings.model_info).slug = model.to_string();
+        update_selected_settings_for_test(settings, |selected| {
+            selected.collaboration_mode.settings.model = model.to_string();
+            selected.collaboration_mode.settings.reasoning_effort = Some(effort);
+        });
+    });
 }
 
 fn expect_text_output<T>(output: T) -> (String, Option<bool>)
@@ -1052,7 +1076,7 @@ async fn multi_agent_v2_typed_spawn_reports_effective_parent_fallback() {
     let mut turn = turn
         .with_model("gpt-5.6-sol".to_string(), &session.services.models_manager)
         .await;
-    turn.reasoning_effort = Some(ReasoningEffort::High);
+    set_turn_reasoning_effort_for_test(&mut turn, ReasoningEffort::High);
     let mut config = (*turn.config).clone();
     config.model_reasoning_effort = Some(ReasoningEffort::High);
     config
@@ -1147,7 +1171,7 @@ async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
     let mut turn = turn
         .with_model("gpt-5.6-sol".to_string(), &session.services.models_manager)
         .await;
-    turn.reasoning_effort = Some(ReasoningEffort::High);
+    set_turn_reasoning_effort_for_test(&mut turn, ReasoningEffort::High);
     let mut root_config = (*turn.config).clone();
     root_config.ephemeral = true;
     root_config.model_reasoning_effort = Some(ReasoningEffort::High);
@@ -1331,7 +1355,7 @@ async fn multi_agent_v2_typed_spawn_falls_back_from_unsupported_preferred_effort
     let mut turn = turn
         .with_model("gpt-5.6-sol".to_string(), &session.services.models_manager)
         .await;
-    turn.reasoning_effort = Some(ReasoningEffort::High);
+    set_turn_reasoning_effort_for_test(&mut turn, ReasoningEffort::High);
     let mut config = (*turn.config).clone();
     config.model_reasoning_effort = Some(ReasoningEffort::High);
     config
@@ -1417,8 +1441,11 @@ model_reasoning_effort = "unsupported"
 #[tokio::test]
 async fn multi_agent_v2_typed_spawn_rejects_both_invalid_routes_before_reservation() {
     let (mut session, mut turn) = make_session_and_context().await;
-    turn.model_info.slug = "missing-parent-model".to_string();
-    turn.reasoning_effort = Some(ReasoningEffort::High);
+    set_turn_model_and_reasoning_effort_for_test(
+        &mut turn,
+        "missing-parent-model",
+        ReasoningEffort::High,
+    );
     let mut config = (*turn.config).clone();
     config.model = Some("missing-parent-model".to_string());
     config.model_reasoning_effort = Some(ReasoningEffort::High);
@@ -1470,7 +1497,7 @@ model_reasoning_effort = "medium"
         )
     );
     assert_eq!(manager.list_thread_ids().await, thread_ids_before);
-    assert_eq!(manager.captured_ops(), Vec::new());
+    assert!(manager.captured_ops().is_empty());
 }
 
 #[tokio::test]
@@ -1513,7 +1540,7 @@ async fn multi_agent_v2_configured_only_rejects_hidden_built_in_before_reservati
         )),
     );
     assert_eq!(manager.list_thread_ids().await, thread_ids_before);
-    assert_eq!(manager.captured_ops(), Vec::new());
+    assert!(manager.captured_ops().is_empty());
 }
 
 #[tokio::test]
@@ -2102,8 +2129,8 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
     let mut config = (*turn.config).clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
     set_turn_config(&mut turn, config.clone());
-    let expected_model = turn.model_info.slug.clone();
-    let expected_reasoning_effort = turn.reasoning_effort.clone();
+    let expected_model = turn.model_info().slug.clone();
+    let expected_reasoning_effort = turn.reasoning_effort().cloned();
     let root = manager
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
@@ -2119,13 +2146,8 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
     session
         .services
         .agent_control
-        .register_agent_metadata_for_tests(
-            root.thread_id,
-            worker_path,
-            Some("inspect this repo".to_string()),
-        );
+        .register_agent_metadata_for_tests(root.thread_id, worker_path);
     root.thread
-        .codex
         .session
         .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
             codex_protocol::protocol::McpStartupUpdateEvent {
@@ -4220,7 +4242,6 @@ async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
     .await;
     thread
         .thread
-        .codex
         .session
         .record_mcp_startup_event(&EventMsg::McpStartupUpdate(
             codex_protocol::protocol::McpStartupUpdateEvent {

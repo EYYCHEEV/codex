@@ -542,14 +542,31 @@ impl McpConnectionSet {
                             (server_name, Err(error), reason)
                         });
                     } else if let Some(client) = pending_client {
+                        let tx_event = tx_event.clone();
+                        let submit_id = startup_submit_id.clone();
                         let publication_gate = publication_gate.clone();
                         let has_runtime_auth = runtime_auth_provider.is_some();
+                        let cancel_token = client.cancel_token.clone();
                         join_set.spawn(async move {
                             if !publication_gate.wait().await {
                                 return (server_name, Err(StartupOutcomeError::Cancelled), None);
                             }
-                            let outcome = client.client().await;
-                            let failure_reason = outcome.as_ref().err().and_then(|error| {
+                            if let Some(tx_event) = tx_event.as_ref() {
+                                let _ = emit_update(
+                                    submit_id.as_str(),
+                                    tx_event,
+                                    McpStartupUpdateEvent {
+                                        server: server_name.clone(),
+                                        status: McpStartupStatus::Starting,
+                                    },
+                                )
+                                .await;
+                            }
+                            let mut outcome = client.client().await;
+                            if cancel_token.is_cancelled() {
+                                outcome = Err(StartupOutcomeError::Cancelled);
+                            }
+                            let mut failure_reason = outcome.as_ref().err().and_then(|error| {
                                 configured_mcp_startup_failure_reason(
                                     &server_name,
                                     &configured_config,
@@ -559,6 +576,40 @@ impl McpConnectionSet {
                                     error,
                                 )
                             });
+                            if let Some(tx_event) = tx_event.as_ref() {
+                                if cancel_token.is_cancelled() {
+                                    outcome = Err(StartupOutcomeError::Cancelled);
+                                    failure_reason = None;
+                                }
+                                let status = match &outcome {
+                                    Ok(_) => McpStartupStatus::Ready,
+                                    Err(StartupOutcomeError::Cancelled) => {
+                                        McpStartupStatus::Cancelled
+                                    }
+                                    Err(error) => McpStartupStatus::Failed {
+                                        error: mcp_init_error_display(
+                                            server_name.as_str(),
+                                            Some(&configured_config),
+                                            error,
+                                            failure_reason,
+                                        ),
+                                        reason: failure_reason,
+                                    },
+                                };
+                                let _ = emit_update(
+                                    submit_id.as_str(),
+                                    tx_event,
+                                    McpStartupUpdateEvent {
+                                        server: server_name.clone(),
+                                        status,
+                                    },
+                                )
+                                .await;
+                            }
+                            if cancel_token.is_cancelled() {
+                                outcome = Err(StartupOutcomeError::Cancelled);
+                                failure_reason = None;
+                            }
                             (server_name, outcome, failure_reason)
                         });
                     } else {
