@@ -1134,16 +1134,19 @@ impl TurnEnvironmentSnapshot {
             .collect()
     }
 
-    /// Returns every captured selection, including those still starting or unable to connect.
-    pub(crate) fn all_selections(&self) -> Vec<TurnEnvironmentSelection> {
+    /// Returns the captured selections whose identity is still available, including environments
+    /// that were still starting when this snapshot was taken.
+    pub(crate) fn configuration_selections(&self) -> Vec<TurnEnvironmentSelection> {
         self.environments
             .iter()
-            .map(|environment| match environment {
-                TurnEnvironmentState::Ready(environment) => environment.selection(),
-                TurnEnvironmentState::Starting(environment) => environment
-                    .config_origin
-                    .into_input_selection(environment.selection.clone()),
-                TurnEnvironmentState::Failed { selection, .. } => selection.clone(),
+            .filter_map(|environment| match environment {
+                TurnEnvironmentState::Ready(environment) => Some(environment.selection.clone()),
+                TurnEnvironmentState::Starting(environment) => Some(environment.selection.clone()),
+                TurnEnvironmentState::Failed { selection, error } => {
+                    let mut selection = selection.clone();
+                    selection.config = EnvironmentConfigState::Failed(error.clone());
+                    Some(selection)
+                }
             })
             .collect()
     }
@@ -1732,6 +1735,10 @@ url = "ws://127.0.0.1:8765"
             config: EnvironmentConfigState::Ready(expected_config.clone()),
             ..remote.clone()
         };
+        let resolved_local = TurnEnvironmentSelection {
+            config: EnvironmentConfigState::Ready(expected_config.clone()),
+            ..local.clone()
+        };
         assert_eq!(
             starting
                 .turn_environments()
@@ -1755,8 +1762,8 @@ url = "ws://127.0.0.1:8765"
         );
         assert_eq!(starting.to_selections(), vec![local.clone()]);
         assert_eq!(
-            starting.all_selections(),
-            vec![remote.clone(), local.clone()]
+            starting.configuration_selections(),
+            vec![resolved_remote.clone(), resolved_local]
         );
         assert!(starting.single_local_environment().is_none());
 
@@ -1899,8 +1906,16 @@ url = "ws://127.0.0.1:8765"
         // Failed selections must not turn an empty executable snapshot into Full Access.
         for snapshot in [starting.refresh_readiness(), environments.snapshot().await] {
             assert!(!snapshot.has_full_access(AskForApproval::Never, &PermissionProfile::Disabled));
-            assert_eq!(snapshot.all_selections(), vec![selection.clone()]);
-            assert!(snapshot.ready_environment_handles().is_empty());
+            let configuration_selections = snapshot.configuration_selections();
+            assert_eq!(configuration_selections.len(), 1);
+            assert_eq!(
+                configuration_selections[0].environment_id,
+                selection.environment_id
+            );
+            assert!(matches!(
+                configuration_selections[0].config,
+                EnvironmentConfigState::Failed(_)
+            ));
         }
         let selected_root = SelectedCapabilityRoot {
             id: "failed-root".to_string(),

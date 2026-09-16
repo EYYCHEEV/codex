@@ -2473,6 +2473,9 @@ async fn subagent_activity_emits_matching_start_and_completion() {
         kind: codex_protocol::protocol::SubAgentActivityKind::Started,
         agent_thread_id: ThreadId::new(),
         agent_path: AgentPath::root(),
+        agent_type: None,
+        model: None,
+        reasoning_effort: None,
     };
 
     crate::tools::handlers::multi_agents_v2::emit_sub_agent_activity(&session, &turn_context, item)
@@ -4336,7 +4339,7 @@ async fn set_rate_limits_retains_previous_credits() {
         plan_type: None,
         rate_limit_reached_type: None,
     };
-    state.set_rate_limits(update, /*managed_binding*/ None);
+    state.set_rate_limits(update.clone(), /*managed_binding*/ None);
 
     assert_eq!(
         state.latest_rate_limits.map(|latest| latest.snapshot),
@@ -9973,7 +9976,7 @@ async fn explicit_unauthenticated_provider_setup_does_not_inherit_managed_mcp_au
         Vec::new(),
         |config| {
             config.model_provider.experimental_bearer_token =
-                Some("explicit-provider-token".to_string());
+                Some("explicit-provider-token".into());
         },
     )
     .await;
@@ -10001,7 +10004,7 @@ async fn explicit_unauthenticated_provider_setup_does_not_inherit_managed_mcp_au
         .services
         .model_client
         .current_client_setup(
-            Some(&turn_context.model_info.slug),
+            Some(&turn_context.model_info().slug),
             Some(&session.session_id().to_string()),
         )
         .await?;
@@ -10072,7 +10075,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
         .services
         .model_client
         .current_client_setup(
-            Some(&turn_context.model_info.slug),
+            Some(&turn_context.model_info().slug),
             Some(&session.session_id().to_string()),
         )
         .await?;
@@ -10086,18 +10089,22 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup),
+            /*request_setup*/ Some(&request_setup),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
     let unchanged_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup),
+            /*request_setup*/ Some(&request_setup),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
     assert!(Arc::ptr_eq(&initial_runtime, &unchanged_runtime));
@@ -10118,9 +10125,11 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup),
+            /*request_setup*/ Some(&request_setup),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
     assert!(!Arc::ptr_eq(&initial_runtime, &refreshed_runtime));
@@ -10135,9 +10144,11 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup),
+            /*request_setup*/ Some(&request_setup),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
     assert!(Arc::ptr_eq(&refreshed_runtime, &stable_refreshed_runtime));
@@ -10165,7 +10176,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
                     task_id: Some(task_id.to_string()),
                 },
                 "https://auth.example.test",
-                /*auth_route_config*/ None,
+                &codex_login::test_support::transport_default_auth_route_config(),
             )
             .await?,
         ))
@@ -10184,7 +10195,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
         .services
         .model_client
         .current_client_setup(
-            Some(&turn_context.model_info.slug),
+            Some(&turn_context.model_info().slug),
             Some(&session.session_id().to_string()),
         )
         .await?;
@@ -10197,9 +10208,11 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup),
+            /*request_setup*/ Some(&request_setup),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
 
@@ -10210,9 +10223,11 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup),
+            /*request_setup*/ Some(&request_setup),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
     assert!(Arc::ptr_eq(&initial_runtime, &state_only_runtime));
@@ -10224,9 +10239,11 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup),
+            /*request_setup*/ Some(&request_setup),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
     assert!(!Arc::ptr_eq(&state_only_runtime, &replaced_runtime));
@@ -10241,9 +10258,11 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
         .mcp_runtime_for_step(
             &turn_context,
             &turn_context.environments,
-            &[],
+            /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
-            Some(&request_setup.clone()),
+            /*request_setup*/ Some(&request_setup.clone()),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
         )
         .await;
     assert!(Arc::ptr_eq(&replaced_runtime, &identical_clone_runtime));

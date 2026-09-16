@@ -13,9 +13,7 @@
 mod user_authorization;
 
 use crate::context::ContextualUserFragment;
-use crate::context::ModelSwitchInstructions;
 use crate::context::is_guardian_context_message;
-use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
@@ -29,6 +27,7 @@ use crate::session::turn_context::TurnContext;
 use crate::utils::json::serialized_json_bytes;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
 use codex_extension_api::ConversationHistorySnapshot;
@@ -844,6 +843,7 @@ impl ContextManager {
         let first_removed_message_id = snapshot[cut_idx]
             .id()
             .map(codex_protocol::ResponseItemId::as_str);
+        let rolled_back_turn_id = snapshot[cut_idx].turn_id().map(str::to_owned);
         let source = RetainedInputSource::from(snapshot[cut_idx].metadata.as_ref());
         let mut review_history = self.review_history.take();
         if let Some(history) = &mut review_history {
@@ -867,25 +867,48 @@ impl ContextManager {
             })
             .cloned()
             .collect::<Vec<_>>();
-        if cut_idx == first_instruction_turn_idx
-            && let Some(first_turn_id) = snapshot[first_instruction_turn_idx].turn_id()
+        if let Some(rolled_back_turn_id) = rolled_back_turn_id
+            && !retained_items.iter().any(|item| {
+                item.turn_id() == Some(rolled_back_turn_id.as_str())
+                    && is_history_turn_boundary(item)
+            })
         {
             retained_items.retain_mut(|item| {
-                if item.turn_id() == Some(first_turn_id)
+                if item.turn_id() == Some(rolled_back_turn_id.as_str())
                     && matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer")
                 {
+                    let projected_content_indices = item
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.projected_content_indices.as_ref())
+                        .cloned();
                     let Some(mut content) = to_annotated_content(&mut item.item) else {
                         return false;
                     };
+                    let mut retained_indices = Vec::with_capacity(content.len());
+                    let original_content_len = content.len();
+                    let mut content_index = 0;
                     content.retain(|content| {
                         // Rebuild these from the next step's model and effort after rollback.
-                        !matches!(
-                            content.content(),
-                            ContentItem::InputText { text }
-                                if ModelSwitchInstructions::matches_text(text)
-                                    || PersistentModeState::matches_text(text)
-                        )
+                        let retain = !is_rolled_back_model_context_fragment(content);
+                        if retain
+                            && let Some(projected_index) = projected_content_indices
+                                .as_ref()
+                                .filter(|indices| indices.len() == original_content_len)
+                                .and_then(|indices| indices.get(content_index))
+                        {
+                            retained_indices.push(*projected_index);
+                        }
+                        content_index += 1;
+                        retain
                     });
+                    if projected_content_indices
+                        .as_ref()
+                        .is_some_and(|indices| indices.len() == original_content_len)
+                        && let Some(metadata) = &mut item.metadata
+                    {
+                        metadata.projected_content_indices = Some(retained_indices);
+                    }
                     !content.is_empty() && set_annotated_content(&mut item.item, content).is_some()
                 } else {
                     true
@@ -1226,6 +1249,25 @@ impl ContextManager {
             }
         }
         cut_idx
+    }
+}
+
+fn is_rolled_back_model_context_fragment(content: &AnnotatedContent) -> bool {
+    match content.kind().0.as_str() {
+        "model_switch.instructions" | "persistent_mode.instructions" => true,
+        "" | "unknown" => {
+            let ContentItem::InputText { text } = content.content() else {
+                return false;
+            };
+            let text = text.trim_start();
+            ["<model_switch>", "<persistent_mode>"]
+                .iter()
+                .any(|prefix| {
+                    text.get(..prefix.len())
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+                })
+        }
+        _ => false,
     }
 }
 

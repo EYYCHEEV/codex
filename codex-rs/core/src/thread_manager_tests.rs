@@ -1732,7 +1732,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                 session_source: &SessionSource::Exec,
                 originator: &first_originator,
                 disabled_plugin_ids: &[],
-                environments: McpEnvironmentScope::Selected(
+                environments: McpEnvironmentScope::Initial(
                     &first_session.services.turn_environments.selections(),
                 ),
             },
@@ -1754,7 +1754,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                 session_source: &second_session_source,
                 originator: &second_originator,
                 disabled_plugin_ids: &[],
-                environments: McpEnvironmentScope::Selected(
+                environments: McpEnvironmentScope::Initial(
                     &second_session.services.turn_environments.selections(),
                 ),
             },
@@ -1848,7 +1848,7 @@ async fn start_thread_seeds_extension_data_for_mcp_and_lifecycle_contributors() 
                     session_source: &SessionSource::Exec,
                     originator: &first_originator,
                     disabled_plugin_ids: &disabled_plugin_ids,
-                    environments: McpEnvironmentScope::Selected(
+                    environments: McpEnvironmentScope::Initial(
                         &first_session.services.turn_environments.selections(),
                     ),
                 },
