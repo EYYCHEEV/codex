@@ -89,167 +89,201 @@ fn bound_executed_tool_calls_for_prompt_with_priority(
     items: &mut [ResponseItem],
     prioritize_recent: bool,
 ) {
-    let mut remaining_items = 0_usize;
-    let mut original_calls = 0_usize;
-    let mut original_metadata_bytes = 0_usize;
-    let mut truncated = false;
+    'metadata_bounds: {
+        let mut remaining_items = 0_usize;
+        let mut original_calls = 0_usize;
+        let mut original_metadata_bytes = 0_usize;
+        let mut truncated = false;
 
-    for item in items.iter_mut() {
-        let Some(calls) = item
-            .internal_chat_message_metadata_passthrough_mut()
-            .and_then(Option::as_mut)
-            .and_then(|metadata| metadata.executed_tool_calls.as_mut())
-            .filter(|calls| !calls.is_empty())
-        else {
-            original_metadata_bytes =
-                original_metadata_bytes.saturating_add(executed_tool_call_metadata_bytes(item));
-            continue;
-        };
-        for call in calls {
-            let argument_bytes = serde_json::to_vec(&call.arguments)
-                .map(|bytes| bytes.len())
-                .unwrap_or(usize::MAX);
-            if call.truncation().is_none() && argument_bytes > MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES
-            {
-                call.set_truncation(
-                    argument_bytes,
-                    MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES,
-                    /*omitted_calls*/ None,
-                );
-            }
-            truncated |= call.truncation().is_some();
-            original_calls = original_calls.saturating_add(1).saturating_add(
-                call.truncation()
-                    .and_then(|truncation| truncation.omitted_calls)
-                    .unwrap_or_default(),
-            );
-        }
-        remaining_items += 1;
-        original_metadata_bytes =
-            original_metadata_bytes.saturating_add(executed_tool_call_metadata_bytes(item));
-    }
-
-    // Source evidence is optional; dropping it must not discard calls or their completion proof.
-    if original_metadata_bytes > MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
-        original_metadata_bytes = 0;
         for item in items.iter_mut() {
-            if let Some(metadata) = item
+            let Some(calls) = item
                 .internal_chat_message_metadata_passthrough_mut()
                 .and_then(Option::as_mut)
-            {
-                for call in metadata.executed_tool_calls.iter_mut().flatten() {
-                    call.tool_result_sources = None;
+                .and_then(|metadata| metadata.executed_tool_calls.as_mut())
+                .filter(|calls| !calls.is_empty())
+            else {
+                original_metadata_bytes =
+                    original_metadata_bytes.saturating_add(executed_tool_call_metadata_bytes(item));
+                continue;
+            };
+            for call in calls {
+                let argument_bytes = serde_json::to_vec(&call.arguments)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(usize::MAX);
+                if call.truncation().is_none()
+                    && argument_bytes > MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES
+                {
+                    call.set_truncation(
+                        argument_bytes,
+                        MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES,
+                        /*omitted_calls*/ None,
+                    );
+                }
+                truncated |= call.truncation().is_some();
+                original_calls = original_calls.saturating_add(1).saturating_add(
+                    call.truncation()
+                        .and_then(|truncation| truncation.omitted_calls)
+                        .unwrap_or_default(),
+                );
+            }
+            remaining_items += 1;
+            original_metadata_bytes =
+                original_metadata_bytes.saturating_add(executed_tool_call_metadata_bytes(item));
+        }
+
+        // Source evidence is optional; dropping it must not discard calls or their completion proof.
+        if original_metadata_bytes > MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
+            original_metadata_bytes = 0;
+            for item in items.iter_mut() {
+                if let Some(metadata) = item
+                    .internal_chat_message_metadata_passthrough_mut()
+                    .and_then(Option::as_mut)
+                {
+                    for call in metadata.executed_tool_calls.iter_mut().flatten() {
+                        call.tool_result_sources = None;
+                    }
+                }
+                original_metadata_bytes =
+                    original_metadata_bytes.saturating_add(executed_tool_call_metadata_bytes(item));
+            }
+        }
+
+        // A terminal marker can be on an empty wait output, separate from the lost calls.
+        if truncated || original_metadata_bytes > MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
+            for item in items.iter_mut() {
+                let item_bytes = executed_tool_call_metadata_bytes(item);
+                if let Some(metadata) = item
+                    .internal_chat_message_metadata_passthrough_mut()
+                    .and_then(Option::as_mut)
+                    && metadata.tool_calls_complete == Some(true)
+                {
+                    metadata.tool_calls_complete = None;
+                    original_metadata_bytes = original_metadata_bytes.saturating_sub(
+                        item_bytes.saturating_sub(executed_tool_call_metadata_bytes(item)),
+                    );
                 }
             }
-            original_metadata_bytes =
-                original_metadata_bytes.saturating_add(executed_tool_call_metadata_bytes(item));
         }
-    }
+        if original_metadata_bytes <= MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
+            break 'metadata_bounds;
+        }
 
-    // A terminal marker can be on an empty wait output, separate from the lost calls.
-    if truncated || original_metadata_bytes > MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
+        // Drop marker-only waits before spending the budget on recorded calls.
         for item in items.iter_mut() {
-            let item_bytes = executed_tool_call_metadata_bytes(item);
-            if let Some(metadata) = item
-                .internal_chat_message_metadata_passthrough_mut()
-                .and_then(Option::as_mut)
-                && metadata.tool_calls_complete == Some(true)
-            {
-                metadata.tool_calls_complete = None;
-                original_metadata_bytes = original_metadata_bytes.saturating_sub(
-                    item_bytes.saturating_sub(executed_tool_call_metadata_bytes(item)),
-                );
+            if item.executed_tool_call_metadata().is_some_and(|metadata| {
+                metadata
+                    .executed_tool_calls
+                    .as_ref()
+                    .is_none_or(Vec::is_empty)
+            }) {
+                original_metadata_bytes =
+                    original_metadata_bytes.saturating_sub(executed_tool_call_metadata_bytes(item));
+                item.clear_executed_tool_calls();
             }
         }
-    }
-    if original_metadata_bytes <= MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
-        return;
-    }
+        if original_metadata_bytes <= MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
+            break 'metadata_bounds;
+        }
 
-    // Drop marker-only waits before spending the budget on recorded calls.
-    for item in items.iter_mut() {
-        if item.executed_tool_call_metadata().is_some_and(|metadata| {
-            metadata
+        let overflow_fallback = items.iter().enumerate().find_map(|(index, item)| {
+            item.executed_tool_call_metadata().and_then(|metadata| {
+                metadata
+                    .executed_tool_calls
+                    .as_ref()
+                    .and_then(|calls| calls.first())
+                    .map(|call| (index, call.clone(), metadata.cell_id.clone()))
+            })
+        });
+
+        let omitted_call_reservation = serde_json::to_vec(&serde_json::json!({
+            "_codex_executed_tool_call_truncated": ExecutedToolCallTruncation {
+                original_bytes: usize::MAX,
+                max_bytes: usize::MAX,
+                omitted_calls: Some(usize::MAX),
+                original_name_bytes: Some(usize::MAX),
+            },
+        }))
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX);
+        let mut remaining_bytes =
+            MAX_EXECUTED_TOOL_CALL_METADATA_BYTES.saturating_sub(omitted_call_reservation);
+        for item in items.iter_mut() {
+            let Some(metadata) = item.executed_tool_call_metadata() else {
+                continue;
+            };
+            if metadata
                 .executed_tool_calls
                 .as_ref()
                 .is_none_or(Vec::is_empty)
-        }) {
-            original_metadata_bytes =
-                original_metadata_bytes.saturating_sub(executed_tool_call_metadata_bytes(item));
-            item.clear_executed_tool_calls();
-        }
-    }
-    if original_metadata_bytes <= MAX_EXECUTED_TOOL_CALL_METADATA_BYTES {
-        clear_executed_tool_calls_from_oversized_items(items);
-        return;
-    }
+            {
+                continue;
+            }
 
-    let overflow_fallback = items.iter().enumerate().find_map(|(index, item)| {
-        item.executed_tool_call_metadata().and_then(|metadata| {
-            metadata
-                .executed_tool_calls
-                .as_ref()
-                .and_then(|calls| calls.first())
-                .map(|call| (index, call.clone(), metadata.cell_id.clone()))
-        })
-    });
-
-    let omitted_call_reservation = serde_json::to_vec(&serde_json::json!({
-        "_codex_executed_tool_call_truncated": ExecutedToolCallTruncation {
-            original_bytes: usize::MAX,
-            max_bytes: usize::MAX,
-            omitted_calls: Some(usize::MAX),
-            original_name_bytes: Some(usize::MAX),
-        },
-    }))
-    .map(|bytes| bytes.len())
-    .unwrap_or(usize::MAX);
-    let mut remaining_bytes =
-        MAX_EXECUTED_TOOL_CALL_METADATA_BYTES.saturating_sub(omitted_call_reservation);
-    for item in items.iter_mut() {
-        let Some(metadata) = item.executed_tool_call_metadata() else {
-            continue;
-        };
-        if metadata
-            .executed_tool_calls
-            .as_ref()
-            .is_none_or(Vec::is_empty)
-        {
-            continue;
+            let metadata_field_bytes = executed_tool_call_metadata_field_bytes(metadata);
+            let item_budget = if prioritize_recent {
+                remaining_bytes
+            } else {
+                remaining_bytes / remaining_items
+            };
+            item.bound_executed_tool_calls_with_budget(
+                item_budget.saturating_sub(metadata_field_bytes),
+            );
+            remaining_bytes =
+                remaining_bytes.saturating_sub(executed_tool_call_metadata_bytes(item));
+            remaining_items -= 1;
         }
 
-        let metadata_field_bytes = executed_tool_call_metadata_field_bytes(metadata);
-        let item_budget = if prioritize_recent {
-            remaining_bytes
+        let represented_calls = items
+            .iter()
+            .filter_map(ResponseItem::executed_tool_call_metadata)
+            .filter_map(|metadata| metadata.executed_tool_calls.as_ref())
+            .flatten()
+            .map(|call| {
+                1 + call
+                    .truncation()
+                    .and_then(|truncation| truncation.omitted_calls)
+                    .unwrap_or_default()
+            })
+            .sum::<usize>();
+        if represented_calls == original_calls {
+            break 'metadata_bounds;
+        }
+
+        if represented_calls == 0 {
+            if let Some((index, mut call, cell_id)) = overflow_fallback {
+                let original_bytes = call
+                    .truncation()
+                    .map(|truncation| truncation.original_bytes)
+                    .unwrap_or_else(|| {
+                        serde_json::to_vec(&call.arguments)
+                            .map(|bytes| bytes.len())
+                            .unwrap_or(usize::MAX)
+                    });
+                let original_name_bytes = call.name.len();
+                let name_boundary = call.name.floor_char_boundary(
+                    original_name_bytes.min(MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES / 2),
+                );
+                call.name.truncate(name_boundary);
+                call.set_truncation_with_name(
+                    original_bytes,
+                    /*max_bytes*/ 0,
+                    Some(original_calls.saturating_sub(1)),
+                    (name_boundary < original_name_bytes).then_some(original_name_bytes),
+                );
+                items[index].append_executed_tool_calls(vec![call]);
+                if let Some(cell_id) = cell_id {
+                    items[index].set_tool_call_cell_id(&cell_id);
+                }
+            }
+            break 'metadata_bounds;
+        }
+
+        let omission_call = if prioritize_recent {
+            items.iter_mut().rev().find_map(first_executed_tool_call)
         } else {
-            remaining_bytes / remaining_items
+            items.iter_mut().find_map(first_executed_tool_call)
         };
-        item.bound_executed_tool_calls_with_budget(
-            item_budget.saturating_sub(metadata_field_bytes),
-        );
-        remaining_bytes = remaining_bytes.saturating_sub(executed_tool_call_metadata_bytes(item));
-        remaining_items -= 1;
-    }
-
-    let represented_calls = items
-        .iter()
-        .filter_map(ResponseItem::executed_tool_call_metadata)
-        .filter_map(|metadata| metadata.executed_tool_calls.as_ref())
-        .flatten()
-        .map(|call| {
-            1 + call
-                .truncation()
-                .and_then(|truncation| truncation.omitted_calls)
-                .unwrap_or_default()
-        })
-        .sum::<usize>();
-    if represented_calls == original_calls {
-        clear_executed_tool_calls_from_oversized_items(items);
-        return;
-    }
-
-    if represented_calls == 0 {
-        if let Some((index, mut call, cell_id)) = overflow_fallback {
+        if let Some(call) = omission_call {
             let original_bytes = call
                 .truncation()
                 .map(|truncation| truncation.original_bytes)
@@ -258,55 +292,23 @@ fn bound_executed_tool_calls_for_prompt_with_priority(
                         .map(|bytes| bytes.len())
                         .unwrap_or(usize::MAX)
                 });
-            let original_name_bytes = call.name.len();
-            let name_boundary = call.name.floor_char_boundary(
-                original_name_bytes.min(MAX_EXECUTED_TOOL_CALL_ARGUMENT_BYTES / 2),
-            );
-            call.name.truncate(name_boundary);
-            call.set_truncation_with_name(
+            let max_bytes = call
+                .truncation()
+                .map(|truncation| truncation.max_bytes)
+                .unwrap_or_default();
+            let previous_omissions = call
+                .truncation()
+                .and_then(|truncation| truncation.omitted_calls)
+                .unwrap_or_default();
+            call.set_truncation(
                 original_bytes,
-                /*max_bytes*/ 0,
-                Some(original_calls.saturating_sub(1)),
-                (name_boundary < original_name_bytes).then_some(original_name_bytes),
+                max_bytes,
+                Some(
+                    previous_omissions
+                        .saturating_add(original_calls.saturating_sub(represented_calls)),
+                ),
             );
-            items[index].append_executed_tool_calls(vec![call]);
-            if let Some(cell_id) = cell_id {
-                items[index].set_tool_call_cell_id(&cell_id);
-            }
         }
-        clear_executed_tool_calls_from_oversized_items(items);
-        return;
-    }
-
-    let omission_call = if prioritize_recent {
-        items.iter_mut().rev().find_map(first_executed_tool_call)
-    } else {
-        items.iter_mut().find_map(first_executed_tool_call)
-    };
-    if let Some(call) = omission_call {
-        let original_bytes = call
-            .truncation()
-            .map(|truncation| truncation.original_bytes)
-            .unwrap_or_else(|| {
-                serde_json::to_vec(&call.arguments)
-                    .map(|bytes| bytes.len())
-                    .unwrap_or(usize::MAX)
-            });
-        let max_bytes = call
-            .truncation()
-            .map(|truncation| truncation.max_bytes)
-            .unwrap_or_default();
-        let previous_omissions = call
-            .truncation()
-            .and_then(|truncation| truncation.omitted_calls)
-            .unwrap_or_default();
-        call.set_truncation(
-            original_bytes,
-            max_bytes,
-            Some(
-                previous_omissions.saturating_add(original_calls.saturating_sub(represented_calls)),
-            ),
-        );
     }
     clear_executed_tool_calls_from_oversized_items(items);
 }
