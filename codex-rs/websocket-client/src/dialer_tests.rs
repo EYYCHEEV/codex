@@ -335,6 +335,8 @@ async fn https_proxy_without_custom_ca_starts_tls_before_tunneling() {
             url: format!("https://localhost:{}", proxy_addr.port()),
             no_proxy: None,
         },
+        TcpNodelay::Enabled,
+        /*loopback_direct*/ false,
     )
     .await
     {
