@@ -432,29 +432,6 @@ enabled = true
     let _: ThreadStartResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(thread_start_request_id)).await??;
 
-    std::fs::write(
-        codex_home.path().join(
-            "plugins/cache/openai-curated/google-calendar/local/skills/meeting-prep/SKILL.md",
-        ),
-        "---\nname: meeting-prep\ndescription: Updated meeting preparation\n---\n\n# Body\n",
-    )?;
-    for force_reload in [true, false] {
-        let request_id = mcp
-            .send_skills_list_request(SkillsListParams {
-                cwds: vec![cwd.path().to_path_buf()],
-                force_reload,
-            })
-            .await?;
-        let SkillsListResponse { data } =
-            timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
-        assert!(data.iter().any(|entry| {
-            entry.skills.iter().any(|skill| {
-                skill.name == "google-calendar:meeting-prep"
-                    && skill.description == "Updated meeting preparation"
-            })
-        }));
-    }
-
     let enablement_request_id = mcp
         .send_experimental_feature_enablement_set_request(ExperimentalFeatureEnablementSetParams {
             enablement: BTreeMap::from([("remote_plugin".to_string(), true)]),

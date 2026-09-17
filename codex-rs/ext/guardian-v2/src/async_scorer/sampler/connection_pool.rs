@@ -9,6 +9,7 @@ use super::INITIAL_WEBSOCKET_CONNECTIONS;
 use super::LunaSamplerConfig;
 use super::LunaSamplerError;
 use super::MAX_CONCURRENT_REQUESTS;
+use super::MODEL;
 use codex_api::ApiError;
 use codex_api::Provider;
 use codex_api::ReqwestTransport;
@@ -24,6 +25,9 @@ use codex_api::TransportError;
 use codex_api::build_session_headers;
 use codex_http_client::ClientRouteClass;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptAuthSnapshot;
+use codex_login::TransportAuthBinding;
+use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::add_originator_header;
 use codex_login::default_client::create_client_for_route_async;
@@ -31,7 +35,7 @@ use codex_login::default_client::default_headers;
 use codex_model_provider::ACCOUNT_ROUTING_HEADER;
 use codex_model_provider::AgentIdentitySessionFallback;
 use codex_model_provider::ProviderAuthScope;
-use codex_model_provider::ResolvedResponsesProvider;
+use codex_model_provider::ProviderRequestSetup;
 use codex_model_provider::ResponsesConnectionKey;
 use codex_protocol::ThreadId;
 use http::HeaderMap;
@@ -77,6 +81,9 @@ pub(super) struct PooledConnection {
     request_kind: RequestMode,
     // The bridge routes by thread ID, so each socket needs its own identity.
     thread_id: String,
+    transport_auth_binding: TransportAuthBinding,
+    credential_revision: Option<u64>,
+    managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
     pub(super) expires_at: Instant,
     auth_changes: Option<tokio::sync::watch::Receiver<u64>>,
     key: ResponsesConnectionKey,
@@ -86,6 +93,10 @@ pub(super) struct PooledConnection {
 struct ClientSetup {
     provider: Provider,
     auth: SharedAuthProvider,
+    request_kind: RequestMode,
+    transport_auth_binding: TransportAuthBinding,
+    credential_revision: Option<u64>,
+    managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
     redirect_policy: ClientRedirectPolicy,
     key: ResponsesConnectionKey,
     auth_changes: Option<tokio::sync::watch::Receiver<u64>>,
@@ -99,6 +110,8 @@ enum Connection {
 pub(super) struct ConnectionLease {
     pub(super) thread_id: String,
     pub(super) request_kind: RequestMode,
+    auth_identity_key: String,
+    managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
     connection: Connection,
     pool: Arc<ConnectionPool>,
     _permit: OwnedSemaphorePermit,
@@ -185,6 +198,10 @@ impl ConnectionPool {
         let ClientSetup {
             mut provider,
             auth,
+            request_kind,
+            transport_auth_binding,
+            credential_revision,
+            managed_snapshot,
             redirect_policy,
             key,
             auth_changes,
@@ -198,6 +215,8 @@ impl ConnectionPool {
             match idle {
                 Some(connection)
                     if connection.key == key
+                        && connection.transport_auth_binding == transport_auth_binding
+                        && connection.credential_revision == credential_revision
                         && connection
                             .auth_changes
                             .as_ref()
@@ -211,17 +230,23 @@ impl ConnectionPool {
                 None => break None,
             }
         };
-        let (connection, thread_id, request_kind) = match connection {
+        let auth_identity_key = transport_auth_binding.identity_key.clone();
+        let (connection, thread_id, request_kind, managed_snapshot) = match connection {
             Some(connection) => {
                 let thread_id = connection.thread_id.clone();
                 let request_kind = connection.request_kind;
-                (Connection::Websocket(connection), thread_id, request_kind)
+                let managed_snapshot = connection.managed_snapshot.clone();
+                (
+                    Connection::Websocket(connection),
+                    thread_id,
+                    request_kind,
+                    managed_snapshot,
+                )
             }
             None => {
                 self.replenish();
                 // Sampling owns the retry budget across both transports.
                 provider.retry.max_attempts = 0;
-                let request_kind = self.responses_request_kind().await;
                 let url = provider.url_for_path("/responses");
                 let redirect_policy = if provider.headers.contains_key(ACCOUNT_ROUTING_HEADER) {
                     ClientRedirectPolicy::Reject
@@ -272,6 +297,7 @@ impl ConnectionPool {
                     Connection::Http(client),
                     ThreadId::new().to_string(),
                     request_kind,
+                    managed_snapshot,
                 )
             }
         };
@@ -286,6 +312,8 @@ impl ConnectionPool {
         Ok(ConnectionLease {
             thread_id,
             request_kind,
+            auth_identity_key,
+            managed_snapshot,
             connection,
             pool: Arc::clone(self),
             _permit: permit,
@@ -299,26 +327,24 @@ impl ConnectionPool {
             .auth_manager()
             .map(|manager| manager.auth_change_receiver());
         let revision = auth_changes.as_mut().map(|auth| *auth.borrow_and_update());
-        let ResolvedResponsesProvider {
-            provider,
-            redirect_policy,
-        } = self
+        let mut setup = self
             .config
             .provider
-            .responses_api_provider(&self.config.workspace_routing)
-            .await
-            .map_err(LunaSamplerError::Provider)?;
-        let auth = self
-            .config
-            .provider
-            .api_auth_for_scope(ProviderAuthScope {
+            .request_setup(ProviderAuthScope {
                 agent_identity_policy: self.config.agent_identity_policy,
                 session_source: self.config.session_source.clone(),
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                thread_id: Some(self.config.thread_id.clone()),
+                session_id: Some(self.config.session_id.clone()),
+                model: Some(MODEL.to_owned()),
             })
             .await
-            .map_err(LunaSamplerError::Provider)?
-            .auth;
+            .map_err(LunaSamplerError::Provider)?;
+        self.config
+            .provider
+            .route_request_setup(&self.config.workspace_routing, &mut setup)
+            .await
+            .map_err(LunaSamplerError::Provider)?;
         if auth_changes
             .as_ref()
             .is_some_and(|auth| auth.has_changed().unwrap_or(true))
@@ -327,11 +353,16 @@ impl ConnectionPool {
                 "authentication changed while resolving routing".into(),
             )));
         }
-        let key = ResponsesConnectionKey::new(&provider, revision);
+        let request_kind = self.responses_request_kind(&setup);
+        let key = ResponsesConnectionKey::new(&setup.api_provider, revision);
         Ok(ClientSetup {
-            provider,
-            auth,
-            redirect_policy,
+            provider: setup.api_provider,
+            auth: setup.api_auth,
+            request_kind,
+            transport_auth_binding: setup.transport_auth_binding,
+            credential_revision: setup.credential_revision,
+            managed_snapshot: setup.managed_snapshot,
+            redirect_policy: setup.redirect_policy,
             key,
             auth_changes,
         })
@@ -370,13 +401,10 @@ impl ConnectionPool {
         }
         Ok(headers)
     }
-    async fn responses_request_kind(&self) -> RequestMode {
+    fn responses_request_kind(&self, setup: &ProviderRequestSetup) -> RequestMode {
         let provider = self.config.provider.info();
-        if self
-            .config
-            .provider
-            .auth()
-            .await
+        if setup
+            .effective_auth
             .as_ref()
             .is_some_and(CodexAuth::uses_codex_backend)
             && provider.supports_codex_backend_routes()
@@ -399,12 +427,15 @@ impl ConnectionPool {
         let ClientSetup {
             provider,
             auth,
+            request_kind,
+            transport_auth_binding,
+            credential_revision,
+            managed_snapshot,
             redirect_policy: _,
             key,
             auth_changes,
         } = self.client_setup().await?;
         let thread_id = ThreadId::new().to_string();
-        let request_kind = self.responses_request_kind().await;
         let mut headers = self.headers(&thread_id, request_kind)?;
         headers.insert(
             "openai-beta",
@@ -451,6 +482,9 @@ impl ConnectionPool {
             connection,
             request_kind,
             thread_id,
+            transport_auth_binding,
+            credential_revision,
+            managed_snapshot,
             expires_at: Instant::now() + MAX_WEBSOCKET_AGE,
             auth_changes,
             key,
@@ -460,6 +494,18 @@ impl ConnectionPool {
 }
 
 impl ConnectionLease {
+    pub(super) fn auth_identity_key(&self) -> &str {
+        &self.auth_identity_key
+    }
+
+    pub(super) fn unauthorized_recovery(&self) -> Option<UnauthorizedRecovery> {
+        let manager = self.pool.config.provider.auth_manager()?;
+        Some(self.managed_snapshot.as_ref().map_or_else(
+            || manager.unauthorized_recovery(),
+            |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
+        ))
+    }
+
     pub(super) async fn stream_request(
         &self,
         request: &ResponsesApiRequest,

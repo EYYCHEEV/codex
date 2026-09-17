@@ -135,6 +135,7 @@ impl Session {
                 window_ids.first_window_id,
                 window_ids.previous_window_id,
                 window_ids.window_id,
+                &turn_context.sub_id,
                 /*thread_hint*/ None,
             ));
         }

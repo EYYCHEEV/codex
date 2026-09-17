@@ -5,6 +5,7 @@ use std::sync::Weak;
 
 use codex_exec_server::Environment;
 use codex_exec_server::FileSystemSandboxContext;
+use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionMetrics;
 use codex_mcp::McpResourceClient;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -39,6 +40,22 @@ mod cloud_cache_tests;
 pub(crate) struct SkillsSessionState {
     pub(crate) mcp_resources: Option<Arc<McpResourceClient>>,
     pub(crate) extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
+}
+
+pub(crate) fn current_mcp_resource_client(
+    request_store: Option<&ExtensionData>,
+    thread_store: &ExtensionData,
+    session_store: &ExtensionData,
+) -> Option<Arc<McpResourceClient>> {
+    request_store
+        .and_then(ExtensionData::get::<McpResourceClient>)
+        .or_else(|| thread_store.get::<McpResourceClient>())
+        .or_else(|| session_store.get::<McpResourceClient>())
+        .or_else(|| {
+            session_store
+                .get::<SkillsSessionState>()
+                .and_then(|state| state.mcp_resources.clone())
+        })
 }
 
 /// Thread-owned skill configuration and caches; consumers can only read catalog snapshots.
@@ -474,3 +491,7 @@ pub(crate) struct ExecutorSkillsStepState(pub(crate) SkillCatalog);
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct HostSkillsStepState(pub(crate) SkillCatalog);
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod tests;

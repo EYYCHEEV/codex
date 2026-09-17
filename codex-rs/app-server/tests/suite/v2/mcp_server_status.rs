@@ -961,7 +961,10 @@ url = "{mcp_server_url}/mcp"
     assert_eq!(thread_response.data.len(), 1);
     let status = &thread_response.data[0];
     assert_eq!(status.name, "project-server");
-    assert_eq!(status.runtime_status, None);
+    assert_eq!(
+        status.runtime_status,
+        Some(McpServerConnectionStatus::Connected)
+    );
     assert_eq!(
         status.tools.keys().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from(["project_lookup".to_string()])
@@ -1336,14 +1339,21 @@ client_id = "thread-runtime-test-client"
             timeout_secs: Some(5),
         })
         .await?;
-    let global_error = timeout(
+    let global_oauth = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(global_oauth_id)),
+        mcp.read_stream_until_response_message(RequestId::Integer(global_oauth_id)),
     )
     .await??;
+    let global_oauth: McpServerOauthLoginResponse = to_response(global_oauth)?;
+    let global_authorization_url = Url::parse(&global_oauth.authorization_url)?;
+    // Metadata-free legacy OAuth can still produce an authorization URL. The missing scope is
+    // the observable proof that discovery used the B-bound global client rather than the thread's
+    // A-bound runtime.
     assert!(
-        global_error.error.message.contains("failed to login"),
-        "the B-bound global request must not reuse the thread's A runtime"
+        global_authorization_url
+            .query_pairs()
+            .all(|(name, _)| name != "scope"),
+        "the B-bound global request must not reuse the thread's A-discovered scopes"
     );
 
     mcp_server_handle.abort();

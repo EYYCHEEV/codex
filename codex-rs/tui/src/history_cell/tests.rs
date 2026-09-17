@@ -1417,7 +1417,7 @@ fn standalone_windows_update_available_history_cell_snapshot() {
 fn pnpm_update_available_history_cell_snapshot() {
     let cell =
         UpdateAvailableHistoryCell::new("9.9.9".to_string(), Some(UpdateAction::PnpmGlobalLatest));
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+    let rendered = render_stable_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
 }
@@ -1428,7 +1428,7 @@ fn vite_plus_update_available_history_cell_snapshot() {
         "9.9.9".to_string(),
         Some(UpdateAction::VitePlusGlobalLatest),
     );
-    let rendered = render_lines(&cell.display_lines(/*width*/ 110)).join("\n");
+    let rendered = render_stable_lines(&cell.display_lines(/*width*/ 110)).join("\n");
 
     insta::assert_snapshot!(rendered);
 }

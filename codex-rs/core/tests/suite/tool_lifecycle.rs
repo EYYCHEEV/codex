@@ -275,9 +275,15 @@ async fn tool_start_receives_executed_mcp_call_for_connector(
         .with_extensions(Arc::new(extensions.build()))
         .build_with_auto_env(&server)
         .await?;
-    wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
+    if matches!(owner, AppsServerOwner::Extension) {
+        wait_for_mcp_server(&test.codex, CODEX_APPS_MCP_SERVER_NAME).await?;
+    }
 
-    test.submit_text_turn("List my calendar events.").await?;
+    let prompt = match owner {
+        AppsServerOwner::Host => "Use [$calendar](app://calendar) to list my calendar events.",
+        AppsServerOwner::Extension => "List my calendar events.",
+    };
+    test.submit_text_turn(prompt).await?;
 
     {
         let histories = recorder

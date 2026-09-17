@@ -58,6 +58,89 @@ impl ToolInfo {
     pub fn canonical_tool_name(&self) -> ToolName {
         ToolName::namespaced(self.callable_namespace.clone(), self.callable_name.clone())
     }
+
+    /// Compares an execution contract while allowing live presentation text
+    /// and server instructions to replace cached values. Missing cached
+    /// annotations are unknown because the generic catalog cache deliberately
+    /// omits them; a missing cached read-only hint is likewise unknown for
+    /// model-facing Apps cache entries.
+    pub(crate) fn has_same_execution_contract(&self, expected: &Self) -> bool {
+        let mut left = self.clone();
+        let mut right = expected.clone();
+        if let Some(expected_annotations) = right.tool.annotations.as_ref() {
+            let left_annotations = left.tool.annotations.as_ref();
+            let expected_policy_is_empty = expected_annotations.read_only_hint.is_none()
+                && expected_annotations.destructive_hint.is_none()
+                && expected_annotations.idempotent_hint.is_none()
+                && expected_annotations.open_world_hint.is_none();
+            let read_only_matches = (!expected_policy_is_empty
+                && expected_annotations.read_only_hint.is_none())
+                || left_annotations.and_then(|annotations| annotations.read_only_hint)
+                    == expected_annotations.read_only_hint;
+            let policy_matches = read_only_matches
+                && left_annotations.and_then(|annotations| annotations.destructive_hint)
+                    == expected_annotations.destructive_hint
+                && left_annotations.and_then(|annotations| annotations.idempotent_hint)
+                    == expected_annotations.idempotent_hint
+                && left_annotations.and_then(|annotations| annotations.open_world_hint)
+                    == expected_annotations.open_world_hint;
+            if !policy_matches {
+                return false;
+            }
+        }
+        clear_presentation_metadata(&mut left);
+        clear_presentation_metadata(&mut right);
+        // Callable names are derived from the complete model-visible catalog.
+        // The raw server/tool route below owns execution identity, so an
+        // unrelated catalog collision must not invalidate this target.
+        left.callable_name.clear();
+        left.callable_namespace.clear();
+        right.callable_name.clear();
+        right.callable_namespace.clear();
+        left.tool.annotations = None;
+        right.tool.annotations = None;
+        left == right
+    }
+
+    /// Compares the stable shape of entries that can affect cached callable
+    /// identity, retaining exact names and schemas while leaving live policy
+    /// metadata to the selected tool's execution-contract check.
+    pub(crate) fn has_same_cached_catalog_shape(&self, expected: &Self) -> bool {
+        let mut left = self.clone();
+        clear_presentation_metadata(&mut left);
+        left.tool.annotations = None;
+        left.tool.meta = None;
+        let mut right = expected.clone();
+        clear_presentation_metadata(&mut right);
+        right.tool.annotations = None;
+        right.tool.meta = None;
+        left == right
+    }
+}
+
+fn clear_presentation_metadata(tool: &mut ToolInfo) {
+    tool.namespace_description = None;
+    tool.connector_name = None;
+    tool.plugin_display_names.clear();
+    tool.tool.title = None;
+    tool.tool.description = None;
+    tool.tool.icons = None;
+    if let Some(annotations) = tool.tool.annotations.as_mut() {
+        annotations.title = None;
+    }
+    normalize_empty_annotations(tool);
+}
+
+fn normalize_empty_annotations(tool: &mut ToolInfo) {
+    if tool.tool.annotations.as_ref().is_some_and(|annotations| {
+        annotations.title.is_none()
+            && annotations.read_only_hint.is_none()
+            && annotations.destructive_hint.is_none()
+            && annotations.idempotent_hint.is_none()
+            && annotations.open_world_hint.is_none()
+    }) {
+        tool.tool.annotations = None;
+    }
 }
 
 /// A tool is allowed to be used if both are true:

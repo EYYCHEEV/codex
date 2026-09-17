@@ -28,8 +28,8 @@ use crate::state::EmittedCatalogBudgetWarnings;
 use crate::state::ExecutorSkillsStepState;
 use crate::state::HostSkillsCatalogInWorldState;
 use crate::state::HostSkillsStepState;
-use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
+use crate::state::current_mcp_resource_client;
 use crate::world_state::CatalogRenderCallback;
 use crate::world_state::cloud_skills_world_state_section;
 use crate::world_state::executor_skills_world_state_section;
@@ -161,11 +161,11 @@ impl<'a> CatalogContext<'a> {
             include_host_skills: false,
             include_bundled_skills: self.config.bundled_skills_enabled,
             include_cloud_skills: cloud_enabled,
-            mcp_resources: self
-                .input
-                .session_store
-                .get::<SkillsSessionState>()
-                .and_then(|state| state.mcp_resources.clone()),
+            mcp_resources: current_mcp_resource_client(
+                Some(self.input.turn_store),
+                self.input.thread_store,
+                self.input.session_store,
+            ),
             executor_capability_discovery: self.input.executor_capability_discovery.cloned(),
         };
 

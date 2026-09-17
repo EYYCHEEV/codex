@@ -15,8 +15,6 @@ use codex_mcp::ElicitationReviewerHandle;
 use codex_mcp::McpServerRegistration;
 use codex_mcp::McpServerSource;
 use codex_mcp::McpStartupPolicy;
-use codex_mcp::PreparedMcpCall;
-use codex_mcp::ToolInfo;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use std::collections::HashSet;
 
@@ -45,27 +43,6 @@ impl Session {
             || current.windows_sandbox_level != next.windows_sandbox_level
     }
 
-    /// Waits on this session's refreshed server before tool execution is admitted.
-    pub(crate) async fn wait_for_mcp_server(self: &Arc<Self>, server: &str) {
-        self.refresh_mcp_if_dirty().await;
-        self.services
-            .mcp_runtime
-            .wait_for_server_startup(server)
-            .await;
-    }
-
-    /// Captures this session's current MCP client and catalog for one tool call.
-    pub(crate) async fn prepare_mcp_call(
-        self: &Arc<Self>,
-        advertised_tool: &ToolInfo,
-    ) -> Option<PreparedMcpCall> {
-        self.refresh_mcp_if_dirty().await;
-        self.services
-            .mcp_runtime
-            .prepare_call(advertised_tool)
-            .await
-    }
-
     pub(super) async fn latest_mcp_desired_state(
         &self,
         auth: Option<CodexAuth>,
@@ -87,20 +64,45 @@ impl Session {
                 .clone(),
             auth.as_ref().is_some_and(CodexAuth::is_workspace_account),
         );
-        self.latest_mcp_desired_state_with_cache_key(auth, cache_key)
-            .await
+        self.mcp_desired_state(
+            session_configuration,
+            disabled_plugin_ids,
+            auth,
+            cache_key,
+            environments,
+        )
     }
 
     pub(super) async fn latest_mcp_desired_state_with_cache_key(
         &self,
         auth: Option<CodexAuth>,
         codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
+        environments: TurnEnvironmentSnapshot,
     ) -> McpDesiredState {
-        let session_configuration = {
+        let (session_configuration, disabled_plugin_ids) = {
             let state = self.state.lock().await;
-            state.session_configuration.clone()
+            (
+                state.session_configuration.clone(),
+                state.active_disabled_plugin_ids.clone(),
+            )
         };
-        let environments = self.services.turn_environments.snapshot().await;
+        self.mcp_desired_state(
+            session_configuration,
+            disabled_plugin_ids,
+            auth,
+            codex_apps_tools_cache_key,
+            environments,
+        )
+    }
+
+    fn mcp_desired_state(
+        &self,
+        session_configuration: SessionConfiguration,
+        disabled_plugin_ids: Vec<String>,
+        auth: Option<CodexAuth>,
+        codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
+        environments: TurnEnvironmentSnapshot,
+    ) -> McpDesiredState {
         let cwd = environments
             .primary()
             .and_then(|environment| environment.cwd().to_abs_path().ok())

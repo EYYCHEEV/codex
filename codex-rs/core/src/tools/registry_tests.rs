@@ -1,5 +1,4 @@
 use super::*;
-use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use codex_protocol::DEFAULT_FUNCTION_NAMESPACE;
 use codex_protocol::models::ResponseItem;
@@ -62,9 +61,10 @@ impl ToolExecutor<ToolInvocation> for ReadinessTestHandler {
 }
 
 impl CoreToolRuntime for ReadinessTestHandler {
-    fn wait_until_ready<'a>(&'a self, _session: &'a Arc<Session>) -> Option<BoxFuture<'a, ()>> {
-        Some(Box::pin(async {
-            self.readiness_waits.fetch_add(1, Ordering::Relaxed);
+    fn wait_until_ready(&self, _step_context: Arc<StepContext>) -> Option<BoxFuture<'static, ()>> {
+        let readiness_waits = Arc::clone(&self.readiness_waits);
+        Some(Box::pin(async move {
+            readiness_waits.fetch_add(1, Ordering::Relaxed);
         }))
     }
 }
@@ -374,15 +374,15 @@ fn registry_allows_identical_names_in_different_namespaces() {
 
 #[tokio::test]
 async fn readiness_selects_exact_tool_with_registry_owned_exposure() {
-    let (session, _turn) = crate::session::tests::make_session_and_context().await;
-    let session = Arc::new(session);
+    let (_session, turn) = crate::session::tests::make_session_and_context().await;
+    let step_context = StepContext::for_test(Arc::new(turn));
     let plain_name = codex_tools::ToolName::plain("echo");
     let namespaced_name = codex_tools::ToolName::namespaced("mcp__server__", "echo");
     assert!(
         TestHandler {
             tool_name: plain_name.clone(),
         }
-        .wait_until_ready(&session)
+        .wait_until_ready(Arc::clone(&step_context))
         .is_none()
     );
     let plain_readiness_waits = Arc::new(AtomicUsize::new(0));
@@ -405,7 +405,7 @@ async fn readiness_selects_exact_tool_with_registry_owned_exposure() {
     registry
         .tool(&plain_name)
         .expect("plain runtime should be registered")
-        .wait_until_ready(&session)
+        .wait_until_ready(Arc::clone(&step_context))
         .expect("plain runtime should provide a readiness wait")
         .await;
     assert_eq!(
@@ -419,7 +419,7 @@ async fn readiness_selects_exact_tool_with_registry_owned_exposure() {
     registry
         .tool(&namespaced_name)
         .expect("namespaced runtime should be registered")
-        .wait_until_ready(&session)
+        .wait_until_ready(step_context)
         .expect("namespaced runtime should forward its readiness wait")
         .await;
     assert_eq!(

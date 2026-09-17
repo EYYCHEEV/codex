@@ -1,6 +1,49 @@
 use super::*;
 use crate::terminal_palette::rgb_color;
 use pretty_assertions::assert_eq;
+use std::process::Command;
+
+const COLOR_TEST_CHILD_ENV: &str = "CODEX_TUI_CURSOR_COLOR_TEST_CHILD";
+const COLOR_TEST_COMPLETED: &str = "CODEX_TUI_CURSOR_COLOR_TEST_COMPLETED";
+
+struct ColorTestGuard {
+    was_disabled: bool,
+}
+
+impl ColorTestGuard {
+    fn enabled() -> Self {
+        let was_disabled = crossterm::style::Colored::ansi_color_disabled_memoized();
+        crossterm::style::force_color_output(true);
+        Self { was_disabled }
+    }
+}
+
+impl Drop for ColorTestGuard {
+    fn drop(&mut self) {
+        crossterm::style::force_color_output(!self.was_disabled);
+        println!("{COLOR_TEST_COMPLETED}");
+    }
+}
+
+fn enter_color_test(test_name: &str) -> Option<ColorTestGuard> {
+    if std::env::var(COLOR_TEST_CHILD_ENV).is_ok_and(|child_test| child_test == test_name) {
+        return Some(ColorTestGuard::enabled());
+    }
+
+    // Crossterm's override is process-global, so contain it in a process that runs only this test.
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", test_name, "--nocapture"])
+        .env(COLOR_TEST_CHILD_ENV, test_name)
+        .output()
+        .expect("run cursor color test in an isolated process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(COLOR_TEST_COMPLETED),
+        "isolated cursor color test failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    None
+}
 
 #[test]
 fn terminal_draw_keeps_intermediate_cursor_positions_hidden() {
@@ -92,6 +135,11 @@ fn terminal_draw_repaints_the_cursor_anchor_only_when_its_style_needs_restoring(
 
 #[test]
 fn terminal_draw_repairs_styled_anchor_on_cursor_only_frames() {
+    let Some(_color_output) = enter_color_test(
+        "custom_terminal::tests::cursor::terminal_draw_repairs_styled_anchor_on_cursor_only_frames",
+    ) else {
+        return;
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 12, /*height*/ 2)).expect("terminal");
     let area = Rect::new(
@@ -137,6 +185,11 @@ fn terminal_draw_repairs_styled_anchor_on_cursor_only_frames() {
 
 #[test]
 fn terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs() {
+    let Some(_color_output) = enter_color_test(
+        "custom_terminal::tests::cursor::terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs",
+    ) else {
+        return;
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 8, /*height*/ 1)).expect("terminal");
     let area = Rect::new(
@@ -165,6 +218,11 @@ fn terminal_draw_repairs_owned_wide_hyperlink_after_skipped_glyphs() {
 
 #[test]
 fn terminal_draw_repairs_single_column_without_scrolling() {
+    let Some(_color_output) = enter_color_test(
+        "custom_terminal::tests::cursor::terminal_draw_repairs_single_column_without_scrolling",
+    ) else {
+        return;
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 1, /*height*/ 1)).expect("terminal");
     let area = Rect::new(
@@ -196,6 +254,11 @@ fn terminal_draw_repairs_single_column_without_scrolling() {
 
 #[test]
 fn terminal_draw_omits_cursor_style_without_an_owned_glyph() {
+    let Some(_color_output) = enter_color_test(
+        "custom_terminal::tests::cursor::terminal_draw_omits_cursor_style_without_an_owned_glyph",
+    ) else {
+        return;
+    };
     let mut terminal =
         Terminal::with_options(CaptureBackend::new(/*width*/ 2, /*height*/ 1)).expect("terminal");
     for width in [0, 2] {

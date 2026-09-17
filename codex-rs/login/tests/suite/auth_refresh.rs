@@ -1156,17 +1156,12 @@ async fn refresh_token_does_not_retry_after_standard_invalid_grant_failure() -> 
         Some(RefreshTokenFailedReason::Other)
     );
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, initial_auth);
-    let cached_auth = ctx
-        .auth_manager
-        .auth()
-        .await
-        .context("auth should remain cached")?;
-    let cached = cached_auth
-        .get_token_data()
-        .context("token data should remain cached")?;
-    assert_eq!(cached, initial_tokens);
+    assert!(
+        ctx.auth_manager.auth().await.is_none(),
+        "an account with permanently invalid credentials must remain ineligible"
+    );
 
     server.verify().await;
     Ok(())
@@ -1221,7 +1216,7 @@ async fn refresh_token_does_not_cache_other_bad_request_failure() -> Result<()> 
     assert_eq!(second_err.failed_reason(), None);
     assert!(matches!(second_err, RefreshTokenError::Transient(_)));
 
-    let stored = ctx.load_auth()?;
+    let stored = ctx.load_legacy_auth()?;
     assert_eq!(stored, initial_auth);
     let cached_auth = ctx
         .auth_manager

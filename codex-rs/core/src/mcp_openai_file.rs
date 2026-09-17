@@ -674,11 +674,11 @@ mod tests {
 
     #[tokio::test]
     async fn rewrite_mcp_tool_arguments_for_openai_files_surfaces_upload_failures() {
-        let (mut session, turn_context) = make_session_and_context().await;
-        session.services.auth_manager = crate::test_support::auth_manager_from_auth(
-            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
-        );
-        let step_context = StepContext::for_test(Arc::new(turn_context));
+        let (session, turn_context) = make_session_and_context().await;
+        let mut step_context = StepContext::for_test(Arc::new(turn_context));
+        Arc::get_mut(&mut step_context)
+            .expect("test step context should be uniquely owned")
+            .effective_auth = Some(CodexAuth::create_dummy_chatgpt_auth_for_testing());
         let error = rewrite_mcp_tool_arguments_for_openai_files(
             &session,
             &step_context,

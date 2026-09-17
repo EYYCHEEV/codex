@@ -1,7 +1,7 @@
 //! Applies captured Multi-Agent V2 catalog overrides and namespaces to tool specifications.
 //! Parameter schemas retain harness-owned encryption annotations; execution is unchanged.
 
-use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::tools::context::ToolInvocation;
 use crate::tools::registry::CoreToolRuntime;
 use codex_tools::JsonSchema;
@@ -117,8 +117,8 @@ impl ToolExecutor<ToolInvocation> for MultiAgentV2ToolOverrides {
 }
 
 impl CoreToolRuntime for MultiAgentV2ToolOverrides {
-    fn wait_until_ready<'a>(&'a self, session: &'a Arc<Session>) -> Option<BoxFuture<'a, ()>> {
-        self.handler.wait_until_ready(session)
+    fn wait_until_ready(&self, step_context: Arc<StepContext>) -> Option<BoxFuture<'static, ()>> {
+        self.handler.wait_until_ready(step_context)
     }
 
     fn matches_kind(&self, payload: &crate::tools::context::ToolPayload) -> bool {

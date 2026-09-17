@@ -556,6 +556,34 @@ async fn tool_search_returns_deferred_tools_without_follow_up_tool_injection() -
 
     let server = start_mock_server().await;
     let apps_server = AppsTestServer::mount_searchable(&server).await?;
+    let home = Arc::new(tempfile::tempdir()?);
+    let warmup_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("warmup-resp"),
+            ev_assistant_message("warmup-msg", "ready"),
+            ev_completed("warmup-resp"),
+        ]),
+    )
+    .await;
+    let mut warmup_builder =
+        configured_builder(apps_server.chatgpt_base_url.clone()).with_home(Arc::clone(&home));
+    let warmup = warmup_builder.build_with_auto_env(&server).await?;
+    warmup
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Use [$calendar](app://calendar) to load calendar tools".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_event(&warmup.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    warmup.codex.shutdown_and_wait().await?;
+    warmup_mock.single_request();
+    drop(warmup);
+
     let call_id = "tool-search-1";
     let mock = mount_sse_sequence(
         &server,
@@ -597,7 +625,8 @@ async fn tool_search_returns_deferred_tools_without_follow_up_tool_injection() -
     )
     .await;
 
-    let mut builder = configured_builder(apps_server.chatgpt_base_url.clone());
+    let mut builder =
+        configured_builder(apps_server.chatgpt_base_url.clone()).with_home(Arc::clone(&home));
     let test = builder.build_with_auto_env(&server).await?;
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {

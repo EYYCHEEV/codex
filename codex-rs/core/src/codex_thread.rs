@@ -984,6 +984,7 @@ impl CodexThread {
         config: Arc<crate::config::Config>,
     ) -> codex_protocol::error::Result<ThreadRuntimeSnapshot> {
         let turn_context = self.session.new_default_turn_with_config(config).await;
+        self.session.mark_mcp_runtime_dirty();
         self.runtime_snapshot_for_turn(turn_context).await
     }
 

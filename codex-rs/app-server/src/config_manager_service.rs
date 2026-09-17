@@ -143,8 +143,18 @@ impl ConfigManager {
             .apply_exact_to_config(&mut effective_config_toml);
         effective_config_toml.allow_login_shell.get_or_insert(true);
 
-        let json_value = serde_json::to_value(&effective_config_toml)
+        let mut json_value = serde_json::to_value(&effective_config_toml)
             .map_err(|err| ConfigManagerError::json("failed to serialize configuration", err))?;
+        // Unset `ConfigProfile` options serialize as null. Remove those placeholders before
+        // unknown profile fields are flattened into `ProfileV2::additional`.
+        if let Some(profiles) = json_value
+            .get_mut("profiles")
+            .and_then(JsonValue::as_object_mut)
+        {
+            for profile in profiles.values_mut().filter_map(JsonValue::as_object_mut) {
+                profile.retain(|_, value| !value.is_null());
+            }
+        }
         let config: ApiConfig = serde_json::from_value(json_value)
             .map_err(|err| ConfigManagerError::json("failed to deserialize configuration", err))?;
 

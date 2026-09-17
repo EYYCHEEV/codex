@@ -745,7 +745,7 @@ impl ElicitationRoundTripFixture {
                 thread_id: thread.id.clone(),
                 client_user_message_id: None,
                 input: vec![V2UserInput::Text {
-                    text: "Warm up connectors.".to_string(),
+                    text: "Warm up [$calendar](app://calendar).".to_string(),
                     text_elements: Vec::new(),
                 }],
                 model: Some("mock-model".to_string()),
@@ -1499,6 +1499,7 @@ apps = true
 name = "Mock provider for test"
 base_url = "{responses_server_uri}/v1"
 wire_api = "responses"
+requires_openai_auth = true
 request_max_retries = 0
 stream_max_retries = 0
 "#

@@ -45,7 +45,7 @@ impl SamplingExecution {
     async fn retry_after_failure(
         &self,
         error: &LunaSamplerError,
-        auth_recovery: &mut Option<UnauthorizedRecovery>,
+        auth_recovery: Option<&mut UnauthorizedRecovery>,
         retries: &mut usize,
     ) -> bool {
         let retryable = match error {
@@ -54,6 +54,7 @@ impl SamplingExecution {
                 ApiError::Retryable { .. }
                 | ApiError::RateLimitExceeded { .. }
                 | ApiError::Stream(_)
+                | ApiError::WebsocketClosed(_)
                 | ApiError::ServerOverloaded { .. }
                 | ApiError::FlexUnavailable,
             )
@@ -66,7 +67,7 @@ impl SamplingExecution {
             LunaSamplerError::Api(ApiError::Transport(TransportError::Http { status, .. }))
             | LunaSamplerError::Api(ApiError::Api { status, .. }) => {
                 if *status == StatusCode::UNAUTHORIZED {
-                    let Some(recovery) = auth_recovery.as_mut() else {
+                    let Some(recovery) = auth_recovery else {
                         return false;
                     };
                     if !recovery.has_next() || recovery.next().await.is_err() {
@@ -148,11 +149,7 @@ impl SamplingExecution {
         };
         tokio::pin!(owner_changed);
         let mut retries = 0;
-        let mut auth_recovery = self
-            .config
-            .provider
-            .auth_manager()
-            .map(|manager| manager.unauthorized_recovery());
+        let mut auth_recoveries: HashMap<String, UnauthorizedRecovery> = HashMap::new();
         'retry: loop {
             ensure_account_owner()?;
             let lease = match tokio::select! {
@@ -164,7 +161,7 @@ impl SamplingExecution {
                 Ok(lease) => lease,
                 Err(error) => {
                     if self
-                        .retry_after_failure(&error, &mut auth_recovery, &mut retries)
+                        .retry_after_failure(&error, /*auth_recovery*/ None, &mut retries)
                         .await
                     {
                         continue;
@@ -173,6 +170,12 @@ impl SamplingExecution {
                 }
             };
             ensure_account_owner()?;
+            let auth_identity_key = lease.auth_identity_key().to_owned();
+            if !auth_recoveries.contains_key(&auth_identity_key)
+                && let Some(recovery) = lease.unauthorized_recovery()
+            {
+                auth_recoveries.insert(auth_identity_key.clone(), recovery);
+            }
             self.request.service_tier = if lease.request_kind == RequestMode::GuardianClassifier {
                 None
             } else {
@@ -219,7 +222,11 @@ impl SamplingExecution {
                 Err(error) => {
                     let error = LunaSamplerError::Api(error);
                     if self
-                        .retry_after_failure(&error, &mut auth_recovery, &mut retries)
+                        .retry_after_failure(
+                            &error,
+                            auth_recoveries.get_mut(&auth_identity_key),
+                            &mut retries,
+                        )
                         .await
                     {
                         continue;
@@ -247,7 +254,11 @@ impl SamplingExecution {
                     Err(error) => {
                         let error = LunaSamplerError::Api(error);
                         if self
-                            .retry_after_failure(&error, &mut auth_recovery, &mut retries)
+                            .retry_after_failure(
+                                &error,
+                                auth_recoveries.get_mut(&auth_identity_key),
+                                &mut retries,
+                            )
                             .await
                         {
                             continue 'retry;
