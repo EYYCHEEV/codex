@@ -1040,6 +1040,9 @@ async fn resumed_paginated_rollout_continues_after_decimal_token_count() -> std:
                     rate_limit_reached_type: None,
                     normal_model_slug: None,
                 }),
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
             },
         ))])
         .await?;
