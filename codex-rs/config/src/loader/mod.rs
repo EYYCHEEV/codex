@@ -1,4 +1,8 @@
 mod application;
+mod fork;
+#[cfg(test)]
+#[path = "fork_tests.rs"]
+mod fork_tests;
 mod layer_io;
 mod local;
 #[cfg(target_os = "macos")]
@@ -282,6 +286,13 @@ pub async fn load_config_layers_state(
     .await?;
     layers.push(system_layer);
     layers.extend(cloud_config_layers);
+
+    if !ignore_user_config && let Some(private) = fork::load_private_config(fs, codex_home).await? {
+        layers.push(ConfigLayerEntry::new(
+            private.source,
+            resolve_relative_paths_in_config_toml(private.toml, private.base_dir.as_path())?,
+        ));
+    }
 
     // Add the base user config layer. When profile-v2 is selected, add the
     // profile config as a second user layer on top so the profile only needs to
