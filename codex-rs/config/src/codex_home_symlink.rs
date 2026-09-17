@@ -10,7 +10,7 @@ pub fn allowed_symlinked_codex_home(
     codex_home: &AbsolutePathBuf,
 ) -> Option<AbsolutePathBuf> {
     let enabled = config_layer_stack
-        .layers_low_to_high()
+        .layers_high_to_low()
         .find(|layer| matches!(layer.name, ConfigLayerSource::User { profile: None, .. }))?
         .config
         .get("allow_symlinked_codex_home")?
