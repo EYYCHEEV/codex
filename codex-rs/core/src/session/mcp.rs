@@ -1,5 +1,4 @@
 use super::mcp_refresh::McpRefreshInvalidationGuard;
-use super::mcp_runtime::McpDesiredState;
 use super::*;
 use crate::environment_selection::combine_selected_capability_roots;
 use codex_exec_server::ExecutorCapabilityDiscoveryCache;
@@ -401,13 +400,13 @@ impl Session {
         {
             self.mark_mcp_runtime_dirty();
         }
-        self.refresh_mcp_if_dirty().await;
         let required_servers = required_servers
             .iter()
             .chain(&recovered_oauth_servers)
             .cloned()
             .collect::<Vec<_>>();
         let Some(request_setup) = request_setup else {
+            self.refresh_mcp_if_dirty().await;
             if self
                 .services
                 .mcp_runtime
@@ -431,6 +430,15 @@ impl Session {
 
         let auth = request_setup.effective_auth.clone();
         let cache_key = codex_apps_tools_cache_key_for_setup(turn_context, request_setup);
+        let selected_environments = environments
+            .turn_environments()
+            .map(|environment| {
+                (
+                    environment.selection.environment_id.clone(),
+                    Arc::clone(&environment.environment),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         let runtime_matches = || {
             !self.mcp_refresh.is_pending()
                 && self
@@ -443,6 +451,10 @@ impl Session {
                     .current_codex_apps_tools_cache_key()
                     .as_ref()
                     == Some(&cache_key)
+                && self
+                    .services
+                    .mcp_runtime
+                    .current_environments_match(&selected_environments)
                 && self
                     .services
                     .mcp_runtime
@@ -480,19 +492,16 @@ impl Session {
             return binding;
         }
         let _ = self.mcp_refresh.claim();
-        let desired = McpDesiredState {
-            config: Arc::clone(&turn_context.config),
-            auth,
-            codex_apps_tools_cache_key: cache_key,
-            submit_id: self.next_internal_sub_id(),
-            originator: turn_context.originator.clone(),
-            session_source: turn_context.session_source.clone(),
-            environments: environments.clone(),
-            local_process_cwd: environments
-                .local_environment_cwd()
-                .unwrap_or_else(|| turn_context.config.cwd.clone())
-                .to_path_buf(),
-        };
+        let mut desired = self
+            .latest_mcp_desired_state_with_cache_key(auth, cache_key)
+            .await;
+        desired.originator = turn_context.originator.clone();
+        desired.session_source = turn_context.session_source.clone();
+        desired.environments = environments.clone();
+        desired.local_process_cwd = environments
+            .local_environment_cwd()
+            .unwrap_or_else(|| turn_context.config.cwd.clone())
+            .to_path_buf();
         let mcp_projection = self
             .services
             .mcp_manager

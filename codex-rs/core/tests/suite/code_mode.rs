@@ -4095,12 +4095,14 @@ async fn code_mode_unified_image_budget_accepts_legacy_detail_hints() -> Result<
         Rgba([20, 40, 60, 255]),
     );
     let mut encoded = Cursor::new(Vec::new());
-    DynamicImage::ImageRgba8(image).write_to(&mut encoded, image::ImageFormat::Png)?;
+    // Keep the custom-tool call that embeds this fixture below the hard per-item history cap;
+    // this test targets unified handling of legacy image-detail hints in the output.
+    DynamicImage::ImageRgba8(image).write_to(&mut encoded, image::ImageFormat::WebP)?;
     let image_data = BASE64_STANDARD.encode(encoded.into_inner());
     let code = format!(
         r#"
 const data = {};
-const imageUrl = `data:image/png;base64,${{data}}`;
+const imageUrl = `data:image/webp;base64,${{data}}`;
 image(imageUrl);
 image(imageUrl, "auto");
 image(imageUrl, "high");
@@ -4108,7 +4110,7 @@ image({{ image_url: imageUrl, detail: "low" }});
 image({{
   type: "image",
   data,
-  mimeType: "image/png",
+  mimeType: "image/webp",
   _meta: {{ "codex/imageDetail": "original" }}
 }});
 "#,

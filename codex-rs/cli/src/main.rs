@@ -102,6 +102,7 @@ use codex_features::is_known_feature_key;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::TransportAuthBinding;
 use codex_login::is_workload_identity_selected;
 use codex_login::read_codex_access_token_from_env;
 use codex_memories_write::clear_memory_roots_contents;
@@ -2109,6 +2110,8 @@ async fn load_exec_server_remote_auth_provider(
         Ok(codex_model_provider::auth_provider_from_auth_manager(
             auth_manager,
             &auth,
+            TransportAuthBinding::for_nonmanaged_auth(Some(&auth)),
+            /*expected_credential_revision*/ None,
         ))
     } else {
         Ok(codex_model_provider::auth_provider_from_auth(&auth))

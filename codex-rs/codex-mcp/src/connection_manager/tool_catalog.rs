@@ -190,12 +190,16 @@ impl McpConnectionSet {
                 let cached_tools = view.connection.client.cached_tools().filter(|tools| {
                     view.connection.client.is_codex_apps_mcp_server || !tools.is_empty()
                 });
-                if view.connection.client.lazy_startup {
+                // No snapshot is a cold lazy server. A known-empty Apps snapshot must
+                // materialize before this immutable binding is captured.
+                if view.connection.client.lazy_startup && cached_tools.is_none() {
                     return (server_name, view, cached_tools);
                 }
-                let has_cached_tools = cached_tools.is_some();
+                let has_nonempty_cached_tools = cached_tools
+                    .as_ref()
+                    .is_some_and(|cached_tools| !cached_tools.is_empty());
                 let must_wait_for_startup = (required
-                    && (!view.connection.startup_is_dormant() || !has_cached_tools))
+                    && (!view.connection.startup_is_dormant() || !has_nonempty_cached_tools))
                     || required_servers
                         .iter()
                         .any(|required| required == server_name)
@@ -203,8 +207,8 @@ impl McpConnectionSet {
                         && self
                             .plugin_id_for_mcp_server_name(server_name)
                             .is_some_and(|plugin_id| required_plugins.contains(plugin_id)))
-                    || (server_name == CODEX_APPS_MCP_SERVER_NAME && !has_cached_tools);
-                if !must_wait_for_startup && has_cached_tools {
+                    || (server_name == CODEX_APPS_MCP_SERVER_NAME && !has_nonempty_cached_tools);
+                if !must_wait_for_startup && has_nonempty_cached_tools {
                     return (server_name, view, cached_tools);
                 }
                 if !must_wait_for_startup && optional_mcp_startup_grace.is_zero() {
@@ -251,7 +255,7 @@ impl McpConnectionSet {
         }))
         .await;
         let server_results = join_all(server_snapshots.into_iter().map(|(server_name, view, cached_tools)| async move {
-            let (client, server_tools) = if !view
+            let (client, raw_server_tools) = if !view
                 .connection
                 .client
                 .startup_complete
@@ -271,7 +275,7 @@ impl McpConnectionSet {
                     .await;
                 (Some((Arc::new(client), revision)), server_tools)
             };
-            let server_tools = filter_tools(server_tools, &view.tool_filter);
+            let server_tools = filter_tools(raw_server_tools.clone(), &view.tool_filter);
             let server_tools = if server_name == CODEX_APPS_MCP_SERVER_NAME {
                 prepare_codex_apps_tools_for_model(server_tools, &self.tool_plugin_provenance)
             } else {
@@ -291,12 +295,17 @@ impl McpConnectionSet {
                     Self::with_server_metadata(tool, &view.metadata)
                 })
                 .collect::<Vec<_>>();
-            Some((server_name.clone(), client, server_tools))
+            Some((server_name.clone(), client, raw_server_tools, server_tools))
         }))
         .await;
-        for (server_name, client, server_tools) in server_results.into_iter().flatten() {
+        let mut deferred_server_catalogs = HashMap::new();
+        for (server_name, client, raw_server_tools, server_tools) in
+            server_results.into_iter().flatten()
+        {
             if let Some((client, revision)) = client {
                 clients.insert(server_name, (client, revision));
+            } else {
+                deferred_server_catalogs.insert(server_name, raw_server_tools);
             }
             listed_tools.extend(server_tools);
         }
@@ -352,7 +361,66 @@ impl McpConnectionSet {
             plugins_available,
             tools,
             calls,
+            deferred_server_catalogs,
         )
+    }
+
+    pub(crate) async fn deferred_catalog_matches(
+        &self,
+        server: &str,
+        expected_server_catalog: &[ToolInfo],
+    ) -> bool {
+        let Some(view) = self.servers.get(server) else {
+            return false;
+        };
+        let Ok(client) = view.connection.client().await else {
+            return false;
+        };
+        client
+            .tool_catalog
+            .read(|catalog| {
+                let expected_by_identity = expected_server_catalog
+                    .iter()
+                    .map(|tool| {
+                        (
+                            (
+                                tool.server_name.as_str(),
+                                tool.callable_namespace.as_str(),
+                                tool.callable_name.as_str(),
+                                tool.tool.name.as_ref(),
+                                tool.connector_id.as_deref(),
+                            ),
+                            tool,
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                let live_by_identity = catalog
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        (
+                            (
+                                tool.server_name.as_str(),
+                                tool.callable_namespace.as_str(),
+                                tool.callable_name.as_str(),
+                                tool.tool.name.as_ref(),
+                                tool.connector_id.as_deref(),
+                            ),
+                            tool,
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                catalog.revision == 0
+                    && expected_by_identity.len() == expected_server_catalog.len()
+                    && live_by_identity.len() == catalog.tools.len()
+                    && live_by_identity.len() == expected_by_identity.len()
+                    && live_by_identity.iter().all(|(identity, live)| {
+                        expected_by_identity
+                            .get(identity)
+                            .is_some_and(|expected| live.has_same_cached_catalog_shape(expected))
+                    })
+            })
+            .await
     }
 
     fn prepare_call(

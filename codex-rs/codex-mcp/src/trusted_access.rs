@@ -120,7 +120,8 @@ pub struct TrustedAccessContext {
 
 impl TrustedAccessContext {
     pub(crate) fn from_runtime(input: &McpRuntimeInput) -> Option<Self> {
-        let auth = input.auth.as_ref()?;
+        let auth_manager = input.auth_manager.clone()?;
+        let auth = input.auth.clone().or_else(|| auth_manager.auth_cached())?;
         if !matches!(
             auth.api_auth_mode(),
             AuthMode::Chatgpt | AuthMode::ChatgptAuthTokens
@@ -128,8 +129,8 @@ impl TrustedAccessContext {
             return None;
         }
         Some(Self::new(
-            auth.clone(),
-            input.auth_manager.clone()?,
+            auth,
+            auth_manager,
             input.config.chatgpt_base_url.clone(),
             input.runtime_context.local_http_client(),
         ))

@@ -37,6 +37,7 @@ use crate::responses_retry::ResponsesRetryDecision;
 use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_retryable_response_stream_error;
+use crate::session::CodexAppsToolRefresh;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
 use crate::session::session::Session;
@@ -234,6 +235,12 @@ pub(crate) async fn run_turn(
     required_servers.extend(input_required_servers);
     required_servers.sort_unstable();
     required_servers.dedup();
+    let first_codex_apps_tool_refresh =
+        if turn_context.apps_enabled() && !collect_explicit_app_ids(&user_input).is_empty() {
+            CodexAppsToolRefresh::HardRefresh
+        } else {
+            CodexAppsToolRefresh::UseCached
+        };
 
     // Seed extensions and model-visible state from the same atomic setup as the first request.
     let first_request_setup = sess
@@ -251,6 +258,7 @@ pub(crate) async fn run_turn(
             &cancellation_token,
             required_servers,
             required_plugins,
+            first_codex_apps_tool_refresh,
         )
         .await
     {
@@ -262,15 +270,6 @@ pub(crate) async fn run_turn(
         }
         Err(err) => return Err(err),
     };
-    if turn_context.apps_enabled()
-        && !collect_explicit_app_ids(&user_input).is_empty()
-        && let Err(err) = first_step_context
-            .mcp
-            .hard_refresh_codex_apps_tools_cache()
-            .await
-    {
-        warn!("failed to load explicitly requested Codex Apps tools: {err:#}");
-    }
     let first_resource_client = codex_mcp::McpResourceClient::from_runtime_and_binding(
         Arc::clone(&sess.services.mcp_runtime),
         Arc::clone(&first_step_context.mcp),
@@ -436,6 +435,13 @@ pub(crate) async fn run_turn(
                 required_servers.extend(pending_required_servers);
                 required_servers.sort_unstable();
                 required_servers.dedup();
+                let codex_apps_tool_refresh = if turn_context.apps_enabled()
+                    && !collect_explicit_app_ids(&pending_user_input).is_empty()
+                {
+                    CodexAppsToolRefresh::HardRefresh
+                } else {
+                    CodexAppsToolRefresh::UseCached
+                };
                 let step_context = sess
                     .capture_step_context_for_setup_with_required_mcp_servers(
                         Arc::clone(&turn_context),
@@ -443,8 +449,15 @@ pub(crate) async fn run_turn(
                         &cancellation_token,
                         required_servers,
                         required_plugins,
+                        codex_apps_tool_refresh,
                     )
                     .await?;
+                turn_context.extension_data.insert(
+                    codex_mcp::McpResourceClient::from_runtime_and_binding(
+                        Arc::clone(&sess.services.mcp_runtime),
+                        Arc::clone(&step_context.mcp),
+                    ),
+                );
                 (step_context, setup)
             }
         };
@@ -1533,6 +1546,7 @@ async fn run_sampling_request(
                         &cancellation_token,
                         required_servers,
                         required_plugins,
+                        CodexAppsToolRefresh::UseCached,
                     )
                     .or_cancel(&cancellation_token)
                     .await??;

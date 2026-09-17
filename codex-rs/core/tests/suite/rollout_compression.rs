@@ -43,6 +43,7 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
         .with_history_mode(ThreadHistoryMode::Paginated)
         .with_config(|config| {
             config.model_provider.name = "Local compaction test provider".to_string();
+            config.model_provider.requires_openai_auth = false;
             config
                 .features
                 .disable(Feature::LocalThreadStoreCompression)

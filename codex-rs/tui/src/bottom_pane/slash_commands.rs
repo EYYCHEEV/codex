@@ -112,6 +112,18 @@ pub(crate) fn commands_for_input(
 /// command lookup so a typed command can produce a specific unavailable message while the popup
 /// still hides it.
 pub(crate) fn find_builtin_command(name: &str, flags: BuiltinCommandFlags) -> Option<SlashCommand> {
+    let available_commands = builtins_for_input(BuiltinCommandFlags {
+        token_activity_command_enabled: true,
+        side_conversation_active: false,
+        ..flags
+    });
+    if let Some((_, command)) = available_commands
+        .iter()
+        .find(|(visible_name, _)| *visible_name == name)
+    {
+        return Some(*command);
+    }
+
     let cmd = SlashCommand::from_str(name).ok().or_else(|| {
         let repeated_os = name.strip_prefix('g')?.strip_suffix("al")?;
         (!repeated_os.is_empty() && repeated_os.bytes().all(|byte| byte == b'o'))
@@ -119,13 +131,9 @@ pub(crate) fn find_builtin_command(name: &str, flags: BuiltinCommandFlags) -> Op
     })?;
     let is_hidden_compatibility_command = cmd == SlashCommand::Agents;
     (is_hidden_compatibility_command
-        || builtins_for_input(BuiltinCommandFlags {
-            token_activity_command_enabled: true,
-            side_conversation_active: false,
-            ..flags
-        })
-        .into_iter()
-        .any(|(_, visible_cmd)| visible_cmd == cmd))
+        || available_commands
+            .into_iter()
+            .any(|(_, visible_cmd)| visible_cmd == cmd))
     .then_some(cmd)
 }
 
@@ -344,6 +352,14 @@ mod tests {
         assert_eq!(
             find_builtin_command("agents", flags),
             Some(SlashCommand::Agents)
+        );
+        assert_eq!(
+            find_builtin_command("agent", flags),
+            Some(SlashCommand::Agent)
+        );
+        assert_eq!(
+            find_builtin_command("subagents", flags),
+            Some(SlashCommand::Agent)
         );
     }
 

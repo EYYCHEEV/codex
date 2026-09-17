@@ -2127,6 +2127,48 @@ fn codex_apps_env_bearer_token_bypasses_shared_tools_cache() {
 }
 
 #[tokio::test]
+async fn runtime_uses_cached_chatgpt_auth_for_trusted_access_when_transport_is_unauthenticated()
+-> anyhow::Result<()> {
+    let codex_home = tempdir()?;
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let manager = McpConnectionSet::new(
+        /*previous*/ None,
+        McpPublicationGate::already_published(),
+        McpRuntimeInput {
+            startup_policy: McpStartupPolicy::Eager,
+            config: Arc::new(crate::mcp::tests::test_mcp_config(
+                codex_home.path().to_path_buf(),
+            )),
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            mcp_servers: HashMap::new(),
+            submit_id: "trusted-access-auth-fallback-test".to_string(),
+            tx_event: None,
+            startup_cancellation_token: CancellationToken::new(),
+            runtime_context: McpRuntimeContext::new(
+                Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+                codex_home.path().to_path_buf(),
+            ),
+            codex_apps_tools_cache: ConnectorRuntimeManager::default(),
+            tool_catalog_cache: McpToolCatalogCache::default(),
+            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
+            ),
+            client_mcp_extensions: ClientMcpExtensions::default(),
+            auth: None,
+            auth_manager: Some(AuthManager::from_auth_for_testing(auth)),
+            elicitation_reviewer: None,
+            elicitation_lifecycle: None,
+        },
+        ElicitationRequestRouter::default(),
+    )
+    .await;
+
+    assert!(manager.trusted_access.is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow::Result<()> {
     let codex_home = tempdir()?;
     let cache_key = ConnectorRuntimeContextKey::personal(
@@ -2814,6 +2856,296 @@ async fn capture_binding_exposes_cached_tools_before_startup() {
             .map(|tool| tool.callable_name.as_str())
             .collect::<Vec<_>>(),
         vec!["client_local_tool"]
+    );
+}
+
+#[tokio::test]
+async fn cached_binding_prepares_exact_call_after_demanded_startup() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    let mut cached_tool = create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "shared_cached_tool");
+    cached_tool.namespace_description = Some("cached namespace description".to_string());
+    cached_tool.tool.description = Some("cached tool description".into());
+    cached_tool.tool.annotations = Some(
+        rmcp::model::ToolAnnotations::with_title("Cached annotation title")
+            .read_only(true)
+            .destructive(false)
+            .idempotent(true)
+            .open_world(false),
+    );
+    cached_tool.tool.icons = Some(vec![rmcp::model::Icon::new(
+        "https://example.com/cached.png",
+    )]);
+    let cached_sibling = create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "cached_sibling");
+    store_current_tools(
+        &cache_context,
+        vec![cached_tool.clone(), cached_sibling.clone()],
+    );
+    let mut live_tool = cached_tool;
+    live_tool.namespace_description = Some("live namespace description".to_string());
+    live_tool.tool.description = Some("live tool description".into());
+    live_tool.tool.icons = Some(vec![rmcp::model::Icon::new("https://example.com/live.png")]);
+    live_tool
+        .tool
+        .annotations
+        .as_mut()
+        .expect("live annotations")
+        .title = Some("Live annotation title".to_string());
+    let (mut client, mut startup_started, release_startup) = create_gated_async_managed_client(
+        create_test_managed_client(vec![cached_sibling, live_tool]).await,
+    );
+    client.is_codex_apps_mcp_server = true;
+    client.codex_apps_tools_cache_context = Some(cache_context);
+    client.lazy_startup = true;
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &Constrained::allow_any(AskForApproval::OnRequest),
+        &Constrained::allow_any(PermissionProfile::default()),
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client(CODEX_APPS_MCP_SERVER_NAME, client);
+    let binding = capture_binding(&Arc::new(manager)).await;
+    assert_eq!(
+        binding
+            .tools()
+            .iter()
+            .find(|tool| tool.tool.name.as_ref() == "shared_cached_tool")
+            .expect("cached tool should be advertised")
+            .tool
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.read_only_hint),
+        None
+    );
+    assert!(
+        binding
+            .prepare_call(CODEX_APPS_MCP_SERVER_NAME, "shared_cached_tool")
+            .is_none()
+    );
+    assert!(matches!(
+        startup_started.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let startup = binding.wait_for_server_startup(CODEX_APPS_MCP_SERVER_NAME);
+    tokio::pin!(startup);
+    assert!(futures::poll!(&mut startup).is_pending());
+    startup_started
+        .await
+        .expect("startup should begin on demand");
+    release_startup.send(()).expect("release server startup");
+    assert!(startup.await);
+
+    let prepared = binding
+        .prepare_call_exact(CODEX_APPS_MCP_SERVER_NAME, "shared_cached_tool")
+        .await
+        .expect("matching startup catalog should prepare the advertised tool");
+    assert_eq!(
+        (
+            prepared.tool_info().namespace_description.as_deref(),
+            prepared.tool_info().tool.description.as_deref(),
+            prepared
+                .tool_info()
+                .tool
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.read_only_hint),
+        ),
+        (
+            Some("live namespace description"),
+            Some("live tool description"),
+            Some(true),
+        )
+    );
+}
+
+#[tokio::test]
+async fn cached_binding_preserves_callable_identity_when_unrelated_server_becomes_ready() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    let mut cached_tool = create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "cached_search");
+    cached_tool.callable_namespace = "shared namespace".to_string();
+    store_current_tools(&cache_context, vec![cached_tool.clone()]);
+
+    let (mut target_client, target_started, release_target) =
+        create_gated_async_managed_client(create_test_managed_client(vec![cached_tool]).await);
+    target_client.is_codex_apps_mcp_server = true;
+    target_client.codex_apps_tools_cache_context = Some(cache_context);
+    target_client.lazy_startup = true;
+
+    let mut unrelated_tool = create_test_tool("unrelated", "other_tool");
+    unrelated_tool.callable_namespace = "shared namespace".to_string();
+    let (mut unrelated_client, unrelated_started, release_unrelated) =
+        create_gated_async_managed_client(create_test_managed_client(vec![unrelated_tool]).await);
+    unrelated_client.lazy_startup = true;
+
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &Constrained::allow_any(AskForApproval::OnRequest),
+        &Constrained::allow_any(PermissionProfile::default()),
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client(CODEX_APPS_MCP_SERVER_NAME, target_client);
+    manager.insert_test_client("unrelated", unrelated_client);
+    let manager = Arc::new(manager);
+    let binding = capture_binding(&manager).await;
+    let advertised_tool = binding
+        .tools()
+        .iter()
+        .find(|tool| tool.tool.name.as_ref() == "cached_search")
+        .expect("cached tool should be advertised")
+        .clone();
+
+    let unrelated_startup = manager.wait_for_server_startup("unrelated");
+    tokio::pin!(unrelated_startup);
+    assert!(futures::poll!(&mut unrelated_startup).is_pending());
+    unrelated_started
+        .await
+        .expect("unrelated startup should begin");
+    release_unrelated
+        .send(())
+        .expect("release unrelated startup");
+    assert!(unrelated_startup.await);
+
+    let prepare = binding.prepare_call_exact(CODEX_APPS_MCP_SERVER_NAME, "cached_search");
+    tokio::pin!(prepare);
+    assert!(futures::poll!(&mut prepare).is_pending());
+    target_started.await.expect("target startup should begin");
+    release_target.send(()).expect("release target startup");
+    let prepared = prepare
+        .await
+        .expect("unrelated catalog collision must not invalidate target");
+
+    assert_eq!(
+        (
+            prepared.tool_info().callable_namespace.as_str(),
+            prepared.tool_info().callable_name.as_str(),
+        ),
+        (
+            advertised_tool.callable_namespace.as_str(),
+            advertised_tool.callable_name.as_str(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn regular_cached_binding_accepts_live_annotations_after_startup() {
+    let runtime_context = McpRuntimeContext::new(
+        Arc::new(environment_manager_without_environments()),
+        std::env::temp_dir(),
+    );
+    let server_config: McpServerConfig =
+        serde_json::from_value(serde_json::json!({ "command": "docs-mcp" }))
+            .expect("server configuration");
+    let cache_context = McpToolCatalogCache::default()
+        .context(
+            "docs",
+            &server_config,
+            &runtime_context,
+            /*resolved_environment*/ None,
+            (
+                &ElicitationCapability::default(),
+                &ClientMcpExtensions::default(),
+            ),
+            /*connection_identity*/ None,
+        )
+        .expect("shared catalog");
+    let mut live_tool = create_test_tool("docs", "search");
+    live_tool.tool.annotations = Some(
+        rmcp::model::ToolAnnotations::new()
+            .read_only(true)
+            .destructive(false)
+            .open_world(false),
+    );
+    cache_context.publish_if_newest(cache_context.begin_fetch(), &[live_tool.clone()]);
+    let (mut client, startup_started, release_startup) =
+        create_gated_async_managed_client(create_test_managed_client(vec![live_tool]).await);
+    client.tool_catalog_cache_context = Some(cache_context);
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &Constrained::allow_any(AskForApproval::OnRequest),
+        &Constrained::allow_any(PermissionProfile::default()),
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client("docs", client);
+    let binding = capture_binding(&Arc::new(manager)).await;
+    assert_eq!(binding.tools()[0].tool.annotations, None);
+
+    let prepare = binding.prepare_call_exact("docs", "search");
+    tokio::pin!(prepare);
+    assert!(futures::poll!(&mut prepare).is_pending());
+    startup_started
+        .await
+        .expect("tool demand should start server");
+    release_startup.send(()).expect("release server startup");
+
+    let prepared = prepare
+        .await
+        .expect("live annotations should refine the cached execution contract");
+    assert_eq!(
+        prepared.tool_info().tool.annotations,
+        Some(
+            rmcp::model::ToolAnnotations::new()
+                .read_only(true)
+                .destructive(false)
+                .open_world(false)
+        )
+    );
+}
+
+#[tokio::test]
+async fn cached_binding_rejects_call_when_sibling_catalog_schema_drifts() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    let cached_tool = create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "shared_cached_tool");
+    let cached_sibling = create_test_tool(CODEX_APPS_MCP_SERVER_NAME, "cached_sibling");
+    store_current_tools(
+        &cache_context,
+        vec![cached_tool.clone(), cached_sibling.clone()],
+    );
+    let mut live_sibling = cached_sibling;
+    live_sibling.tool.input_schema = Arc::new(
+        serde_json::json!({
+            "type": "object",
+            "properties": { "changed": { "type": "boolean" } }
+        })
+        .as_object()
+        .expect("schema object")
+        .clone(),
+    );
+    let (mut client, startup_started, release_startup) = create_gated_async_managed_client(
+        create_test_managed_client(vec![cached_tool, live_sibling]).await,
+    );
+    client.is_codex_apps_mcp_server = true;
+    client.codex_apps_tools_cache_context = Some(cache_context);
+    client.lazy_startup = true;
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &Constrained::allow_any(AskForApproval::OnRequest),
+        &Constrained::allow_any(PermissionProfile::default()),
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client(CODEX_APPS_MCP_SERVER_NAME, client);
+    let binding = capture_binding(&Arc::new(manager)).await;
+
+    let prepare = binding.prepare_call_exact(CODEX_APPS_MCP_SERVER_NAME, "shared_cached_tool");
+    tokio::pin!(prepare);
+    assert!(futures::poll!(&mut prepare).is_pending());
+    startup_started
+        .await
+        .expect("tool demand should start server");
+    release_startup.send(()).expect("release server startup");
+    assert!(
+        prepare.await.is_none(),
+        "drift in any raw sibling tool must reject the cached call"
     );
 }
 
@@ -3795,7 +4127,7 @@ async fn shutdown_cancels_pending_tool_listing() {
 }
 
 #[tokio::test]
-async fn cancel_active_startups_preserves_lazy_and_completed_clients() {
+async fn cancel_active_startups_preserves_deferred_lazy_and_completed_clients() {
     let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionSet::new_uninitialized(
@@ -3804,6 +4136,7 @@ async fn cancel_active_startups_preserves_lazy_and_completed_clients() {
         /*prefix_mcp_tool_names*/ true,
     );
     let active_token = CancellationToken::new();
+    let deferred_token = CancellationToken::new();
     let lazy_token = CancellationToken::new();
     let completed_token = CancellationToken::new();
     let active_client = {
@@ -3822,6 +4155,13 @@ async fn cancel_active_startups_preserves_lazy_and_completed_clients() {
     };
     for (name, lazy_startup, startup_complete, client, cancel_token) in [
         ("active", false, false, active_client, active_token.clone()),
+        (
+            "deferred",
+            false,
+            false,
+            pending_client(),
+            deferred_token.clone(),
+        ),
         (
             CODEX_APPS_MCP_SERVER_NAME,
             true,
@@ -3852,20 +4192,21 @@ async fn cancel_active_startups_preserves_lazy_and_completed_clients() {
             },
         );
     }
-    let (lazy_startup_trigger, _lazy_startup_requested) = watch::channel(false);
+    let (deferred_startup_trigger, _deferred_startup_requested) = watch::channel(true);
     Arc::get_mut(
         &mut manager
             .servers
-            .get_mut(CODEX_APPS_MCP_SERVER_NAME)
-            .expect("lazy Apps server")
+            .get_mut("deferred")
+            .expect("deferred server")
             .connection,
     )
-    .expect("test owns lazy connection")
-    .startup_trigger = Some(lazy_startup_trigger);
+    .expect("test owns deferred connection")
+    .startup_trigger = Some(deferred_startup_trigger);
 
     manager.cancel_startup();
 
     assert!(active_token.is_cancelled());
+    assert!(!deferred_token.is_cancelled());
     assert!(!lazy_token.is_cancelled());
     assert!(!completed_token.is_cancelled());
     let active_result = tokio::time::timeout(
@@ -3973,10 +4314,156 @@ async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
 }
 
 #[tokio::test]
-async fn list_all_tools_does_not_start_lazy_codex_apps_without_cache() {
-    let pending_client = futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
-        .boxed()
-        .shared();
+async fn capture_binding_waits_for_known_empty_lazy_codex_apps_cache() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    store_current_tools(&cache_context, Vec::new());
+    let ready_client = create_test_managed_client(vec![create_test_tool(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "live_tool",
+    )])
+    .await;
+    let (mut client, startup_started, release_startup) =
+        create_gated_async_managed_client(ready_client);
+    client.is_codex_apps_mcp_server = true;
+    client.codex_apps_tools_cache_context = Some(cache_context);
+    client.lazy_startup = true;
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client(CODEX_APPS_MCP_SERVER_NAME.to_string(), client);
+    let manager = Arc::new(manager);
+
+    let binding = capture_binding(&manager);
+    tokio::pin!(binding);
+    assert!(futures::poll!(&mut binding).is_pending());
+    startup_started
+        .await
+        .expect("binding capture should await known-empty lazy Apps startup");
+    release_startup.send(()).expect("release Apps startup");
+    let binding = binding.await;
+
+    assert_eq!(
+        binding
+            .tools()
+            .iter()
+            .map(|tool| tool.callable_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["live_tool"]
+    );
+    assert!(
+        binding
+            .prepare_call(CODEX_APPS_MCP_SERVER_NAME, "live_tool")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cold_lazy_codex_apps_stays_dormant_until_exact_binding_demand() {
+    let ready_client = create_test_managed_client(vec![create_test_tool(
+        CODEX_APPS_MCP_SERVER_NAME,
+        "drive_search",
+    )])
+    .await;
+    let (mut lazy_client, mut startup_started, release_startup) =
+        create_gated_async_managed_client(ready_client);
+    lazy_client.is_codex_apps_mcp_server = true;
+    lazy_client.cached_server_info = Some(create_test_server_info("Codex Apps"));
+    lazy_client.lazy_startup = true;
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    manager.insert_test_client(CODEX_APPS_MCP_SERVER_NAME.to_string(), lazy_client);
+
+    let tools = manager
+        .list_all_tools()
+        .now_or_never()
+        .expect("lazy codex_apps should not block tool discovery");
+    assert!(tools.is_empty());
+    assert!(matches!(
+        startup_started.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let manager = Arc::new(manager);
+    let binding = capture_binding(&manager)
+        .now_or_never()
+        .expect("binding capture should not start cold lazy codex_apps");
+    assert!(binding.tools().is_empty());
+    assert!(matches!(
+        startup_started.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let startup = binding.wait_for_server_startup(CODEX_APPS_MCP_SERVER_NAME);
+    tokio::pin!(startup);
+    assert!(futures::poll!(&mut startup).is_pending());
+    startup_started
+        .await
+        .expect("exact binding demand should start lazy codex_apps");
+    release_startup
+        .send(())
+        .expect("release lazy codex_apps startup");
+    assert!(startup.await);
+
+    let binding = capture_binding(&manager).await;
+    assert_eq!(
+        binding
+            .tools()
+            .iter()
+            .map(|tool| tool.callable_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["drive_search"]
+    );
+    assert!(
+        binding
+            .prepare_call(CODEX_APPS_MCP_SERVER_NAME, "drive_search")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn cached_binding_stays_immutable_when_demanded_lazy_codex_apps_startup_fails() {
+    let codex_home = tempdir().expect("tempdir");
+    let cache_context = create_codex_apps_tools_cache_context(
+        codex_home.path().to_path_buf(),
+        Some("account-one"),
+        Some("user-one"),
+    );
+    store_current_tools(
+        &cache_context,
+        vec![create_test_tool(
+            CODEX_APPS_MCP_SERVER_NAME,
+            "cached_drive_search",
+        )],
+    );
+    let (startup_started_tx, mut startup_started_rx) = tokio::sync::oneshot::channel();
+    let startup_complete = Arc::new(AtomicBool::new(false));
+    let startup_complete_for_client = Arc::clone(&startup_complete);
+    let client = async move {
+        startup_started_tx
+            .send(())
+            .expect("signal lazy codex_apps startup");
+        startup_complete_for_client.store(true, Ordering::Release);
+        Err(StartupOutcomeError::Failed {
+            error: "startup failed".to_string(),
+            is_authentication_required: false,
+        })
+    }
+    .boxed()
+    .shared();
     let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionSet::new_uninitialized(
@@ -3987,13 +4474,13 @@ async fn list_all_tools_does_not_start_lazy_codex_apps_without_cache() {
     manager.insert_test_client(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
-            client: pending_client,
+            client,
             is_codex_apps_mcp_server: true,
-            cached_server_info: None,
-            codex_apps_tools_cache_context: None,
+            cached_server_info: Some(create_test_server_info("Codex Apps")),
+            codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,
             lazy_startup: true,
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            startup_complete,
             startup_reconnect: None,
             cancel_token: CancellationToken::new(),
         },
@@ -4002,14 +4489,42 @@ async fn list_all_tools_does_not_start_lazy_codex_apps_without_cache() {
     let tools = manager
         .list_all_tools()
         .now_or_never()
-        .expect("lazy codex_apps should not block without a cache");
-    assert!(tools.is_empty());
+        .expect("lazy codex_apps should not block tool discovery");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool.callable_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cached_drive_search"]
+    );
+    assert!(matches!(
+        startup_started_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
 
-    let manager = Arc::new(manager);
-    let binding = capture_binding(&manager)
-        .now_or_never()
-        .expect("lazy codex_apps should not block turn catalog capture");
-    assert!(binding.tools().is_empty());
+    let binding = capture_binding(&Arc::new(manager)).await;
+    assert_eq!(
+        binding
+            .tools()
+            .iter()
+            .map(|tool| tool.callable_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cached_drive_search"]
+    );
+    assert!(
+        !binding
+            .wait_for_server_startup(CODEX_APPS_MCP_SERVER_NAME)
+            .await
+    );
+    startup_started_rx
+        .await
+        .expect("exact binding demand should start lazy codex_apps");
+    assert!(
+        binding
+            .prepare_call_exact(CODEX_APPS_MCP_SERVER_NAME, "cached_drive_search")
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]

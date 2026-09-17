@@ -48,37 +48,45 @@ impl AppsRequestProcessor {
         let mut snapshot_age = None;
         let mut snapshot_tool_count = 0;
         let result = async {
-            let (config, thread) = match params.thread_id.as_deref() {
+            let (config, scoped_mcp_runtime, auth, cache_key) = match params.thread_id.as_deref() {
                 Some(thread_id) => {
                     let (_, thread) = self.load_thread(thread_id).await?;
                     let config = thread.config().await;
-                    (config.as_ref().clone(), Some(thread))
+                    let runtime = thread.current_runtime_snapshot().await.map_err(|err| {
+                        internal_error(format!("failed to capture thread runtime: {err}"))
+                    })?;
+                    (
+                        config.as_ref().clone(),
+                        Some(runtime.mcp),
+                        runtime.effective_auth,
+                        runtime.codex_apps_tools_cache_key,
+                    )
                 }
-                None => (
-                    self.load_latest_config(/*fallback_cwd*/ None).await?,
-                    None,
-                ),
+                None => {
+                    let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+                    let auth = self.auth_manager.auth().await;
+                    let cache_key = ConnectorRuntimeContextKey::from_runtime_binding(
+                        TransportAuthBinding::for_nonmanaged_auth(auth.as_ref()),
+                        None,
+                        config.chatgpt_base_url.clone(),
+                        auth.as_ref().is_some_and(CodexAuth::is_workspace_account),
+                    );
+                    (config, None, auth, cache_key)
+                }
             };
-            let auth = self.auth_manager.auth().await;
             let runtime_enabled = config
                 .features
                 .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend));
 
             let mcp_manager = self.thread_manager.mcp_manager();
-            let cache_key = ConnectorRuntimeContextKey::from_runtime_binding(
-                TransportAuthBinding::for_nonmanaged_auth(auth.as_ref()),
-                None,
-                config.chatgpt_base_url.clone(),
-                auth.as_ref().is_some_and(CodexAuth::is_workspace_account),
-            );
             let previous_snapshot = mcp_manager
                 .codex_apps_tools_cache()
                 .current_snapshot(config.codex_home.to_path_buf(), cache_key.clone());
-            let mut model_visible_tool_names = None;
+            let mut model_visible_tool_names: Option<std::collections::HashSet<String>> = None;
             let tools = if force_refresh && runtime_enabled {
                 let refresh_result = async {
-                    if let Some(thread) = thread {
-                        let snapshot = thread.refresh_codex_apps_tools().await?;
+                    if let Some(runtime) = scoped_mcp_runtime {
+                        let snapshot = runtime.refresh_codex_apps_client_catalog().await?;
                         model_visible_tool_names = Some(snapshot.model_visible_tool_names);
                         snapshot_age = Some(Duration::ZERO);
                         return Ok(snapshot.tools);

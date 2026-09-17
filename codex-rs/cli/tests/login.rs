@@ -7,15 +7,12 @@ use std::time::Instant;
 
 use anyhow::Context;
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::write_chatgpt_auth;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthManager;
 use codex_login::AuthRouteConfig;
-use codex_login::CLIENT_ID;
 use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
 use codex_login::ManagedChatgptOauthCredentials;
 use codex_login::ManagedChatgptSelectionScope;
@@ -76,8 +73,7 @@ fn managed_credentials(
             refresh_token: refresh_token.to_string(),
             account_id: Some(account_id.to_string()),
         },
-        last_refresh: chrono::DateTime::parse_from_rfc3339("2026-07-14T00:00:00Z")?
-            .with_timezone(&chrono::Utc),
+        last_refresh: chrono::Utc::now(),
         oauth_api_key: None,
     })
 }
@@ -262,10 +258,10 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
     )?;
     let manager = AuthManager::shared(
         codex_home.path().to_path_buf(),
-        false,
+        /*enable_codex_api_key_env*/ false,
         AuthCredentialsStoreMode::File,
-        None,
-        None,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
         AuthKeyringBackendKind::Direct,
         test_auth_route_config(),
     )
@@ -667,6 +663,8 @@ fn login_status_reports_auth_storage_errors() -> Result<()> {
     std::fs::write(codex_home.path().join("auth.json"), "{invalid json")?;
 
     codex_command(codex_home.path())?
+        .env_remove(OPENAI_API_KEY_ENV_VAR)
+        .env_remove(CODEX_ACCESS_TOKEN_ENV_VAR)
         .args(["login", "status"])
         .assert()
         .failure()
@@ -789,6 +787,8 @@ fn login_with_access_token_rejects_invalid_jwt() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn debug_prompt_input_follows_authenticated_attribution_setting() -> Result<()> {
+    const NONEXPIRING_ACCESS_TOKEN: &str =
+        "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
     let server = MockServer::start().await;
     let request_count = Arc::new(AtomicUsize::new(0));
     Mock::given(method("GET"))
@@ -802,6 +802,14 @@ async fn debug_prompt_input_follows_authenticated_attribution_setting() -> Resul
         .expect(2)
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": NONEXPIRING_ACCESS_TOKEN,
+            "refresh_token": "refresh-token"
+        })))
+        .mount(&server)
+        .await;
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join("config.toml"),
@@ -810,22 +818,43 @@ async fn debug_prompt_input_follows_authenticated_attribution_setting() -> Resul
             server.uri()
         ),
     )?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("workspace-123")
-            .plan_type("enterprise"),
+    let manager = AuthManager::shared(
+        codex_home.path().to_path_buf(),
+        false,
         AuthCredentialsStoreMode::File,
-    )?;
+        None,
+        None,
+        AuthKeyringBackendKind::Direct,
+        test_auth_route_config(),
+    )
+    .await;
+    manager
+        .upsert_managed_chatgpt_oauth(managed_credentials(
+            "user@example.com",
+            "workspace-123",
+            NONEXPIRING_ACCESS_TOKEN,
+            "refresh-token",
+        )?)
+        .await
+        .context("seed managed account")?;
+    drop(manager);
     for enabled in [true, false] {
         let output = codex_command(codex_home.path())?
             .env("NO_PROXY", "127.0.0.1,localhost")
             .env("no_proxy", "127.0.0.1,localhost")
+            .env(
+                codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+                format!("{}/oauth/token", server.uri()),
+            )
             .env_remove("CODEX_ACCESS_TOKEN")
             .env_remove("OPENAI_API_KEY")
             .args(["debug", "prompt-input"])
             .output()?;
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "debug prompt-input failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let prompt = String::from_utf8(output.stdout)?;
         assert_eq!(
             prompt.contains("Co-authored-by: Codex <noreply@openai.com>"),

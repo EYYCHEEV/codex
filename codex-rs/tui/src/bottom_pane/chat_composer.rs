@@ -3342,8 +3342,7 @@ impl ChatComposer {
             matches!(
                 self.slash_input().command(name),
                 Some(SlashCommandItem::Builtin(command))
-                    if name == command.command()
-                        && parent_owned_command_is_allowed(command, args)
+                    if parent_owned_command_is_allowed(command, args)
             )
         });
         if text.starts_with('/') && allowed_slash_command {
@@ -5187,7 +5186,7 @@ mod tests {
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
             .0;
 
-        assert_eq!(result, InputResult::Command(SlashCommand::Agents));
+        assert_eq!(result, InputResult::Command(SlashCommand::Agent));
     }
 
     #[test]

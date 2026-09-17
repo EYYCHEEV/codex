@@ -610,7 +610,7 @@ impl AccountSelectionObserver {
         });
     }
 
-    async fn update_if_current(
+    pub(super) async fn update_if_current(
         &self,
         previous: &ObservedSelection,
         selected_account_id: Option<String>,

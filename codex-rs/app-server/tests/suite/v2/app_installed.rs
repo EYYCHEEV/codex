@@ -134,9 +134,20 @@ async fn installed_apps_global_disable_retains_tool_derived_identities() -> Resu
 #[tokio::test]
 async fn installed_apps_thread_id_uses_effective_thread_config() -> Result<()> {
     let fixture = InstalledAppsFixture::start().await?;
+    let responses_server = responses::start_mock_server().await;
     let codex_home = configured_codex_home(fixture.base_url())?;
+    MockResponsesConfig::new(&responses_server.uri())
+        .with_root_config(&format!(
+            "chatgpt_base_url = {:?}\nmcp_oauth_credentials_store = \"file\"",
+            fixture.base_url()
+        ))
+        .with_provider_config("requires_openai_auth = true")
+        .enable_feature(Feature::Apps)
+        .with_extra_config(
+            "[apps.blocked]\ndefault_tools_enabled = false\n\n[apps.disabled]\nenabled = false",
+        )
+        .write(codex_home.path())?;
     let mut app_server = start_app_server(codex_home.path()).await?;
-    let mut expected = send_installed_request(&mut app_server, /*force_refresh*/ true).await?;
 
     let request_id = app_server
         .send_thread_start_request_with_auto_env(ThreadStartParams {
@@ -150,15 +161,30 @@ async fn installed_apps_thread_id_uses_effective_thread_config() -> Result<()> {
     let ThreadStartResponse { thread, .. } =
         timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
 
-    let alpha = expected
-        .apps
-        .iter_mut()
-        .find(|app| app.id == "alpha")
-        .expect("alpha app should be installed");
-    alpha.enabled = false;
-    alpha.callable = false;
+    let expected = AppsInstalledResponse {
+        apps: vec![
+            InstalledApp {
+                id: "alpha".to_string(),
+                runtime_name: Some("Alpha Tool Name".to_string()),
+                enabled: false,
+                callable: false,
+            },
+            InstalledApp {
+                id: "blocked".to_string(),
+                runtime_name: Some("Policy Blocked Tool Name".to_string()),
+                enabled: true,
+                callable: false,
+            },
+            InstalledApp {
+                id: "disabled".to_string(),
+                runtime_name: Some("Locally Disabled Tool Name".to_string()),
+                enabled: false,
+                callable: false,
+            },
+        ],
+    };
 
-    for force_refresh in [false, true] {
+    for force_refresh in [true, false] {
         let request_id = app_server
             .send_apps_installed_request(AppsInstalledParams {
                 thread_id: Some(thread.id.clone()),
@@ -177,7 +203,14 @@ async fn installed_apps_thread_id_uses_effective_thread_config() -> Result<()> {
 async fn installed_apps_thread_refresh_updates_live_tools_and_retains_them_on_failure() -> Result<()>
 {
     let fixture = InstalledAppsFixture::start().await?;
-    fixture.set_tools(vec![connector_tool("alpha", "Alpha")?]);
+    let mut hidden = connector_tool("hidden", "Hidden")?;
+    hidden
+        .meta
+        .as_mut()
+        .expect("connector tool should have metadata")
+        .0
+        .insert("ui".to_string(), json!({ "visibility": [] }));
+    fixture.set_tools(vec![connector_tool("alpha", "Alpha")?, hidden]);
     let responses_server = responses::start_mock_server().await;
     let codex_home = configured_codex_home(fixture.base_url())?;
     MockResponsesConfig::new(&responses_server.uri())
@@ -185,12 +218,41 @@ async fn installed_apps_thread_refresh_updates_live_tools_and_retains_them_on_fa
             "chatgpt_base_url = {:?}\nmcp_oauth_credentials_store = \"file\"",
             fixture.base_url()
         ))
+        .with_provider_config("requires_openai_auth = true")
         .enable_feature(Feature::Apps)
         .write(codex_home.path())?;
     let mut app_server = start_app_server(codex_home.path()).await?;
     let ThreadStartResponse { thread, .. } = app_server
         .start_thread(ThreadStartParams::default())
         .await?;
+
+    let request_id = app_server
+        .send_apps_installed_request(AppsInstalledParams {
+            thread_id: Some(thread.id.clone()),
+            force_refresh: true,
+        })
+        .await?;
+    let initial_apps: AppsInstalledResponse =
+        timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
+    assert_eq!(
+        initial_apps,
+        AppsInstalledResponse {
+            apps: vec![
+                InstalledApp {
+                    id: "alpha".to_string(),
+                    runtime_name: Some("Alpha".to_string()),
+                    enabled: true,
+                    callable: true,
+                },
+                InstalledApp {
+                    id: "hidden".to_string(),
+                    runtime_name: Some("Hidden".to_string()),
+                    enabled: true,
+                    callable: false,
+                },
+            ],
+        }
+    );
 
     let initial_model_request = responses::mount_sse_once(
         &responses_server,
@@ -215,6 +277,12 @@ async fn installed_apps_thread_refresh_updates_live_tools_and_retains_them_on_fa
             .single_request()
             .tool_by_name("mcp__codex_apps__alpha", "connector_alpha")
             .is_some()
+    );
+    assert!(
+        initial_model_request
+            .single_request()
+            .tool_by_name("mcp__codex_apps__hidden", "connector_hidden")
+            .is_none()
     );
 
     fixture.set_tools(vec![connector_tool("beta", "Beta")?]);
@@ -255,7 +323,8 @@ async fn installed_apps_thread_refresh_updates_live_tools_and_retains_them_on_fa
         let installed: AppsInstalledResponse =
             timeout(DEFAULT_TIMEOUT, app_server.read_response(request_id)).await??;
         assert_eq!(installed, expected);
-        assert_eq!(fixture.list_tools_calls(), list_tools_calls + 1);
+        let refreshed_list_tools_calls = fixture.list_tools_calls();
+        assert!(refreshed_list_tools_calls > list_tools_calls);
 
         let model_requests = responses::mount_sse_sequence(
             &responses_server,
@@ -302,7 +371,6 @@ async fn installed_apps_thread_refresh_updates_live_tools_and_retains_them_on_fa
             requests[1].function_call_output(call_id)["output"][1],
             json!({"type": "input_text", "text": "called connector_beta"})
         );
-        assert_eq!(fixture.list_tools_calls(), list_tools_calls + 1);
     }
     Ok(())
 }

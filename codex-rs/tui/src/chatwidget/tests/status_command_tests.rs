@@ -87,15 +87,6 @@ async fn status_command_refresh_updates_cached_limits_for_future_status_outputs(
     });
     drain_insert_history(&mut rx);
 
-    chat.dispatch_command(SlashCommand::Copy);
-    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(
-        rx.try_recv(),
-        Ok(AppEvent::CopySelection { text, label, .. })
-            if label == "Whole status" && text.contains("8% left")
-    );
-    assert_matches!(rx.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
-
     chat.dispatch_command(SlashCommand::Status);
     assert_matches!(rx.try_recv(), Ok(AppEvent::RefreshManagedAccountsForStatus));
     chat.add_status_output(
@@ -111,6 +102,15 @@ async fn status_command_refresh_updates_cached_limits_for_future_status_outputs(
         refreshed.contains("8% left"),
         "expected a future /status output to use refreshed cached limits, got: {refreshed}"
     );
+
+    chat.dispatch_command(SlashCommand::Copy);
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::CopySelection { text, label, .. })
+            if label == "Whole status" && text.contains("8% left")
+    );
+    assert_matches!(rx.try_recv(), Ok(AppEvent::SettingsSelectionClosed));
 }
 
 #[tokio::test]

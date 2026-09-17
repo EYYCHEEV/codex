@@ -135,7 +135,6 @@ impl ChatWidget {
             status_account_display,
             pending_managed_account_selection: None,
             managed_account_updates_enabled: true,
-            runtime_model_provider_base_url,
             remote_connection: None,
             local_worktree_operations: true,
             token_info: None,

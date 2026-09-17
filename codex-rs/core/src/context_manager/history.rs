@@ -851,17 +851,22 @@ impl ContextManager {
             *output = original_output.clone();
             truncate_function_output_payload(output, effective_policy, estimate_audio_token_count);
 
-            let Ok(serialized_bytes) = serialized_json_bytes(&processed.item) else {
+            if serialized_json_bytes(&processed.item).is_err() {
                 return Vec::new();
-            };
+            }
+            let model_visible_bytes = estimate_response_item_model_visible_bytes(&processed.item);
             let estimated_tokens = estimate_item_token_count(&processed.item);
+            let max_bytes = i64::try_from(MODEL_VISIBLE_ITEM_MAX_BYTES).unwrap_or(i64::MAX);
             let max_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
-            if serialized_bytes <= MODEL_VISIBLE_ITEM_MAX_BYTES && estimated_tokens <= max_tokens {
+            if model_visible_bytes <= max_bytes && estimated_tokens <= max_tokens {
                 return vec![processed];
             }
-            let serialized_excess_bytes = serialized_bytes
-                .saturating_sub(MODEL_VISIBLE_ITEM_MAX_BYTES)
-                .saturating_add(1);
+            let model_visible_excess_bytes = usize::try_from(
+                model_visible_bytes
+                    .saturating_sub(max_bytes)
+                    .saturating_add(1),
+            )
+            .unwrap_or(usize::MAX);
             let estimated_excess_tokens = usize::try_from(
                 estimated_tokens
                     .saturating_sub(max_tokens)
@@ -869,7 +874,7 @@ impl ContextManager {
             )
             .unwrap_or(usize::MAX);
             let excess_bytes =
-                serialized_excess_bytes.max(approx_bytes_for_tokens(estimated_excess_tokens));
+                model_visible_excess_bytes.max(approx_bytes_for_tokens(estimated_excess_tokens));
             let reduced_policy = match effective_policy {
                 TruncationPolicy::Bytes(bytes) => {
                     TruncationPolicy::Bytes(bytes.saturating_sub(excess_bytes))

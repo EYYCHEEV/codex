@@ -842,6 +842,7 @@ async fn start_thread_keeps_internal_threads_hidden_from_normal_lookups() {
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
+    config.model_provider.supports_websockets = false;
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
     let manager = ThreadManager::with_models_provider_and_home_for_tests(

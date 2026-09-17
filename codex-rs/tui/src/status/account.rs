@@ -443,6 +443,7 @@ mod tests {
             rate_limits: RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
                 limit_name: None,
+                normal_model_slug: None,
                 primary: None,
                 secondary: None,
                 credits: None,
@@ -511,6 +512,7 @@ mod tests {
                 rate_limits: RateLimitSnapshot {
                     limit_id: Some("codex".to_string()),
                     limit_name: None,
+                    normal_model_slug: None,
                     primary: None,
                     secondary: None,
                     credits: None,
@@ -543,6 +545,7 @@ mod tests {
         full.usage.rate_limits = vec![RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: Some("Codex".to_string()),
+            normal_model_slug: None,
             primary: Some(RateLimitWindow {
                 used_percent: 25,
                 window_duration_mins: Some(60),
@@ -567,6 +570,7 @@ mod tests {
             rate_limits: RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
                 limit_name: None,
+                normal_model_slug: None,
                 primary: None,
                 secondary: None,
                 credits: None,
@@ -640,6 +644,7 @@ mod tests {
         initial.usage.rate_limits = vec![RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: Some("Codex".to_string()),
+            normal_model_slug: None,
             primary: None,
             secondary: None,
             credits: None,

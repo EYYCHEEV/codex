@@ -63,6 +63,7 @@ use codex_login::load_auth_dot_json;
 use codex_login::login_with_api_key;
 use codex_login::login_with_bedrock_api_key;
 use codex_login::save_auth;
+use codex_login::test_support::transport_default_auth_route_config;
 use codex_protocol::account::PlanType as AccountPlanType;
 use codex_protocol::auth::AuthMode as DomainAuthMode;
 use core_test_support::responses;
@@ -163,7 +164,6 @@ sandbox_mode = "danger-full-access"
 {chatgpt_base_url_line}
 {forced_line}
 {forced_workspace_line}
-{chatgpt_base_url_line}
 
 model_provider = "{model_provider_id}"
 
@@ -232,6 +232,21 @@ async fn assert_account_updated(
     Ok(())
 }
 
+async fn read_stream_message_ignoring_mcp_startup_completion(
+    mcp: &mut TestAppServer,
+) -> Result<JSONRPCMessage> {
+    loop {
+        let message = mcp.read_stream_message().await?;
+        if !matches!(
+            &message,
+            JSONRPCMessage::Notification(notification)
+                if notification.method == "mcpServer/startupStatus/completed"
+        ) {
+            return Ok(message);
+        }
+    }
+}
+
 pub(super) async fn seed_managed_accounts(
     codex_home: &Path,
     accounts: &[(&str, &str)],
@@ -243,7 +258,7 @@ pub(super) async fn seed_managed_accounts(
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        transport_default_auth_route_config(),
     )
     .await;
     for (email, workspace_id) in accounts {
@@ -670,7 +685,7 @@ async fn managed_to_api_key_login_publishes_monotonic_pool_clearing() -> Result<
             || clearing.is_none()
             || selection_removal.is_none()
         {
-            match mcp.read_stream_message().await? {
+            match read_stream_message_ignoring_mcp_startup_completion(&mut mcp).await? {
                 JSONRPCMessage::Response(response)
                     if response.id == RequestId::Integer(login_id) =>
                 {
@@ -727,9 +742,12 @@ async fn managed_to_api_key_login_publishes_monotonic_pool_clearing() -> Result<
         "managed-to-nonmanaged cutover must advance the scoped selection generation"
     );
     assert!(
-        timeout(Duration::from_millis(250), mcp.read_stream_message())
-            .await
-            .is_err(),
+        timeout(
+            Duration::from_millis(250),
+            read_stream_message_ignoring_mcp_startup_completion(&mut mcp),
+        )
+        .await
+        .is_err(),
         "managed-to-API-key cutover must publish one clearing pool update"
     );
 
@@ -752,9 +770,12 @@ async fn managed_to_api_key_login_publishes_monotonic_pool_clearing() -> Result<
     assert_eq!(after.pool_revision, clearing.pool_revision);
     assert_eq!(after.selection_revision, None);
     assert!(
-        timeout(Duration::from_millis(250), mcp.read_stream_message())
-            .await
-            .is_err(),
+        timeout(
+            Duration::from_millis(250),
+            read_stream_message_ignoring_mcp_startup_completion(&mut mcp),
+        )
+        .await
+        .is_err(),
         "scoped nonpooled list must not publish a selection update"
     );
     Ok(())
@@ -1175,7 +1196,7 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        transport_default_auth_route_config(),
     )
     .await;
     manager
@@ -1313,7 +1334,7 @@ async fn account_list_usage_only_skips_oauth_and_maps_missing_plan_to_unknown() 
         None,
         None,
         AuthKeyringBackendKind::Direct,
-        None,
+        transport_default_auth_route_config(),
     )
     .await;
     let mut tokens = TokenData::default();
@@ -2362,30 +2383,31 @@ async fn login_amazon_bedrock_replaces_primary_auth_and_persists_provider(
     );
 
     if managed_access_keys {
-        let mut expected_logout_config = expected_config;
-        let expected_logout_config_root = expected_logout_config
-            .as_table_mut()
-            .expect("config should be a table");
-        expected_logout_config_root.remove("model_provider");
-        expected_logout_config_root.remove("model");
-        expected_logout_config["model_providers"]["amazon-bedrock"]
-            .as_table_mut()
-            .expect("Bedrock provider config should be a table")
-            .remove("aws");
-
+        let expected_auth = load_file_auth(codex_home.path())?;
         let request_id = mcp.send_logout_account_request().await?;
-        let response: LogoutAccountResponse =
-            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
-        assert_eq!(response, LogoutAccountResponse::default());
-        assert_eq!(load_file_auth(codex_home.path())?, None);
-        assert_eq!(read_config_toml(codex_home.path())?, expected_logout_config);
+        let response = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+        )
+        .await??;
+        assert_eq!(
+            response.error,
+            JSONRPCErrorError {
+                code: -32_600,
+                message: "cannot log out while Amazon Bedrock is using AWS-managed credentials; manage those credentials through AWS or switch model providers before logging out Codex authentication".to_string(),
+                data: None,
+            }
+        );
+        assert_eq!(load_file_auth(codex_home.path())?, expected_auth);
+        assert_eq!(read_config_toml(codex_home.path())?, expected_config);
         assert!(!codex_home.path().join(".env").exists());
-        assert_account_updated(&mut mcp, /*auth_mode*/ None).await?;
         assert_eq!(
             read_account(&mut mcp).await?,
             GetAccountResponse {
-                account: None,
-                requires_openai_auth: true,
+                account: Some(Account::AmazonBedrock {
+                    uses_codex_managed_credentials: true,
+                }),
+                requires_openai_auth: false,
             }
         );
     }
@@ -2656,7 +2678,7 @@ async fn logout_managed_bedrock_restores_default_account(
 }
 
 #[tokio::test]
-async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account() -> Result<()> {
+async fn logout_aws_managed_bedrock_protects_external_credentials() -> Result<()> {
     for managed_bedrock_auth in [false, true] {
         let codex_home = TempDir::new()?;
         create_config_toml(codex_home.path(), aws_managed_bedrock_config())?;
@@ -2718,41 +2740,70 @@ async fn logout_aws_managed_bedrock_clears_provider_and_restores_default_account
                 requires_openai_auth: false,
             }
         );
-        let mut expected_config = read_config_toml(codex_home.path())?;
-        let expected_config_root = expected_config
-            .as_table_mut()
-            .expect("config should be a table");
-        expected_config_root.remove("model_provider");
-        expected_config_root.remove("model");
-        expected_config["model_providers"]["amazon-bedrock"]
-            .as_table_mut()
-            .expect("Bedrock provider config should be a table")
-            .remove("aws");
+        let expected_auth = load_file_auth(codex_home.path())?;
+        let expected_config = read_config_toml(codex_home.path())?;
 
         let request_id = mcp.send_logout_account_request().await?;
-        let response = timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-        )
-        .await??;
-        assert_eq!(
-            to_response::<LogoutAccountResponse>(response)?,
-            LogoutAccountResponse::default()
-        );
-        assert_eq!(load_file_auth(codex_home.path())?, None);
-        assert_eq!(read_config_toml(codex_home.path())?, expected_config);
+        if managed_bedrock_auth {
+            let response = timeout(
+                DEFAULT_READ_TIMEOUT,
+                mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+            )
+            .await??;
+            assert_eq!(
+                to_response::<LogoutAccountResponse>(response)?,
+                LogoutAccountResponse::default()
+            );
+            assert_eq!(load_file_auth(codex_home.path())?, None);
+            let mut expected_logout_config = expected_config;
+            let expected_logout_config_root = expected_logout_config
+                .as_table_mut()
+                .expect("config should be a table");
+            expected_logout_config_root.remove("model_provider");
+            expected_logout_config_root.remove("model");
+            expected_logout_config["model_providers"]["amazon-bedrock"]
+                .as_table_mut()
+                .expect("Bedrock provider config should be a table")
+                .remove("aws");
+            assert_eq!(read_config_toml(codex_home.path())?, expected_logout_config);
+            assert_account_updated(&mut mcp, /*auth_mode*/ None).await?;
+            assert_eq!(
+                read_account(&mut mcp).await?,
+                GetAccountResponse {
+                    account: None,
+                    requires_openai_auth: true,
+                }
+            );
+        } else {
+            let response = timeout(
+                DEFAULT_READ_TIMEOUT,
+                mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+            )
+            .await??;
+            assert_eq!(
+                response.error,
+                JSONRPCErrorError {
+                    code: -32_600,
+                    message: "cannot log out while Amazon Bedrock is using AWS-managed credentials; manage those credentials through AWS or switch model providers before logging out Codex authentication".to_string(),
+                    data: None,
+                }
+            );
+            assert_eq!(load_file_auth(codex_home.path())?, expected_auth);
+            assert_eq!(read_config_toml(codex_home.path())?, expected_config);
+            assert_eq!(
+                read_account(&mut mcp).await?,
+                GetAccountResponse {
+                    account: Some(Account::AmazonBedrock {
+                        uses_codex_managed_credentials: false,
+                    }),
+                    requires_openai_auth: false,
+                }
+            );
+        }
         assert_eq!(std::fs::read_to_string(dotenv_path)?, dotenv);
         assert_eq!(
             std::fs::read_to_string(aws_credentials_path)?,
             aws_credentials
-        );
-        assert_account_updated(&mut mcp, /*auth_mode*/ None).await?;
-        assert_eq!(
-            read_account(&mut mcp).await?,
-            GetAccountResponse {
-                account: None,
-                requires_openai_auth: true,
-            }
         );
     }
     Ok(())
@@ -3586,7 +3637,7 @@ async fn login_account_chatgpt_uses_oauth_overrides() -> Result<()> {
             success: true,
             error: None,
             onboarding_entrypoint: None,
-            managed_account_id: None,
+            managed_account_id: Some("email:staging@example.com".to_string()),
         }
     );
     Ok(())

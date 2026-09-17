@@ -49,7 +49,7 @@ pub(super) async fn run_remote_compact_attempt(
             )
             .await?;
         let attempt_step_context = sess
-            .capture_step_context_for_setup(Arc::clone(turn_context), &request_setup)
+            .capture_speculative_step_context_for_setup(Arc::clone(turn_context), &request_setup)
             .await?;
         let mut history = sess.clone_history().await;
         let base_instructions = sess.get_prompt_base_instructions().await;

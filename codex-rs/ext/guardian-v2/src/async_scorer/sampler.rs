@@ -199,7 +199,7 @@ impl LunaSampler {
     async fn retry_after_failure(
         &self,
         error: &LunaSamplerError,
-        auth_recovery: &mut Option<UnauthorizedRecovery>,
+        auth_recovery: Option<&mut UnauthorizedRecovery>,
         retries: &mut usize,
     ) -> bool {
         let retryable = match error {
@@ -208,6 +208,7 @@ impl LunaSampler {
                 ApiError::Retryable { .. }
                 | ApiError::RateLimitExceeded { .. }
                 | ApiError::Stream(_)
+                | ApiError::WebsocketClosed(_)
                 | ApiError::ServerOverloaded,
             )
             | LunaSamplerError::Api(ApiError::Transport(
@@ -219,7 +220,7 @@ impl LunaSampler {
             LunaSamplerError::Api(ApiError::Transport(TransportError::Http { status, .. }))
             | LunaSamplerError::Api(ApiError::Api { status, .. }) => {
                 if *status == StatusCode::UNAUTHORIZED {
-                    let Some(recovery) = auth_recovery.as_mut() else {
+                    let Some(recovery) = auth_recovery else {
                         return false;
                     };
                     if !recovery.has_next() || recovery.next().await.is_err() {
@@ -386,11 +387,7 @@ impl LunaSampler {
             });
         }
         let mut retries = 0;
-        let mut auth_recovery = self
-            .config
-            .provider
-            .auth_manager()
-            .map(|manager| manager.unauthorized_recovery());
+        let mut auth_recoveries: HashMap<String, UnauthorizedRecovery> = HashMap::new();
         'retry: loop {
             let lease = match tokio::select! {
                 biased;
@@ -399,15 +396,18 @@ impl LunaSampler {
             } {
                 Ok(lease) => lease,
                 Err(error) => {
-                    if self
-                        .retry_after_failure(&error, &mut auth_recovery, &mut retries)
-                        .await
-                    {
+                    if self.retry_after_failure(&error, None, &mut retries).await {
                         continue;
                     }
                     return Err(error);
                 }
             };
+            let auth_identity_key = lease.auth_identity_key().to_owned();
+            if !auth_recoveries.contains_key(&auth_identity_key)
+                && let Some(recovery) = lease.unauthorized_recovery()
+            {
+                auth_recoveries.insert(auth_identity_key.clone(), recovery);
+            }
             request.service_tier = if lease.endpoint == ResponsesEndpoint::GuardianClassifier {
                 None
             } else {
@@ -452,7 +452,11 @@ impl LunaSampler {
                 Err(error) => {
                     let error = LunaSamplerError::Api(error);
                     if self
-                        .retry_after_failure(&error, &mut auth_recovery, &mut retries)
+                        .retry_after_failure(
+                            &error,
+                            auth_recoveries.get_mut(&auth_identity_key),
+                            &mut retries,
+                        )
                         .await
                     {
                         continue;
@@ -478,7 +482,11 @@ impl LunaSampler {
                     Err(error) => {
                         let error = LunaSamplerError::Api(error);
                         if self
-                            .retry_after_failure(&error, &mut auth_recovery, &mut retries)
+                            .retry_after_failure(
+                                &error,
+                                auth_recoveries.get_mut(&auth_identity_key),
+                                &mut retries,
+                            )
                             .await
                         {
                             continue 'retry;

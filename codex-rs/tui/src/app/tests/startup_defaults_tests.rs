@@ -453,7 +453,7 @@ async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
     server_config.sqlite = SqliteConfig::new_for_testing(server_home.path().abs());
     let (mut server, requests, proxy) = start_recording_app_server_with_history(
         &server_config,
-        HistoryCapabilities::Current,
+        HistoryCapabilities::RecordThreadStartWithoutResponse,
         /*blocked_thread_list*/ None,
         /*failed_thread_name*/ None,
         crate::app_server_session::ThreadParamsMode::Embedded,
@@ -489,7 +489,7 @@ async fn startup_reads_server_defaults_before_starting_thread() -> Result<()> {
             &serde_json::json!("high")
         ),
     );
-    tokio::time::timeout(Duration::from_secs(/*secs*/ 15), proxy).await???;
+    proxy.abort();
     Ok(())
 }
 

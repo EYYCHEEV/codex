@@ -13,24 +13,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn cyber_refusal_reads_eligibility_without_changing_the_model() -> Result<()> {
-    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
     let backend = wiremock::MockServer::start().await;
-    app.config.chatgpt_base_url = backend.uri();
-    app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
-    write_chatgpt_auth(
-        &app.config.codex_home,
-        ChatGptAuthFixture::new("test-token")
-            .account_id("account")
-            .chatgpt_user_id("user"),
-        AuthCredentialsStoreMode::File,
-    )
-    .expect("write synthetic auth");
-    let server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
-    let thread_id = ThreadId::new();
-    let mut session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
-    session.model_provider_id = "openai".to_string();
-    app.enqueue_primary_thread_session(session, Vec::new())
-        .await?;
     for (status, enrolled, model, replace_account, expected) in [
         (200, true, "gpt-5.6-sol", false, Notice::Limited),
         (200, false, "gpt-5.6-sol", false, Notice::Apply),
@@ -43,6 +26,23 @@ async fn cyber_refusal_reads_eligibility_without_changing_the_model() -> Result<
         (200, false, "gpt-5.6-sol", true, Notice::Limited),
     ] {
         backend.reset().await;
+        let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+        app.config.chatgpt_base_url = backend.uri();
+        app.config.cli_auth_credentials_store_mode = AuthCredentialsStoreMode::File;
+        write_chatgpt_auth(
+            &app.config.codex_home,
+            ChatGptAuthFixture::new("test-token")
+                .account_id("account")
+                .chatgpt_user_id("user"),
+            AuthCredentialsStoreMode::File,
+        )
+        .expect("write synthetic auth");
+        let server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let thread_id = ThreadId::new();
+        let mut session = test_thread_session(thread_id, app.config.cwd.to_path_buf());
+        session.model_provider_id = "openai".to_string();
+        app.enqueue_primary_thread_session(session, Vec::new())
+            .await?;
         let codex_home = app.config.codex_home.clone();
         let response = wiremock::ResponseTemplate::new(status)
             .set_delay(if model == "gpt-5.6-sol" && enrolled { Duration::from_secs(1) } else { Duration::ZERO })
@@ -127,8 +127,8 @@ async fn cyber_refusal_reads_eligibility_without_changing_the_model() -> Result<
         );
         backend.verify().await;
         assert_eq!(app.chat_widget.current_model(), model);
+        server.shutdown().await?;
     }
-    server.shutdown().await?;
     Ok(())
 }
 

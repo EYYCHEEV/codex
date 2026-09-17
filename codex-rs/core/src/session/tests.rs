@@ -9861,6 +9861,14 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
     }
 
     let (mut session, turn_context) = make_session_and_context().await;
+    {
+        let mut state = session.state.lock().await;
+        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use)
+            .features
+            .disable(Feature::Apps)
+            .expect("disable Apps so binding identity reflects runtime publication");
+    }
+    session.mark_mcp_runtime_dirty();
     let auth_home = tempfile::tempdir()?;
     let initial_auth = CodexAuth::from_external_chatgpt_tokens(
         "header.e30.initial",
@@ -9988,6 +9996,14 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
     }
 
     let (session, turn_context) = make_session_and_context().await;
+    {
+        let mut state = session.state.lock().await;
+        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use)
+            .features
+            .disable(Feature::Apps)
+            .expect("disable Apps so binding identity reflects runtime publication");
+    }
+    session.mark_mcp_runtime_dirty();
     let initial_auth = auth_for_task("task-initial").await?;
     let managed_binding = TransportAuthBinding {
         identity_key: "managed:account-mcp".to_string(),
@@ -11838,6 +11854,7 @@ async fn make_remote_compaction_session(
             config.model_provider = provider;
             let _ = config.features.enable(Feature::RemoteCompactionV2);
             let _ = config.features.disable(Feature::TokenBudget);
+            let _ = config.features.disable(Feature::Apps);
         },
     )
     .await

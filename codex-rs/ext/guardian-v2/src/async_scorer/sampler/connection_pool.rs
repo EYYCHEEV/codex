@@ -7,8 +7,8 @@ use super::INITIAL_WEBSOCKET_CONNECTIONS;
 use super::LunaSamplerConfig;
 use super::LunaSamplerError;
 use super::MAX_CONCURRENT_REQUESTS;
+use super::MODEL;
 use codex_api::ApiError;
-use codex_api::Provider;
 use codex_api::ReqwestTransport;
 use codex_api::ResponseStream;
 use codex_api::ResponsesApiRequest;
@@ -18,16 +18,18 @@ use codex_api::ResponsesOptions;
 use codex_api::ResponsesWebsocketClient;
 use codex_api::ResponsesWebsocketConnection;
 use codex_api::ResponsesWsRequest;
-use codex_api::SharedAuthProvider;
 use codex_api::TransportError;
 use codex_api::build_session_headers;
 use codex_http_client::ClientRouteClass;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptAuthSnapshot;
+use codex_login::UnauthorizedRecovery;
 use codex_login::default_client::add_originator_header;
 use codex_login::default_client::create_client_for_route_async;
 use codex_login::default_client::default_headers;
 use codex_model_provider::AgentIdentitySessionFallback;
 use codex_model_provider::ProviderAuthScope;
+use codex_model_provider::ProviderRequestSetup;
 use codex_protocol::ThreadId;
 use http::HeaderMap;
 use http::HeaderValue;
@@ -60,6 +62,8 @@ pub(super) struct PooledConnection {
     endpoint: ResponsesEndpoint,
     // The bridge routes by thread ID, so each socket needs its own identity.
     thread_id: String,
+    auth_identity_key: String,
+    managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
     pub(super) expires_at: Instant,
     auth_changes: Option<tokio::sync::watch::Receiver<u64>>,
     _permit: OwnedSemaphorePermit,
@@ -73,6 +77,8 @@ enum Connection {
 pub(super) struct ConnectionLease {
     pub(super) thread_id: String,
     pub(super) endpoint: ResponsesEndpoint,
+    auth_identity_key: String,
+    managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
     connection: Connection,
     pool: Arc<ConnectionPool>,
     _permit: OwnedSemaphorePermit,
@@ -177,88 +183,102 @@ impl ConnectionPool {
                 None => break None,
             }
         };
-        let (connection, thread_id, endpoint) = match connection {
-            Some(connection) => {
-                let thread_id = connection.thread_id.clone();
-                let endpoint = connection.endpoint;
-                (Connection::Websocket(connection), thread_id, endpoint)
-            }
-            None => {
-                self.replenish();
-                let (mut provider, auth) = self.client_setup().await?;
-                // Sampling owns the retry budget across both transports.
-                provider.retry.max_attempts = 0;
-                let endpoint = self.responses_endpoint().await;
-                let url = provider.url_for_path(endpoint.path());
-                let transport = {
-                    let mut cached = self
-                        .http_transport
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Some((cached_url, transport)) = cached.as_ref()
-                        && cached_url == &url
-                    {
-                        Arc::clone(transport)
-                    } else {
-                        let transport = Arc::new(OnceCell::new());
-                        *cached = Some((url.clone(), Arc::clone(&transport)));
-                        transport
-                    }
-                };
-                let transport = transport
-                    .get_or_try_init(|| async {
-                        let client = create_client_for_route_async(
-                            self.config.http_client_factory.clone(),
-                            url,
-                            ClientRouteClass::Api,
-                        )
-                        .await
-                        .map_err(|error| {
-                            LunaSamplerError::Api(ApiError::Transport(TransportError::Build(
-                                error.to_string(),
-                            )))
-                        })?;
-                        Ok::<_, LunaSamplerError>(ReqwestTransport::from_http_client(client))
-                    })
-                    .await?
-                    .clone();
-                let client =
-                    ResponsesClient::new(transport, provider, auth).with_endpoint(endpoint);
-                (
-                    Connection::Http(client),
-                    ThreadId::new().to_string(),
-                    endpoint,
-                )
-            }
-        };
+        let (connection, thread_id, endpoint, auth_identity_key, managed_snapshot) =
+            match connection {
+                Some(connection) => {
+                    let thread_id = connection.thread_id.clone();
+                    let endpoint = connection.endpoint;
+                    let auth_identity_key = connection.auth_identity_key.clone();
+                    let managed_snapshot = connection.managed_snapshot.clone();
+                    (
+                        Connection::Websocket(connection),
+                        thread_id,
+                        endpoint,
+                        auth_identity_key,
+                        managed_snapshot,
+                    )
+                }
+                None => {
+                    self.replenish();
+                    let (mut setup, endpoint) = self.client_setup().await?;
+                    // Sampling owns the retry budget across both transports.
+                    setup.api_provider.retry.max_attempts = 0;
+                    let url = setup.api_provider.url_for_path(endpoint.path());
+                    let transport = {
+                        let mut cached = self
+                            .http_transport
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some((cached_url, transport)) = cached.as_ref()
+                            && cached_url == &url
+                        {
+                            Arc::clone(transport)
+                        } else {
+                            let transport = Arc::new(OnceCell::new());
+                            *cached = Some((url.clone(), Arc::clone(&transport)));
+                            transport
+                        }
+                    };
+                    let transport = transport
+                        .get_or_try_init(|| async {
+                            let client = create_client_for_route_async(
+                                self.config.http_client_factory.clone(),
+                                url,
+                                ClientRouteClass::Api,
+                            )
+                            .await
+                            .map_err(|error| {
+                                LunaSamplerError::Api(ApiError::Transport(TransportError::Build(
+                                    error.to_string(),
+                                )))
+                            })?;
+                            Ok::<_, LunaSamplerError>(ReqwestTransport::from_http_client(client))
+                        })
+                        .await?
+                        .clone();
+                    let auth_identity_key = setup.transport_auth_binding.identity_key.clone();
+                    let managed_snapshot = setup.managed_snapshot.clone();
+                    let client =
+                        ResponsesClient::new(transport, setup.api_provider, setup.api_auth)
+                            .with_endpoint(endpoint);
+                    (
+                        Connection::Http(client),
+                        ThreadId::new().to_string(),
+                        endpoint,
+                        auth_identity_key,
+                        managed_snapshot,
+                    )
+                }
+            };
         Ok(ConnectionLease {
             thread_id,
             endpoint,
+            auth_identity_key,
+            managed_snapshot,
             connection,
             pool: Arc::clone(self),
             _permit: permit,
         })
     }
 
-    async fn client_setup(&self) -> Result<(Provider, SharedAuthProvider), LunaSamplerError> {
-        let provider = self
+    async fn client_setup(
+        &self,
+    ) -> Result<(ProviderRequestSetup, ResponsesEndpoint), LunaSamplerError> {
+        let setup = self
             .config
             .provider
-            .api_provider()
-            .await
-            .map_err(LunaSamplerError::Provider)?;
-        let auth = self
-            .config
-            .provider
-            .api_auth_for_scope(ProviderAuthScope {
+            .request_setup(ProviderAuthScope {
                 agent_identity_policy: self.config.agent_identity_policy,
                 session_source: self.config.session_source.clone(),
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                thread_id: Some(self.config.thread_id.clone()),
+                session_id: Some(self.config.session_id.clone()),
+                model: Some(MODEL.to_owned()),
             })
             .await
-            .map_err(LunaSamplerError::Provider)?
-            .auth;
-        Ok((provider, auth))
+            .map_err(LunaSamplerError::Provider)?;
+        let endpoint = self.responses_endpoint(&setup);
+        Ok((setup, endpoint))
     }
 
     fn headers(&self, thread_id: &str) -> Result<HeaderMap, LunaSamplerError> {
@@ -287,14 +307,11 @@ impl ConnectionPool {
         }
         Ok(headers)
     }
-    async fn responses_endpoint(&self) -> ResponsesEndpoint {
+    fn responses_endpoint(&self, setup: &ProviderRequestSetup) -> ResponsesEndpoint {
         let provider = self.config.provider.info();
         if self.config.free_guardian
-            && self
-                .config
-                .provider
-                .auth()
-                .await
+            && setup
+                .effective_auth
                 .as_ref()
                 .is_some_and(CodexAuth::uses_codex_backend)
             && provider.supports_codex_backend_routes()
@@ -316,7 +333,7 @@ impl ConnectionPool {
     ) -> Result<PooledConnection, LunaSamplerError> {
         let auth_manager = self.config.provider.auth_manager();
         let auth_changes = auth_manager.map(|manager| manager.auth_change_receiver());
-        let (provider, auth) = self.client_setup().await?;
+        let (setup, endpoint) = self.client_setup().await?;
         let thread_id = ThreadId::new().to_string();
         let mut headers = self.headers(&thread_id)?;
         headers.insert(
@@ -325,8 +342,9 @@ impl ConnectionPool {
         );
 
         let provider_info = self.config.provider.info();
-        let endpoint = self.responses_endpoint().await;
-        let client = ResponsesWebsocketClient::new(provider, auth).with_endpoint(endpoint);
+        let client =
+            ResponsesWebsocketClient::new(setup.api_provider.clone(), Arc::clone(&setup.api_auth))
+                .with_endpoint(endpoint);
         let connect = client.connect(
             &self.config.http_client_factory,
             headers,
@@ -365,6 +383,8 @@ impl ConnectionPool {
             connection,
             endpoint,
             thread_id,
+            auth_identity_key: setup.transport_auth_binding.identity_key,
+            managed_snapshot: setup.managed_snapshot,
             expires_at: Instant::now() + MAX_WEBSOCKET_AGE,
             auth_changes,
             _permit: permit,
@@ -373,6 +393,18 @@ impl ConnectionPool {
 }
 
 impl ConnectionLease {
+    pub(super) fn auth_identity_key(&self) -> &str {
+        &self.auth_identity_key
+    }
+
+    pub(super) fn unauthorized_recovery(&self) -> Option<UnauthorizedRecovery> {
+        let manager = self.pool.config.provider.auth_manager()?;
+        Some(self.managed_snapshot.as_ref().map_or_else(
+            || manager.unauthorized_recovery(),
+            |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
+        ))
+    }
+
     pub(super) async fn stream_request(
         &self,
         request: &ResponsesApiRequest,

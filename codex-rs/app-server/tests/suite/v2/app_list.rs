@@ -314,15 +314,9 @@ async fn list_apps_uses_thread_feature_flag_when_thread_id_is_provided() -> Resu
             Some("pro".to_string()),
         )
         .await?;
-    let login_response = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(login_id)),
-    )
-    .await??;
-    assert_eq!(
-        to_response::<LoginAccountResponse>(login_response)?,
-        LoginAccountResponse::ChatgptAuthTokens {}
-    );
+    let login_response: LoginAccountResponse =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(login_id)).await??;
+    assert_eq!(login_response, LoginAccountResponse::ChatgptAuthTokens {});
 
     let start_request = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams::default())

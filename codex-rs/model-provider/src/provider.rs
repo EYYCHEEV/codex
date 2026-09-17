@@ -471,21 +471,15 @@ pub(crate) async fn resolve_provider_request_setup(
 }
 
 pub(crate) fn transport_binding_for_auth(auth: Option<&CodexAuth>) -> TransportAuthBinding {
-    let identity_key = auth
-        .and_then(CodexAuth::get_chatgpt_user_id)
-        .or_else(|| auth.and_then(CodexAuth::get_account_id))
-        .unwrap_or_else(|| {
-            auth.map(|auth| auth.auth_mode().to_string())
-                .unwrap_or_else(|| "unauthenticated".to_string())
-        });
-    TransportAuthBinding {
-        identity_key,
-        raw_account_id: auth.and_then(CodexAuth::get_account_id),
-        fedramp: auth.is_some_and(CodexAuth::is_fedramp_account),
-        auth_mode: auth
-            .map(CodexAuth::auth_mode)
-            .unwrap_or(codex_protocol::auth::AuthMode::ApiKey),
-        route_generation: 0,
+    match auth {
+        Some(auth) => TransportAuthBinding::for_nonmanaged_auth(Some(auth)),
+        None => TransportAuthBinding {
+            identity_key: "unauthenticated".to_string(),
+            raw_account_id: None,
+            fedramp: false,
+            auth_mode: codex_protocol::auth::AuthMode::ApiKey,
+            route_generation: 0,
+        },
     }
 }
 
@@ -1224,8 +1218,8 @@ mod tests {
         assert!(setup.managed_snapshot.is_none());
         assert!(setup.managed_id.is_none());
         assert_eq!(
-            setup.transport_auth_binding.identity_key,
-            codex_protocol::auth::AuthMode::ApiKey.to_string()
+            setup.transport_auth_binding,
+            TransportAuthBinding::for_nonmanaged_auth(setup.effective_auth.as_ref())
         );
     }
 
@@ -1420,6 +1414,26 @@ mod tests {
                 .expect("API key header"),
             "Bearer openai-api-key"
         );
+    }
+
+    #[test]
+    fn authenticated_nonmanaged_transport_bindings_use_canonical_identity() {
+        let auths = [
+            CodexAuth::from_api_key("openai-api-key"),
+            CodexAuth::from_external_chatgpt_tokens(
+                "header.e30.external",
+                "account-external",
+                /*chatgpt_plan_type*/ None,
+            )
+            .expect("external ChatGPT auth"),
+        ];
+
+        for auth in &auths {
+            assert_eq!(
+                transport_binding_for_auth(Some(auth)),
+                TransportAuthBinding::for_nonmanaged_auth(Some(auth))
+            );
+        }
     }
 
     #[tokio::test]

@@ -14,8 +14,11 @@ use codex_rmcp_client::InProcessTransportFactory;
 use codex_rmcp_client::RmcpClient;
 use futures::FutureExt;
 use pretty_assertions::assert_eq;
+use rmcp::model::Icon;
 use rmcp::model::JsonObject;
+use rmcp::model::MetaObject;
 use rmcp::model::Tool;
+use rmcp::model::ToolAnnotations;
 use tokio::io::DuplexStream;
 use tokio::sync::Notify;
 
@@ -141,6 +144,7 @@ async fn test_step(
             /*plugins_available*/ false,
             vec![tool],
             calls,
+            HashMap::new(),
         )),
         client,
         tool_catalog,
@@ -246,6 +250,161 @@ async fn prepared_call_keeps_captured_connection_and_authority_after_refresh() -
         "the captured connection set should be released with the prepared call"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn internal_call_can_prepare_a_tool_hidden_from_the_model() {
+    let mut step = test_step(
+        "hidden",
+        AppToolApproval::Approve,
+        /*supports_sandbox_state_meta*/ false,
+    )
+    .await;
+    let binding = Arc::get_mut(&mut step.step).expect("test binding should be uniquely owned");
+    let hidden_meta = MetaObject(
+        serde_json::json!({ "ui": { "visibility": [] } })
+            .as_object()
+            .expect("metadata object")
+            .clone(),
+    );
+    binding.tools[0].tool.meta = Some(hidden_meta.clone());
+    binding
+        .calls
+        .get_mut(&(SERVER_NAME.to_string(), TOOL_NAME.to_string()))
+        .expect("test call should be captured")
+        .tool_info
+        .tool
+        .meta = Some(hidden_meta);
+
+    assert!(step.step.prepare_call(SERVER_NAME, TOOL_NAME).is_none());
+    assert!(
+        step.step
+            .prepare_internal_call(SERVER_NAME, TOOL_NAME)
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn called_tool_contract_ignores_presentation_and_derived_callable_identity() {
+    let step = test_step(
+        "contract",
+        AppToolApproval::Approve,
+        /*supports_sandbox_state_meta*/ false,
+    )
+    .await;
+    let mut advertised = step.step.tools()[0].clone();
+    advertised.tool.annotations = Some(
+        ToolAnnotations::new()
+            .read_only(true)
+            .destructive(false)
+            .idempotent(true)
+            .open_world(false),
+    );
+
+    let mut live = advertised.clone();
+    live.namespace_description = Some("live server instructions".to_string());
+    live.callable_name = "globally_rederived_name".to_string();
+    live.callable_namespace = "globally_rederived_namespace".to_string();
+    live.connector_name = Some("Live connector".to_string());
+    live.plugin_display_names = vec!["Live plugin".to_string()];
+    live.tool.title = Some("Live title".to_string());
+    live.tool.description = Some("Live description".into());
+    live.tool.icons = Some(vec![Icon::new("https://example.com/live.png")]);
+    live.tool
+        .annotations
+        .as_mut()
+        .expect("tool annotations")
+        .title = Some("Live annotation title".to_string());
+    assert!(live.has_same_execution_contract(&advertised));
+
+    let mut empty_annotations = advertised.clone();
+    empty_annotations.tool.annotations = Some(ToolAnnotations::new());
+    let mut missing_annotations = advertised.clone();
+    missing_annotations.tool.annotations = None;
+    assert!(empty_annotations.has_same_execution_contract(&missing_annotations));
+    assert!(missing_annotations.has_same_execution_contract(&empty_annotations));
+    for (policy_name, live_annotations) in [
+        ("read_only", ToolAnnotations::new().read_only(true)),
+        ("destructive", ToolAnnotations::new().destructive(true)),
+        ("idempotent", ToolAnnotations::new().idempotent(true)),
+        ("open_world", ToolAnnotations::new().open_world(true)),
+    ] {
+        let mut live_with_policy = missing_annotations.clone();
+        live_with_policy.tool.annotations = Some(live_annotations);
+        assert!(
+            !live_with_policy.has_same_execution_contract(&empty_annotations),
+            "known-empty cached annotations must reject a new {policy_name} policy"
+        );
+    }
+
+    let mut cached_without_read_only_hint = advertised.clone();
+    cached_without_read_only_hint
+        .tool
+        .annotations
+        .as_mut()
+        .expect("tool annotations")
+        .read_only_hint = None;
+    assert!(
+        advertised.has_same_execution_contract(&cached_without_read_only_hint),
+        "model-facing cached tools intentionally omit the live read-only hint"
+    );
+
+    let mut changed_name = advertised.clone();
+    changed_name.tool.name = "changed".into();
+    assert!(!changed_name.has_same_execution_contract(&advertised));
+
+    let mut changed_schema = advertised.clone();
+    changed_schema.tool.input_schema = Arc::new(
+        serde_json::json!({"type": "object", "required": ["changed"]})
+            .as_object()
+            .expect("schema object")
+            .clone(),
+    );
+    assert!(!changed_schema.has_same_execution_contract(&advertised));
+
+    let mut changed_read_only = advertised.clone();
+    changed_read_only
+        .tool
+        .annotations
+        .as_mut()
+        .expect("tool annotations")
+        .read_only_hint = Some(false);
+    assert!(!changed_read_only.has_same_execution_contract(&advertised));
+
+    let mut changed_destructive = advertised.clone();
+    changed_destructive
+        .tool
+        .annotations
+        .as_mut()
+        .expect("tool annotations")
+        .destructive_hint = Some(true);
+    assert!(!changed_destructive.has_same_execution_contract(&advertised));
+
+    let mut changed_idempotent = advertised.clone();
+    changed_idempotent
+        .tool
+        .annotations
+        .as_mut()
+        .expect("tool annotations")
+        .idempotent_hint = Some(false);
+    assert!(!changed_idempotent.has_same_execution_contract(&advertised));
+
+    let mut changed_open_world = advertised.clone();
+    changed_open_world
+        .tool
+        .annotations
+        .as_mut()
+        .expect("tool annotations")
+        .open_world_hint = Some(true);
+    assert!(!changed_open_world.has_same_execution_contract(&advertised));
+
+    let mut changed_meta = advertised.clone();
+    changed_meta.tool.meta = Some(MetaObject::new());
+    assert!(!changed_meta.has_same_execution_contract(&advertised));
+
+    let mut changed_policy = advertised.clone();
+    changed_policy.supports_parallel_tool_calls = !advertised.supports_parallel_tool_calls;
+    assert!(!changed_policy.has_same_execution_contract(&advertised));
 }
 
 #[tokio::test]

@@ -409,16 +409,17 @@ async fn status_snapshot_shows_chatgpt_plan_without_email() {
         .await
         .expect("bootstrap app server session");
     app_server.shutdown().await.expect("shut down app server");
-    let account_display = bootstrap
-        .status_account_display
-        .expect("bootstrap should return ChatGPT account display");
-    assert_eq!(
-        account_display,
-        StatusAccountDisplay::ChatGpt {
-            email: None,
-            plan: Some("Enterprise (Automation)".to_string()),
-        }
-    );
+    assert!(matches!(
+        bootstrap.status_account_display.as_ref(),
+        Some(StatusAccountDisplay::ManagedChatGpt(accounts)) if accounts.len() == 1
+    ));
+    assert_eq!(bootstrap.plan_type, Some(PlanType::EnterpriseCbpAutomation));
+    let account_display = StatusAccountDisplay::ChatGpt {
+        email: bootstrap.account_email,
+        plan: bootstrap
+            .plan_type
+            .map(crate::status::plan_type_display_name),
+    };
 
     let usage = TokenUsage::default();
     let captured_at = chrono::Local

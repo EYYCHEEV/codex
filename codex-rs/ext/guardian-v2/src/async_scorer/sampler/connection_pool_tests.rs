@@ -9,14 +9,18 @@ use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use core_test_support::responses;
+use core_test_support::responses::WebSocketCloseFrame;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
+use std::collections::HashSet;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+
+const NETWORK_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Routes HTTP normally while selectively stalling WebSocket handshakes.
 struct Gateway {
@@ -26,12 +30,59 @@ struct Gateway {
     task: JoinHandle<()>,
 }
 
+fn service_restart_close() -> WebSocketCloseFrame {
+    WebSocketCloseFrame {
+        code: 1012,
+        reason: "service restart".to_owned(),
+    }
+}
+
+fn assert_distinct_leases_with_stable_request(
+    servers: &[&responses::WebSocketTestServer],
+) -> Result<()> {
+    let thread_ids = servers
+        .iter()
+        .map(|server| {
+            server
+                .single_handshake()
+                .header("thread-id")
+                .expect("classifier thread ID")
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(thread_ids.len(), servers.len());
+
+    let mut bodies = servers
+        .iter()
+        .map(|server| server.single_connection()[0].body_json())
+        .collect::<Vec<_>>();
+    let turn_ids = bodies
+        .iter()
+        .map(|body| {
+            body["client_metadata"]["turn_id"]
+                .as_str()
+                .expect("classifier turn ID")
+                .to_owned()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(turn_ids.len(), 1);
+    for body in &mut bodies {
+        body.as_object_mut()
+            .expect("request object")
+            .remove("client_metadata");
+    }
+    assert!(bodies.windows(2).all(|pair| pair[0] == pair[1]));
+    Ok(())
+}
+
 impl Gateway {
     async fn new(http_url: &str, websocket_url: &str) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let url = format!("http://{}", listener.local_addr()?);
         let http_target = http_url.trim_start_matches("http://").to_owned();
-        let websocket_target = websocket_url.trim_start_matches("ws://").to_owned();
+        let websocket_target = websocket_url
+            .trim_start_matches("ws://")
+            .trim_start_matches("http://")
+            .to_owned();
         let opens = Arc::new(AtomicUsize::new(0));
         let allowed_opens = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&opens);
@@ -78,12 +129,100 @@ impl Drop for Gateway {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_close_retries_on_a_fresh_lease() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let healthy = responses::start_websocket_server(vec![vec![vec![
+        responses::ev_response_created("score"),
+        responses::ev_output_text_delta("low"),
+        responses::ev_completed("score"),
+    ]]])
+    .await;
+    let closed = responses::start_websocket_server_with_close_frames(
+        vec![vec![Vec::new()]],
+        vec![Some(service_restart_close())],
+    )
+    .await;
+    let base_url = super::super::tests::proxy_websocket_servers_with_http(
+        &[&healthy, &closed],
+        super::super::tests::ProxyPrewarmLimit::AllConnections,
+        /*http_url*/ None,
+    )
+    .await?;
+    let sampler = LunaSampler::new(sampler_config(base_url));
+    sampler.prewarm().await;
+
+    assert_eq!(sampler.sample(sample_request("parent-turn")).await?, "low");
+    assert_distinct_leases_with_stable_request(&[&closed, &healthy])?;
+    assert_eq!(
+        sampler.connections.classifications.available_permits(),
+        MAX_CONCURRENT_REQUESTS
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_close_retry_exhaustion_is_bounded() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let first = responses::start_websocket_server_with_close_frames(
+        vec![vec![Vec::new()]],
+        vec![Some(service_restart_close())],
+    )
+    .await;
+    let second = responses::start_websocket_server_with_close_frames(
+        vec![vec![Vec::new()]],
+        vec![Some(service_restart_close())],
+    )
+    .await;
+    let third = responses::start_websocket_server_with_close_frames(
+        vec![vec![Vec::new()]],
+        vec![Some(service_restart_close())],
+    )
+    .await;
+    let base_url = super::super::tests::proxy_websocket_servers_with_http(
+        &[&first, &second, &third],
+        super::super::tests::ProxyPrewarmLimit::AllConnections,
+        /*http_url*/ None,
+    )
+    .await?;
+    let sampler = LunaSampler::new(sampler_config(base_url));
+    sampler.prewarm().await;
+    let permit = Arc::clone(&sampler.connections.sockets)
+        .try_acquire_owned()
+        .expect("socket capacity for a third warm connection");
+    let extra = sampler.connections.open_connection(permit).await?;
+    sampler
+        .connections
+        .idle_connections
+        .lock()
+        .unwrap()
+        .push(extra);
+
+    let error = sampler
+        .sample(sample_request("parent-turn"))
+        .await
+        .expect_err("three websocket closes should exhaust the retry budget");
+
+    assert!(matches!(
+        error,
+        LunaSamplerError::Api(ApiError::WebsocketClosed(details))
+            if details.code == Some(1012)
+    ));
+    assert_distinct_leases_with_stable_request(&[&first, &second, &third])?;
+    assert_eq!(
+        sampler.connections.classifications.available_permits(),
+        MAX_CONCURRENT_REQUESTS
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() -> Result<()> {
     skip_if_no_network!(Ok(()));
     for free_guardian in [false, true] {
         let http = responses::start_mock_server().await;
         let events = vec![
+            responses::ev_response_created("score"),
             responses::ev_output_text_delta("low"),
             responses::ev_completed("score"),
         ];
@@ -112,7 +251,7 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
         config.service_tier = Some("priority".to_owned());
         let sampler = LunaSampler::new(config);
         let opener = sampler.connections.replenish().unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(NETWORK_TEST_TIMEOUT, async {
             while gateway.opens.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
             }
@@ -121,7 +260,7 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
         let mut request = sample_request("parent-turn");
         request.parent_response_id = Some("resp-parent".to_owned());
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), sampler.sample(request)).await??,
+            tokio::time::timeout(NETWORK_TEST_TIMEOUT, sampler.sample(request)).await??,
             "low"
         );
         assert_eq!(
@@ -201,7 +340,7 @@ async fn cooldown_preserves_healthy_sockets_and_both_transports_share_capacity()
     gateway.allowed_opens.store(/*val*/ 1, Ordering::SeqCst);
     let sampler = LunaSampler::new(sampler_config(format!("{}/v1", gateway.url)));
     let opener = sampler.connections.replenish().unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(NETWORK_TEST_TIMEOUT, async {
         while gateway.opens.load(Ordering::SeqCst) < 2 {
             tokio::task::yield_now().await;
         }
@@ -249,7 +388,7 @@ async fn stalled_http_headers_exhaust_the_sampling_retry_budget() -> Result<()> 
     let sampler = LunaSampler::new(config);
 
     let result = tokio::time::timeout(
-        Duration::from_secs(10),
+        NETWORK_TEST_TIMEOUT,
         sampler.sample(sample_request("stalled-headers")),
     )
     .await?;
@@ -275,7 +414,10 @@ async fn supersession_closes_http_before_headers_and_while_draining_the_body() -
         String::new(),
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n{}",
-            responses::sse(vec![responses::ev_output_text_delta("low")]),
+            responses::sse(vec![
+                responses::ev_response_created("score"),
+                responses::ev_output_text_delta("low"),
+            ]),
         ),
     ] {
         let has_score = !response.is_empty();
@@ -314,12 +456,12 @@ async fn supersession_closes_http_before_headers_and_while_draining_the_body() -
         let first = Arc::clone(&sampler);
         samples.spawn(async move { first.sample(sample_request("first")).await });
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), requests.recv()).await?,
+            tokio::time::timeout(NETWORK_TEST_TIMEOUT, requests.recv()).await?,
             Some(1)
         );
         if has_score {
             assert_eq!(
-                tokio::time::timeout(Duration::from_secs(5), samples.join_next())
+                tokio::time::timeout(NETWORK_TEST_TIMEOUT, samples.join_next())
                     .await?
                     .unwrap()??,
                 "low",
@@ -332,14 +474,14 @@ async fn supersession_closes_http_before_headers_and_while_draining_the_body() -
         }
         if !has_score {
             assert!(matches!(
-                tokio::time::timeout(Duration::from_secs(5), samples.join_next())
+                tokio::time::timeout(NETWORK_TEST_TIMEOUT, samples.join_next())
                     .await?
                     .unwrap()?,
                 Err(LunaSamplerError::Superseded)
             ));
         }
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), disconnects.recv()).await?,
+            tokio::time::timeout(NETWORK_TEST_TIMEOUT, disconnects.recv()).await?,
             Some(1)
         );
     }

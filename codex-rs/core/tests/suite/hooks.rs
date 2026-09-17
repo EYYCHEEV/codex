@@ -2157,10 +2157,6 @@ async fn compact_session_start_hook_runs_at_each_compaction_boundary() -> Result
     let test = builder.build(&server).await?;
 
     test.submit_turn("hello before compact").await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
     test.codex.submit(Op::Compact).await?;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -2176,10 +2172,6 @@ async fn compact_session_start_hook_runs_at_each_compaction_boundary() -> Result
     assert_eq!(read_hook_order_inputs(test.codex_home_path())?.len(), 4);
 
     test.submit_turn("hello after compact").await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
 
     let requests = request_log.requests();
     assert_eq!(requests.len(), 4);
@@ -2406,7 +2398,12 @@ async fn mid_turn_auto_compact_session_start_hook_stop_blocks_continuation() -> 
         });
     let test = builder.build(&server).await?;
 
-    test.submit_turn("stop after auto compact").await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "stop after auto compact".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnAborted(_))
     })

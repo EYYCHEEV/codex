@@ -1,8 +1,10 @@
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use codex_core::McpManager;
+use codex_exec_server::RouteAwareHttpClient;
 use codex_mcp::McpServerSource;
 use codex_mcp::ReadResourceRequestParams;
+use codex_mcp::apply_http_headers_helper;
 use codex_mcp::resolve_oauth_callback;
 
 use crate::thread_state::ThreadStateManager;
@@ -136,7 +138,7 @@ impl McpRequestProcessor {
             McpServerOauthClientRegistration::Dcr => McpOAuthClientRegistration::Dcr,
         };
 
-        let (auth, mcp_config, runtime_context) = match thread_id.as_deref() {
+        let (auth, mcp_config, runtime_context, global_config) = match thread_id.as_deref() {
             Some(thread_id) => {
                 let (_, thread) = self.load_thread(thread_id).await?;
                 let snapshot = thread.current_runtime_snapshot().await.map_err(|err| {
@@ -146,6 +148,7 @@ impl McpRequestProcessor {
                     snapshot.effective_auth,
                     snapshot.mcp.config().clone(),
                     snapshot.runtime_context,
+                    None,
                 )
             }
             None => {
@@ -160,7 +163,7 @@ impl McpRequestProcessor {
                     self.thread_manager.environment_manager(),
                     config.cwd.to_path_buf(),
                 );
-                (auth, Arc::new(mcp_config), runtime_context)
+                (auth, Arc::new(mcp_config), runtime_context, Some(config))
             }
         };
         let effective_servers = codex_mcp::effective_mcp_servers(&mcp_config, auth.as_ref());
@@ -189,12 +192,18 @@ impl McpRequestProcessor {
                 ));
             }
         };
-
-        let http_client = runtime_context
-            .resolve_http_client(&name, server)
-            .map_err(|err| {
-                internal_error(format!("failed to resolve MCP server runtime: {err}"))
-            })?;
+        let http_client = match global_config {
+            Some(config) if server.is_local_environment() => apply_http_headers_helper(
+                Arc::new(
+                    RouteAwareHttpClient::new(config.http_client_factory())
+                        .with_tls_backend_fallback(),
+                ),
+                server,
+                config.cwd.to_path_buf(),
+            ),
+            _ => runtime_context.resolve_http_client(&name, server),
+        }
+        .map_err(|err| internal_error(format!("failed to resolve MCP server runtime: {err}")))?;
 
         let discovered_scopes = if scopes.is_none() && server.scopes.is_none() {
             discover_supported_scopes(

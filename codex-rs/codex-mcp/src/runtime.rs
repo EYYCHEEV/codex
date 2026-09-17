@@ -423,6 +423,11 @@ impl McpRuntime {
     pub fn current_auth_matches(&self, auth: Option<&CodexAuth>) -> bool {
         let current = self.current.load();
         match (current.auth.as_ref(), auth) {
+            (Some(CodexAuth::AgentIdentity(previous)), Some(CodexAuth::AgentIdentity(latest))) => {
+                previous.record() == latest.record()
+            }
+            (Some(CodexAuth::AgentIdentity(_)), Some(_))
+            | (Some(_), Some(CodexAuth::AgentIdentity(_))) => false,
             (Some(previous), Some(latest)) => {
                 previous == latest
                     && previous.get_account_id() == latest.get_account_id()

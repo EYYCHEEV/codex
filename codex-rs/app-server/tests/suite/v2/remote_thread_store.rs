@@ -468,6 +468,9 @@ async fn start_in_process_client(
     config: Arc<Config>,
     loader_overrides: LoaderOverrides,
 ) -> std::io::Result<InProcessClientHandle> {
+    let environment_manager = Arc::new(EnvironmentManager::without_environments(
+        config.http_client_factory(),
+    ));
     in_process::start(InProcessStartArgs {
         arg0_paths: Arg0DispatchPaths::default(),
         config,
@@ -481,7 +484,7 @@ async fn start_in_process_client(
         state_db: None,
         // These persistence regressions do not execute shell or filesystem
         // tools, so avoid registering host-local skill watchers.
-        environment_manager: Arc::new(EnvironmentManager::without_environments()),
+        environment_manager,
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli,
         enable_codex_api_key_env: false,
@@ -554,7 +557,9 @@ fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {
     );
     let mut entries = codex_home_entries(codex_home)?;
     // Host startup may leave sandbox migration markers, and Bazel test runs may
-    // initialize shell snapshot storage. Neither is thread persistence.
+    // initialize shell snapshot storage. Auth loading may also create its lock
+    // file. None of these are thread persistence.
+    entries.remove(".auth.json.lock");
     entries.remove(".sandbox_migration");
     entries.remove("shell_snapshots");
     assert_eq!(

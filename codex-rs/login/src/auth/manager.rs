@@ -1902,9 +1902,7 @@ async fn load_auth(
             forced_chatgpt_workspace_id,
             Utc::now(),
         ) else {
-            return Err(std::io::Error::other(
-                "no eligible managed ChatGPT account is available",
-            ));
+            return Ok(None);
         };
         CodexAuth::from_managed_account(
             codex_home,
@@ -3032,7 +3030,18 @@ impl AuthManager {
     pub async fn reload(&self) -> bool {
         tracing::info!("Reloading auth");
         let new_auth = self.load_auth().await;
-        self.set_cached_auth(new_auth)
+        match new_auth {
+            Some(auth) if auth.is_external_chatgpt_tokens() => {
+                match self.commit_external_auth(auth) {
+                    Ok(changed) => changed,
+                    Err(err) => {
+                        tracing::error!("Failed to commit external auth during reload: {err}");
+                        false
+                    }
+                }
+            }
+            new_auth => self.set_cached_auth(new_auth),
+        }
     }
 
     async fn reload_if_account_id_matches(
@@ -3152,7 +3161,7 @@ impl AuthManager {
 
         let allowed_login_methods = self.allowed_login_methods();
         let effective_chatgpt_workspaces = self.effective_chatgpt_workspaces();
-        load_auth(
+        match load_auth(
             &self.codex_home,
             self.enable_codex_api_key_env,
             self.auth_credentials_store_mode,
@@ -3164,16 +3173,20 @@ impl AuthManager {
             &self.auth_route_config,
         )
         .await
-        .ok()
-        .flatten()
-        .filter(|auth| {
-            validate_auth_restrictions(
-                Some(&allowed_login_methods),
-                effective_chatgpt_workspaces.as_deref(),
-                auth,
-            )
-            .is_ok()
-        })
+        {
+            Ok(auth) => auth.filter(|auth| {
+                validate_auth_restrictions(
+                    Some(&allowed_login_methods),
+                    effective_chatgpt_workspaces.as_deref(),
+                    auth,
+                )
+                .is_ok()
+            }),
+            Err(err) => {
+                tracing::error!("Failed to reload auth: {err}");
+                self.auth_cached()
+            }
+        }
     }
 
     fn set_cached_auth(&self, new_auth: Option<CodexAuth>) -> bool {
@@ -3252,7 +3265,7 @@ impl AuthManager {
         if let Ok(mut guard) = self.inner.write() {
             guard.permanent_refresh_failure = None;
         }
-        self.commit_external_auth(auth)
+        self.commit_external_auth(auth).map(|_| ())
     }
 
     pub fn clear_external_auth(&self) {
@@ -3692,7 +3705,7 @@ impl AuthManager {
         Ok(())
     }
 
-    fn commit_external_auth(&self, auth: CodexAuth) -> Result<(), RefreshTokenError> {
+    fn commit_external_auth(&self, auth: CodexAuth) -> Result<bool, RefreshTokenError> {
         if auth.is_external_chatgpt_tokens() {
             let auth_dot_json = auth.get_current_auth_json().ok_or_else(|| {
                 RefreshTokenError::Transient(std::io::Error::other(
@@ -3705,8 +3718,7 @@ impl AuthManager {
                 .map_err(RefreshTokenError::Transient)?;
         }
 
-        self.set_cached_auth(Some(auth));
-        Ok(())
+        Ok(self.set_cached_auth(Some(auth)))
     }
 
     fn validate_external_auth(
