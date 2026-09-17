@@ -122,9 +122,17 @@ pub(super) async fn load_local_config_layers_with_overrides(
     let user_file = codex_home.join(CONFIG_TOML_FILE);
     let user =
         load_config_toml_for_required_layer_raw(fs, &user_file, /*strict_config*/ false).await?;
+    let private = if overrides.ignore_user_config {
+        None
+    } else {
+        super::fork::load_private_config(fs, codex_home.as_path()).await?
+    };
 
     let mut discovery_config = TomlValue::Table(toml::map::Map::new());
     merge_toml_values(&mut discovery_config, &system.toml);
+    if let Some(private) = &private {
+        merge_toml_values(&mut discovery_config, &private.toml);
+    }
     merge_toml_values(&mut discovery_config, &user.toml);
     // Managed file and MDM values also govern the project boundary and trust.
     // Only this snapshot is resolved; the returned local layers stay raw.
@@ -175,21 +183,20 @@ pub(super) async fn load_local_config_layers_with_overrides(
     )
     .await?;
 
-    let mut config_layers = vec![
-        LocalTomlLayer {
-            source: ConfigLayerSource::System { file: system_file },
-            base_dir: system.base_dir,
-            toml: system.toml,
+    let mut config_layers = vec![LocalTomlLayer {
+        source: ConfigLayerSource::System { file: system_file },
+        base_dir: system.base_dir,
+        toml: system.toml,
+    }];
+    config_layers.extend(private);
+    config_layers.push(LocalTomlLayer {
+        source: ConfigLayerSource::User {
+            file: user_file,
+            profile: None,
         },
-        LocalTomlLayer {
-            source: ConfigLayerSource::User {
-                file: user_file,
-                profile: None,
-            },
-            base_dir: user.base_dir,
-            toml: user.toml,
-        },
-    ];
+        base_dir: user.base_dir,
+        toml: user.toml,
+    });
     append_project_layers(fs, &mut config_layers, project_layers.layers).await?;
 
     append_legacy_config_layers(&mut config_layers, loaded_managed, &codex_home)?;
