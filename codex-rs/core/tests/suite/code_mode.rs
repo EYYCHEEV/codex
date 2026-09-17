@@ -4191,11 +4191,11 @@ text(result.output);
     )
     .await?;
 
+    let request = second_mock.single_request();
+    let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
+    assert_ne!(success, Some(false), "Code Mode failed: {output}");
     assert_eq!(
-        text_item(
-            &custom_tool_output_items(&second_mock.single_request(), "call-1"),
-            /*index*/ 1
-        ),
+        output,
         "Warning: truncated output (original token count: 10)\nTotal output lines: 1\n\n0123456789…5 tokens truncated…0123456789"
     );
 
@@ -4237,11 +4237,11 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
         whole_output_tokens <= 10_000,
         "serialized output item should not exceed 10,000 tokens, got {whole_output_tokens}"
     );
-    let items = custom_tool_output_items(&request, "call-1");
-    let output = text_item(&items, /*index*/ 1);
+    let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
+    assert_ne!(success, Some(false), "Code Mode failed: {output}");
     assert_regex_match(
         r"^Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
-        output,
+        &output,
     );
 
     Ok(())
@@ -4274,8 +4274,9 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     )
     .await?;
 
-    let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
-    let output = text_item(&items, /*index*/ 1);
+    let request = second_mock.single_request();
+    let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
+    assert_ne!(success, Some(false), "Code Mode failed: {output}");
     // The nested 20,000-token budget leaves about 80,000 characters. This
     // ceiling independently proves that history applied its smaller cap.
     assert!(
@@ -4287,7 +4288,7 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     // history truncating the value emitted with `text` afterward.
     assert_regex_match(
         r"(?s)^Variable truncated: True\. Variable: .*…\d+ tokens truncated…A+$",
-        output,
+        &output,
     );
 
     Ok(())
@@ -4323,8 +4324,9 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     )
     .await?;
 
-    let items = custom_tool_output_items(&second_mock.single_request(), "call-1");
-    let output = text_item(&items, /*index*/ 1);
+    let request = second_mock.single_request();
+    let (output, success) = custom_tool_output_body_and_success(&request, "call-1");
+    assert_ne!(success, Some(false), "Code Mode failed: {output}");
     // The 50-token override must shrink this 50,000-character value far below
     // what the default 10,000-token history cap would retain.
     assert!(
@@ -4334,7 +4336,7 @@ text(`Variable truncated: ${resultVariableWasTruncated ? "True" : "False"}. Vari
     );
     assert_regex_match(
         r"^Variable truncated: False\. Variable: x+…\d+ tokens truncated…x+$",
-        output,
+        &output,
     );
 
     Ok(())
