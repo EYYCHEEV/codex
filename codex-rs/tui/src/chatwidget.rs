@@ -549,7 +549,6 @@ pub(crate) struct ChatWidget {
     status_account_display: Option<StatusAccountDisplay>,
     pending_managed_account_selection: Option<(String, Option<String>, u64)>,
     managed_account_updates_enabled: bool,
-    runtime_model_provider_base_url: Option<String>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     /// Remote app servers cannot read image paths on the TUI host.
     pub(crate) snapshot_local_images: bool,

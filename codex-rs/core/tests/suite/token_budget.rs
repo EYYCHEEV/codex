@@ -60,6 +60,7 @@ use test_case::test_case;
 
 const CONFIGURED_CONTEXT_WINDOW: i64 = 128_000;
 const AUTO_COMPACT_FALLBACK_PROMPT: &str = "Save the important state before rollover.";
+const MAX_THREAD_HINT_ITEM_BYTES: usize = 4_000;
 
 fn model_token_budget_config() -> ModelTokenBudgetConfig {
     ModelTokenBudgetConfig {
@@ -744,8 +745,10 @@ async fn model_token_budget_defaults_do_not_enable_disabled_feature() -> Result<
     Ok(())
 }
 
+#[test_case(false; "plain_text")]
+#[test_case(true; "oversized_text_is_bounded")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
+async fn token_budget_context_injects_hidden_thread_hint_text(oversized: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -765,7 +768,12 @@ async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
                     transport: McpServerTransportConfig::Stdio {
                         command: rmcp_test_server_bin,
                         args: Vec::new(),
-                        env: None,
+                        env: oversized.then(|| {
+                            HashMap::from([(
+                                "MCP_TEST_OVERSIZED_THREAD_HINT".to_string(),
+                                "1".to_string(),
+                            )])
+                        }),
                         env_vars: Vec::new(),
                         cwd: None,
                     },
@@ -811,12 +819,51 @@ async fn token_budget_context_injects_plain_thread_hint_text() -> Result<()> {
     let thread_id = test.session_configured.thread_id;
     let token_budgets = token_budget_contexts(&request);
     assert_eq!(token_budgets.len(), 1);
-    let captures = assert_regex_match(
-        &format!(
-            r"^{CONTEXT_WINDOW_OPEN_TAG}\nAgent name: /root\nFirst context window id: ([0-9a-f-]{{36}})\nCurrent context window id: ([0-9a-f-]{{36}})\nmanual history hint for thread {thread_id}\nunstructured notes/thread_hint fixture result\n{CONTEXT_WINDOW_CLOSE_TAG}$"
-        ),
-        &token_budgets[0],
-    );
+    let captures = if oversized {
+        let captures = assert_regex_match(
+            &format!(
+                r"(?s)^{CONTEXT_WINDOW_OPEN_TAG}\nAgent name: /root\nFirst context window id: ([0-9a-f-]{{36}})\nCurrent context window id: ([0-9a-f-]{{36}})\n(.*)\n{CONTEXT_WINDOW_CLOSE_TAG}$"
+            ),
+            &token_budgets[0],
+        );
+        let hint = captures
+            .get(3)
+            .expect("oversized thread hint capture")
+            .as_str();
+        assert!(hint.len() < MAX_THREAD_HINT_ITEM_BYTES);
+        assert!(hint.bytes().all(|byte| byte == b'x'));
+        let context_item = request
+            .input()
+            .into_iter()
+            .find(|item| {
+                item.get("role").and_then(Value::as_str) == Some("developer")
+                    && item
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| {
+                            content.iter().any(|part| {
+                                part.get("text")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|text| text.starts_with(CONTEXT_WINDOW_OPEN_TAG))
+                            })
+                        })
+            })
+            .expect("bounded context-window response item");
+        let serialized_context_item = serde_json::to_vec(&context_item)?;
+        assert!(
+            serialized_context_item.len() <= MAX_THREAD_HINT_ITEM_BYTES,
+            "stamped context-window item used {} bytes",
+            serialized_context_item.len()
+        );
+        captures
+    } else {
+        assert_regex_match(
+            &format!(
+                r"^{CONTEXT_WINDOW_OPEN_TAG}\nAgent name: /root\nFirst context window id: ([0-9a-f-]{{36}})\nCurrent context window id: ([0-9a-f-]{{36}})\nmanual history hint for thread {thread_id}\nunstructured notes/thread_hint fixture result\n{CONTEXT_WINDOW_CLOSE_TAG}$"
+            ),
+            &token_budgets[0],
+        )
+    };
     assert_eq!(
         captures.get(1).expect("first window id capture").as_str(),
         captures.get(2).expect("current window id capture").as_str()

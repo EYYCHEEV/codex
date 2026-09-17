@@ -52,6 +52,7 @@ const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAA
 const APP_ONLY_CWD_MARKER_FILE_ENV: &str = "MCP_TEST_APP_ONLY_CWD_MARKER_FILE";
 const DYNAMIC_SERVER_METADATA_ENV: &str = "MCP_TEST_DYNAMIC_SERVER_METADATA";
 const INITIALIZE_BARRIER_FILE_ENV: &str = "MCP_TEST_INITIALIZE_BARRIER_FILE";
+const OVERSIZED_THREAD_HINT_ENV: &str = "MCP_TEST_OVERSIZED_THREAD_HINT";
 const SERVER_INSTRUCTIONS_ENV: &str = "MCP_TEST_SERVER_INSTRUCTIONS";
 
 fn dynamic_server_process_label() -> Option<String> {
@@ -701,22 +702,28 @@ impl ServerHandler for TestToolServer {
                 Ok(Self::structured_result(json!({ "cwd": cwd })))
             }
             "thread_hint" => {
-                let thread_id = context
-                    .meta
-                    .0
-                    .get("threadId")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| {
-                        McpError::invalid_params("missing threadId metadata".to_string(), None)
-                    })?;
-                Ok(CallToolResult::success(vec![
-                    rmcp::model::ContentBlock::text(format!(
-                        "manual history hint for thread {thread_id}"
-                    )),
-                    rmcp::model::ContentBlock::text(
-                        "unstructured notes/thread_hint fixture result",
-                    ),
-                ]))
+                if std::env::var_os(OVERSIZED_THREAD_HINT_ENV).is_some() {
+                    Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text("x".repeat(8_000)),
+                    ]))
+                } else {
+                    let thread_id = context
+                        .meta
+                        .0
+                        .get("threadId")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            McpError::invalid_params("missing threadId metadata".to_string(), None)
+                        })?;
+                    Ok(CallToolResult::success(vec![
+                        rmcp::model::ContentBlock::text(format!(
+                            "manual history hint for thread {thread_id}"
+                        )),
+                        rmcp::model::ContentBlock::text(
+                            "unstructured notes/thread_hint fixture result",
+                        ),
+                    ]))
+                }
             }
             "echo" | "echo-tool" => {
                 let args: EchoArgs = match request.arguments {

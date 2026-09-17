@@ -231,13 +231,20 @@ where
     // would be nice to avoid leaving temporary directories behind, if possible.
     let path_entry_guard = arg0_dispatch();
     let current_exe = std::env::current_exe().ok();
+    // Setting an explicit stack size bypasses std's RUST_MIN_STACK handling.
+    // Preserve the shared default while honoring a larger configured minimum.
+    let thread_stack_size = std::env::var("RUST_MIN_STACK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(THREAD_STACK_SIZE_BYTES)
+        .max(THREAD_STACK_SIZE_BYTES);
 
     // Regular invocation. Run the async entry point on a thread with the same
     // stack budget as Tokio workers; `Runtime::block_on` otherwise runs the
     // top-level future on the caller's OS stack.
     let handle = std::thread::Builder::new()
         .name("codex-main".to_string())
-        .stack_size(THREAD_STACK_SIZE_BYTES)
+        .stack_size(thread_stack_size)
         .spawn(move || {
             let runtime = build_runtime()?;
             runtime.block_on(run_main_with_arg0_guard(

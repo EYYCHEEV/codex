@@ -38,6 +38,7 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 struct CuratedMcpSyncFixture {
     mcp: TestAppServer,
     sync_barrier: PathBuf,
+    sync_started: PathBuf,
     malicious_git_helper_marker: PathBuf,
     mcp_server_handle: JoinHandle<()>,
     _fixture_root: TempDir,
@@ -52,13 +53,12 @@ impl CuratedMcpSyncFixture {
         let fixture_root = TempDir::new()?;
         let codex_home = fixture_root.path().join("codex-home");
         let curated_repo = fixture_root.path().join("plugins.git");
-        let git_wrapper_dir = fixture_root.path().join("bin");
         let git_config = fixture_root.path().join("gitconfig");
         let sync_barrier = fixture_root.path().join("allow-curated-sync");
+        let sync_started = fixture_root.path().join("curated-sync-started");
         let malicious_git_helper_marker = fixture_root.path().join("malicious-git-helper-ran");
         std::fs::create_dir_all(&codex_home)?;
         std::fs::create_dir_all(&curated_repo)?;
-        std::fs::create_dir_all(&git_wrapper_dir)?;
 
         write_curated_marketplace(&curated_repo, "marketplace.json", "openai-curated", &[])?;
         write_curated_marketplace(
@@ -87,14 +87,41 @@ impl CuratedMcpSyncFixture {
             &curated_repo,
             &["config", "user.name", "Codex Tests"],
         )?;
-        run_git(&real_git, &curated_repo, &["add", "."])?;
+        run_git(&real_git, &curated_repo, &["add", "--force", "."])?;
         run_git(
             &real_git,
             &curated_repo,
             &["commit", "-m", "test curated plugins"],
         )?;
 
-        let curated_repo_url = format!("file://{}/", fixture_root.path().display());
+        let sync_transport = fixture_root.path().join("sync-transport.sh");
+        std::fs::write(
+            &sync_transport,
+            format!(
+                "#!/bin/sh\nprintf started > '{}'\nwhile [ ! -f '{}' ]; do\n  /bin/sleep 0.01\ndone\nunset GIT_DIR\nexec '{}' upload-pack '{}'\n",
+                sync_started.display(),
+                sync_barrier.display(),
+                real_git.display(),
+                curated_repo.display()
+            ),
+        )?;
+        let mut transport_permissions = std::fs::metadata(&sync_transport)?.permissions();
+        transport_permissions.set_mode(0o755);
+        std::fs::set_permissions(&sync_transport, transport_permissions)?;
+        run_git(
+            &real_git,
+            &curated_repo,
+            &[
+                "config",
+                "--file",
+                git_config
+                    .to_str()
+                    .context("git config path should be UTF-8")?,
+                "protocol.ext.allow",
+                "always",
+            ],
+        )?;
+        let curated_repo_url = format!("ext::{}", sync_transport.display());
         let rewrite_key = format!("url.{curated_repo_url}.insteadOf");
         run_git(
             &real_git,
@@ -106,7 +133,7 @@ impl CuratedMcpSyncFixture {
                     .to_str()
                     .context("git config path should be UTF-8")?,
                 &rewrite_key,
-                "https://github.com/openai/",
+                GITHUB_PLUGINS_GIT_URL,
             ],
         )?;
 
@@ -134,22 +161,6 @@ impl CuratedMcpSyncFixture {
             &codex_home,
             &["config", &malicious_rewrite_key, GITHUB_PLUGINS_GIT_URL],
         )?;
-        let git_wrapper = git_wrapper_dir.join("git");
-        std::fs::write(
-            &git_wrapper,
-            r#"#!/bin/sh
-if [ "$1" = "ls-remote" ]; then
-  while [ ! -f "$CURATED_SYNC_BARRIER" ]; do
-    sleep 0.01
-  done
-fi
-exec "$REAL_GIT" "$@"
-"#,
-        )?;
-        let mut wrapper_permissions = std::fs::metadata(&git_wrapper)?.permissions();
-        wrapper_permissions.set_mode(0o755);
-        std::fs::set_permissions(&git_wrapper, wrapper_permissions)?;
-
         MockResponsesConfig::new(&responses_server.uri())
             .enable_feature(Feature::Plugins)
             .with_root_config(&format!(
@@ -173,28 +184,17 @@ url = "{mcp_server_url}/mcp""#
             AuthCredentialsStoreMode::File,
         )?;
 
-        let inherited_path = std::env::var_os("PATH").context("PATH should be set")?;
-        let child_path = std::env::join_paths(
-            std::iter::once(git_wrapper_dir).chain(std::env::split_paths(&inherited_path)),
-        )?;
-        let child_path = child_path.to_string_lossy();
-        let real_git = real_git.to_string_lossy();
         let git_config = git_config.to_string_lossy();
-        let sync_barrier_env = sync_barrier.to_string_lossy();
         let mcp = TestAppServer::builder()
             .with_codex_home(&codex_home)
-            .with_env_overrides(&[
-                ("PATH", Some(child_path.as_ref())),
-                ("REAL_GIT", Some(real_git.as_ref())),
-                ("GIT_CONFIG_GLOBAL", Some(git_config.as_ref())),
-                ("CURATED_SYNC_BARRIER", Some(sync_barrier_env.as_ref())),
-            ])
+            .with_env_overrides(&[("GIT_CONFIG_GLOBAL", Some(git_config.as_ref()))])
             .build_initialized_with_timeout(DEFAULT_TIMEOUT)
             .await?;
 
         Ok(Self {
             mcp,
             sync_barrier,
+            sync_started,
             malicious_git_helper_marker,
             mcp_server_handle,
             _fixture_root: fixture_root,
@@ -232,6 +232,7 @@ async fn existing_thread_loads_api_curated_mcp_after_auth_switch_sync() -> Resul
 
     // The account-change refresh has completed without the API-curated bundle on disk.
     wait_for_mcp_ready(&mut fixture.mcp, REFRESH_PROBE_SERVER_NAME).await?;
+    wait_for_path(&fixture.sync_started).await?;
 
     // Let sync materialize the bundle; its completion callback must refresh this same thread.
     std::fs::write(&fixture.sync_barrier, "continue")?;
@@ -267,6 +268,16 @@ async fn existing_thread_loads_api_curated_mcp_after_auth_switch_sync() -> Resul
 
     fixture.mcp_server_handle.abort();
     let _ = fixture.mcp_server_handle.await;
+    Ok(())
+}
+
+async fn wait_for_path(path: &Path) -> Result<()> {
+    timeout(DEFAULT_TIMEOUT, async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
     Ok(())
 }
 

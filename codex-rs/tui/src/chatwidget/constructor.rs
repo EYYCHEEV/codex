@@ -137,7 +137,6 @@ impl ChatWidget {
             status_account_display,
             pending_managed_account_selection: None,
             managed_account_updates_enabled: true,
-            runtime_model_provider_base_url,
             remote_connection: None,
             snapshot_local_images: false,
             pending_image_submission: None,

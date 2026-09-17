@@ -50,7 +50,7 @@ async fn cloud_list_only_allows_trusted_credential_destinations() -> Result<()> 
         .args(["login", "status"])
         .assert()
         .success()
-        .stderr(contains("Logged in using ChatGPT"));
+        .stdout(contains("synthetic-cloud-account"));
 
     let output = command()?
         .env(

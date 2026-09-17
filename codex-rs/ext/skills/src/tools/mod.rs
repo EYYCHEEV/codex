@@ -45,6 +45,7 @@ use crate::shadow_selection_experiment::ShadowSelectionExperiment;
 use crate::sources::SkillProviders;
 use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
+use crate::state::current_mcp_resource_client;
 use crate::telemetry::ActiveSkillTurnMetrics;
 use crate::telemetry::SkillTurnMetrics;
 
@@ -60,6 +61,7 @@ pub(crate) fn skill_tools(
     providers: SkillProviders,
     session_store: &ExtensionData,
     thread_store: &ExtensionData,
+    request_store: Option<&ExtensionData>,
     executor_query: Option<SkillListQuery>,
     selected_plugins: Option<Arc<SelectedPluginSnapshot>>,
     sandbox_contexts: Option<Arc<HashMap<String, FileSystemSandboxContext>>>,
@@ -72,9 +74,7 @@ pub(crate) fn skill_tools(
     if !cloud_available && executor_query.is_none() {
         return Vec::new();
     }
-    let mcp_resources = session_store
-        .get::<SkillsSessionState>()
-        .and_then(|state| state.mcp_resources.clone());
+    let mcp_resources = current_mcp_resource_client(request_store, thread_store, session_store);
     let analytics = SkillAnalytics::from_stores(session_store, thread_store);
     let context = SkillToolContext {
         providers,

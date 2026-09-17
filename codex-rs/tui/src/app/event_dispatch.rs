@@ -1792,6 +1792,7 @@ impl App {
                                     codex_app_server_protocol::GetAccountTokenUsageResponse {
                                         summary,
                                         daily_usage_buckets: None,
+                                        thread_usage: None,
                                     }
                                 })
                                 .ok_or_else(|| {

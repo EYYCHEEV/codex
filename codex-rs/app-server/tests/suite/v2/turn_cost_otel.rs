@@ -2,8 +2,8 @@
 //! The public in-process transport permits advancing the production timer without test-only hooks.
 
 use anyhow::Result;
-use app_test_support::ChatGptAuthFixture;
-use app_test_support::write_chatgpt_auth;
+use app_test_support::ChatGptIdTokenClaims;
+use app_test_support::encode_id_token;
 use app_test_support::write_models_cache;
 use codex_app_server::in_process;
 use codex_app_server::in_process::InProcessServerEvent;
@@ -27,7 +27,7 @@ use codex_config::NoopThreadConfigLoader;
 use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
-use codex_login::AuthCredentialsStoreMode;
+use codex_login::auth::login_with_chatgpt_auth_tokens;
 use codex_protocol::protocol::SessionSource;
 use core_test_support::responses;
 use core_test_support::test_codex::test_env;
@@ -51,13 +51,19 @@ const COST_PATH: &str = "/api/codex/usage/thread-estimates/query";
 async fn chatgpt_turn_cost_reaches_otlp_on_success() -> Result<()> {
     let server = MockServer::start().await;
     let collector = MockServer::start().await;
+    let access_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .chatgpt_account_id("workspace-a")
+            .chatgpt_user_id("user-a"),
+    )?;
+    let authorization = format!("Bearer {access_token}");
     Mock::given(method("POST"))
         .and(path("/metrics"))
         .respond_with(ResponseTemplate::new(200))
         .mount(&collector)
         .await;
     Mock::given(method("POST")).and(path(COST_PATH))
-        .and(header("authorization", "Bearer siwc-token"))
+        .and(header("authorization", authorization.as_str()))
         .and(header("chatgpt-account-id", "workspace-a"))
         .respond_with(move |request: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&request.body).expect("cost request");
@@ -86,13 +92,18 @@ async fn chatgpt_turn_cost_reaches_otlp_on_success() -> Result<()> {
         format!(
             r#"
 model = "mock-model"
-model_provider = "openai"
-openai_base_url = "{}/v1"
+model_provider = "mock-openai"
 chatgpt_base_url = "{}"
 approval_policy = "never"
+[model_providers.mock-openai]
+name = "OpenAI"
+base_url = "{}/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+request_max_retries = 0
+stream_max_retries = 0
 [features]
-responses_websockets = false
-responses_websockets_v2 = false
 runtime_metrics = true
 [analytics]
 enabled = true
@@ -105,13 +116,11 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{}/metrics", protocol = "json" 
             collector.uri()
         ),
     )?;
-    write_chatgpt_auth(
+    login_with_chatgpt_auth_tokens(
         home.path(),
-        ChatGptAuthFixture::new("siwc-token")
-            .account_id("workspace-a")
-            .chatgpt_account_id("workspace-a")
-            .chatgpt_user_id("user-a"),
-        AuthCredentialsStoreMode::File,
+        &access_token,
+        "workspace-a",
+        /*chatgpt_plan_type*/ None,
     )?;
     write_models_cache(home.path()).await?;
     let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
@@ -219,7 +228,7 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{}/metrics", protocol = "json" 
     .await?;
     assert_eq!(
         model.single_request().header("authorization").as_deref(),
-        Some("Bearer siwc-token")
+        Some(authorization.as_str())
     );
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(/*secs*/ 301)).await;

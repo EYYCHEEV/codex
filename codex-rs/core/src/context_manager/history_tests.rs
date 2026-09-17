@@ -2561,13 +2561,13 @@ fn oversized_server_tool_search_output_removes_call_from_legacy_review_history()
 
 #[test]
 fn original_detail_image_outputs_over_token_cap_omit_function_and_custom_pairs() {
-    let image = ImageBuffer::from_pixel(3201, 3201, Luma([12u8]));
+    let image = ImageBuffer::from_pixel(3201, 3201, Rgba([12u8, 12, 12, 255]));
     let mut bytes = std::io::Cursor::new(Vec::new());
     image
-        .write_to(&mut bytes, ImageFormat::Png)
-        .expect("encode png");
+        .write_to(&mut bytes, ImageFormat::WebP)
+        .expect("encode webp");
     let image_url = format!(
-        "data:image/png;base64,{}",
+        "data:image/webp;base64,{}",
         BASE64_STANDARD.encode(bytes.get_ref())
     );
     let function_call = ResponseItem::FunctionCall {
@@ -2632,6 +2632,83 @@ fn original_detail_image_outputs_over_token_cap_omit_function_and_custom_pairs()
     );
 
     assert!(history.annotated_items().is_empty());
+}
+
+#[test]
+fn image_outputs_over_raw_byte_cap_preserve_function_and_custom_pairs() {
+    let image_url = format!("data:image/png;base64,{}", "A".repeat(50_000));
+    let function_call = ResponseItem::FunctionCall {
+        id: None,
+        name: "function".to_string(),
+        namespace: None,
+        arguments: "{}".to_string(),
+        call_id: "function-image".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let function_output = ResponseItem::FunctionCallOutput {
+        id: None,
+        call_id: Some("function-image".to_string()),
+        name: None,
+        namespace: None,
+        output: FunctionCallOutputPayload::from_content_items(vec![
+            FunctionCallOutputContentItem::InputImage {
+                image_url: image_url.clone(),
+                detail: Some(DEFAULT_IMAGE_DETAIL),
+            },
+        ]),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let custom_call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "custom-image".to_string(),
+        name: "custom".to_string(),
+        namespace: None,
+        input: "{}".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let custom_output = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "custom-image".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_content_items(vec![
+            FunctionCallOutputContentItem::InputImage {
+                image_url,
+                detail: Some(DEFAULT_IMAGE_DETAIL),
+            },
+        ]),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    for output in [&function_output, &custom_output] {
+        assert!(serialized_json_bytes(output).unwrap() > MODEL_VISIBLE_ITEM_MAX_BYTES);
+        assert!(
+            estimate_response_item_model_visible_bytes(output)
+                <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_BYTES).unwrap_or(i64::MAX)
+        );
+        assert!(
+            estimate_item_token_count(output)
+                <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+        );
+    }
+    let expected = vec![
+        function_call.clone(),
+        custom_call.clone(),
+        function_output.clone(),
+        custom_output.clone(),
+    ];
+    let mut history = ContextManager::new();
+
+    history.record_items(
+        [&function_call, &custom_call],
+        TruncationPolicy::Tokens(10_000),
+    );
+    history.record_items(
+        [&function_output, &custom_output],
+        TruncationPolicy::Tokens(10_000),
+    );
+
+    assert_eq!(history.logical_items(), expected);
 }
 
 #[test]
@@ -2815,11 +2892,32 @@ fn replacement_enforces_cap_preserves_metadata_and_clears_stale_pair_tracker() {
     let mut history = ContextManager::new();
     history.record_items([&oversized_call], TruncationPolicy::Tokens(10_000));
 
-    history.replace_annotated(vec![replacement.clone(), oversized_replacement]);
+    history.replace_annotated(vec![replacement.clone(), oversized_replacement.clone()]);
     history.record_items([&call, &output], TruncationPolicy::Tokens(10_000));
 
-    assert_eq!(history.annotated_items()[0], replacement);
-    assert_eq!(history.annotated_items().len(), 3);
+    let logical = history.logical_annotated_items();
+    assert_eq!(
+        logical
+            .iter()
+            .map(|envelope| envelope.item.clone())
+            .collect::<Vec<_>>(),
+        vec![
+            replacement.item.clone(),
+            oversized_replacement.item.clone(),
+            call,
+            output,
+        ]
+    );
+    let mut projected_metadata = oversized_replacement.metadata.unwrap_or_default();
+    projected_metadata.turn_boundary_override = Some(false);
+    projected_metadata.projected_content_indices = Some(vec![0]);
+    assert_eq!(
+        logical
+            .iter()
+            .map(|envelope| envelope.metadata.clone())
+            .collect::<Vec<_>>(),
+        vec![replacement.metadata, Some(projected_metadata), None, None,]
+    );
     assert!(history.annotated_items().iter().all(|envelope| {
         serialized_json_bytes(&envelope.item)
             .is_ok_and(|bytes| bytes <= MODEL_VISIBLE_ITEM_MAX_BYTES)

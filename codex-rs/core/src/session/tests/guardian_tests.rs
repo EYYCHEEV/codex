@@ -359,7 +359,7 @@ async fn request_permissions_uses_issuing_step_policy_and_reviewer() {
     };
 
     let response = timeout(
-        Duration::from_secs(5),
+        crate::guardian::GUARDIAN_REVIEW_TIMEOUT + Duration::from_secs(5),
         session.request_permissions_for_environment(
             &step,
             "step-permissions".to_string(),

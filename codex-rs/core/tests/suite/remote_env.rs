@@ -102,6 +102,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_no_remote_env;
 use core_test_support::skip_if_target_windows;
+use core_test_support::startup::STARTUP_TIMEOUT;
 use core_test_support::startup::expect_startup;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::TestCodex;
@@ -1569,7 +1570,7 @@ impl AuthProvider for NoopRegistryAuthProvider {
 }
 
 async fn wait_for_response_request_count(response_mock: &ResponseMock, expected_count: usize) {
-    timeout(Duration::from_secs(5), async {
+    timeout(STARTUP_TIMEOUT, async {
         while response_mock.requests().len() < expected_count {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

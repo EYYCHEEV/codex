@@ -295,6 +295,12 @@ use self::turn_context::TurnContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CodexAppsToolRefresh {
+    UseCached,
+    HardRefresh,
+}
+
 use crate::exec_policy::ExecPolicyUpdateError;
 use crate::guardian::GuardianReviewSessionManager;
 use crate::mcp::McpEnvironmentScope;
@@ -3890,6 +3896,7 @@ impl Session {
             cancellation_token,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
+            CodexAppsToolRefresh::UseCached,
         )
         .await
     }
@@ -3917,6 +3924,7 @@ impl Session {
                 cancellation_token,
                 required_servers,
                 required_plugins,
+                CodexAppsToolRefresh::UseCached,
             )
             .await?;
         self.set_last_known_step_context(&step_context).await;
@@ -3944,11 +3952,31 @@ impl Session {
             cancellation_token,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
+            CodexAppsToolRefresh::UseCached,
         )
         .await
     }
 
     pub(crate) async fn capture_step_context_for_setup(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        setup: &CurrentClientSetup,
+    ) -> CodexResult<Arc<StepContext>> {
+        let step_context = self
+            .capture_step_context_inner(
+                turn_context,
+                setup,
+                &CancellationToken::new(),
+                /*required_servers*/ &[],
+                /*required_plugins*/ &HashSet::new(),
+                CodexAppsToolRefresh::UseCached,
+            )
+            .await?;
+        self.set_last_known_step_context(&step_context).await;
+        Ok(step_context)
+    }
+
+    pub(crate) async fn capture_speculative_step_context_for_setup(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
         setup: &CurrentClientSetup,
@@ -3959,6 +3987,7 @@ impl Session {
             &CancellationToken::new(),
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
+            CodexAppsToolRefresh::UseCached,
         )
         .await
     }
@@ -3970,6 +3999,7 @@ impl Session {
         cancellation_token: &CancellationToken,
         required_servers: &[String],
         required_plugins: &HashSet<String>,
+        codex_apps_tool_refresh: CodexAppsToolRefresh,
     ) -> CodexResult<Arc<StepContext>> {
         let step_context = self
             .capture_step_context_inner(
@@ -3978,6 +4008,7 @@ impl Session {
                 cancellation_token,
                 required_servers,
                 required_plugins,
+                codex_apps_tool_refresh,
             )
             .await?;
         self.set_last_known_step_context(&step_context).await;
@@ -3992,6 +4023,7 @@ impl Session {
         cancellation_token: &CancellationToken,
         required_servers: &[String],
         required_plugins: &HashSet<String>,
+        codex_apps_tool_refresh: CodexAppsToolRefresh,
     ) -> CodexResult<Arc<StepContext>> {
         // Read the step's model and record its environments together so an update cannot split them.
         // Wait for executor startup below, after releasing the lock.
@@ -4092,9 +4124,9 @@ impl Session {
                     .collect::<HashMap<_, _>>();
                 extension_data.insert(sandbox_contexts);
             }
-            let (mcp, prepared_recommendations) = tokio::join!(
+            let mcp = async {
                 // MCP refresh can be large; keep it off the sampling request's stack.
-                Box::pin(self.mcp_runtime_for_step(
+                let mcp = Box::pin(self.mcp_runtime_for_step(
                     turn_context.as_ref(),
                     &environments,
                     &selected_capability_roots,
@@ -4102,7 +4134,27 @@ impl Session {
                     Some(setup),
                     required_servers,
                     required_plugins,
-                )),
+                ))
+                .await;
+                if codex_apps_tool_refresh == CodexAppsToolRefresh::HardRefresh {
+                    if let Err(err) = mcp.hard_refresh_codex_apps_tools_cache().await {
+                        warn!("failed to load explicitly requested Codex Apps tools: {err:#}");
+                    }
+                    return Box::pin(self.mcp_runtime_for_step(
+                        turn_context.as_ref(),
+                        &environments,
+                        &selected_capability_roots,
+                        executor_capability_discovery.as_deref(),
+                        Some(setup),
+                        required_servers,
+                        required_plugins,
+                    ))
+                    .await;
+                }
+                mcp
+            };
+            let (mcp, prepared_recommendations) = tokio::join!(
+                Box::pin(mcp),
                 turn::prepare_tool_recommendations(
                     self.as_ref(),
                     turn_context.as_ref(),
@@ -4110,6 +4162,10 @@ impl Session {
                     connector_directory_cache_key.as_ref(),
                 ),
             );
+            extension_data.insert(McpResourceClient::from_runtime_and_binding(
+                Arc::clone(&self.services.mcp_runtime),
+                Arc::clone(&mcp),
+            ));
             let mut selected_plugins = self
                 .services
                 .thread_extension_data
@@ -4643,7 +4699,7 @@ impl Session {
                 .token_budget
                 .as_ref()
                 .is_some_and(|config| config.use_history_notes_extension)
-                && let Some(call) = step_context.mcp.prepare_call("notes", "thread_hint")
+                && let Some(call) = step_context.mcp.prepare_internal_call("notes", "thread_hint")
                 && let Some(mcp_result) = call
                     .call(
                         /*arguments*/ None,
@@ -4677,6 +4733,7 @@ impl Session {
                     auto_compact_window_ids.first_window_id,
                     auto_compact_window_ids.previous_window_id,
                     auto_compact_window_ids.window_id,
+                    &turn_context.sub_id,
                     (!context_window_hints.is_empty()).then(|| context_window_hints.join("\n")),
                 )
                 .render_fragment(),

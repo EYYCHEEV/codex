@@ -13,6 +13,28 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing_test::internal::MockWriter;
 
+#[test]
+fn connection_retries_advance_attempt_and_backoff_independently() {
+    let mut retry_state = ResponsesStreamRetryState::default();
+
+    assert_eq!(
+        [
+            retry_state.next_connection_retry(),
+            retry_state.next_connection_retry(),
+            retry_state.next_connection_retry(),
+            retry_state.next_connection_retry(),
+            retry_state.next_connection_retry(),
+        ],
+        [
+            (1, Duration::from_secs(5)),
+            (2, Duration::from_secs(10)),
+            (3, Duration::from_secs(20)),
+            (4, Duration::from_secs(40)),
+            (5, Duration::from_secs(60)),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn sampling_retry_logs_stream_error_context() {
     let (_session, turn_context) = make_session_and_context().await;

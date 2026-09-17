@@ -4,13 +4,15 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_request_user_input_sse_response;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
-use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use codex_app_server_protocol::AppInfo;
+use codex_app_server_protocol::AppsInstalledParams;
+use codex_app_server_protocol::AppsInstalledResponse;
 use codex_app_server_protocol::CapabilityRootLocation;
 use codex_app_server_protocol::EnvironmentAddResponse;
 use codex_app_server_protocol::EnvironmentInfoResponse;
@@ -864,11 +866,10 @@ fn selected_capability_fixture(
     apps_url: &str,
 ) -> Result<SelectedCapabilityFixture> {
     let codex_home = TempDir::new()?;
-    write_mock_responses_config_toml_with_chatgpt_base_url(
-        codex_home.path(),
-        responses_server_uri,
-        apps_url,
-    )?;
+    MockResponsesConfig::new(responses_server_uri)
+        .with_root_config(&format!("chatgpt_base_url = \"{apps_url}\""))
+        .with_provider_config("requires_openai_auth = true")
+        .write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");
     let config = std::fs::read_to_string(&config_path)?.replacen(
         "model_provider = \"mock_provider\"",
@@ -878,7 +879,7 @@ fn selected_capability_fixture(
     std::fs::write(
         config_path,
         format!(
-            "{config}\n[features]\napps = true\ndeferred_executor = true\nexecutor_capability_discovery = true\n\n[skills]\ninclude_instructions = true\n"
+            "{config}\n[features]\napps = true\nremote_models = false\ndeferred_executor = true\nexecutor_capability_discovery = true\n\n[skills]\ninclude_instructions = true\n"
         ),
     )?;
     write_chatgpt_auth(
@@ -1082,6 +1083,17 @@ async fn start_thread(
     )
     .await??;
     let ThreadStartResponse { thread, .. } = to_response(response)?;
+    // Host Apps is lazy by design. Materialize this fixture's baseline
+    // connector catalog explicitly so the selected-capability assertions test
+    // attribution and environment isolation rather than cold-start behavior.
+    let request_id = app_server
+        .send_apps_installed_request(AppsInstalledParams {
+            thread_id: Some(thread.id.clone()),
+            force_refresh: true,
+        })
+        .await?;
+    let _: AppsInstalledResponse =
+        timeout(READ_TIMEOUT, app_server.read_response(request_id)).await??;
     Ok(thread.id)
 }
 

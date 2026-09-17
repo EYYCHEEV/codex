@@ -1705,6 +1705,27 @@ impl ExternalAuth for RefreshingExternalAuth {
     }
 }
 
+struct ReloadingExternalAuth {
+    initial: CodexAuth,
+    refreshed: CodexAuth,
+    resolve_count: AtomicUsize,
+}
+
+impl ExternalAuth for ReloadingExternalAuth {
+    fn resolve(&self) -> ExternalAuthFuture<'_, CodexAuth> {
+        let auth = if self.resolve_count.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.initial.clone()
+        } else {
+            self.refreshed.clone()
+        };
+        Box::pin(async move { Ok(auth) })
+    }
+
+    fn refresh(&self, _context: ExternalAuthRefreshContext) -> ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.refreshed.clone()) })
+    }
+}
+
 fn external_header_auth(account_id: Option<&'static str>) -> CodexAuth {
     let mut headers = http::HeaderMap::new();
     headers.insert(
@@ -1776,6 +1797,101 @@ async fn external_auth_keeps_cached_credentials_after_permanent_reload_failure()
 
     assert_eq!(manager.auth().await, Some(auth));
     assert_eq!(external_auth.resolve_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn external_chatgpt_reload_commits_refreshed_snapshot() {
+    let initial = CodexAuth::from_external_chatgpt_tokens(
+        &managed_id_token("initial@example.com", "initial-workspace"),
+        "initial-workspace",
+        Some("pro"),
+    )
+    .expect("initial external ChatGPT auth");
+    let refreshed = CodexAuth::from_external_chatgpt_tokens(
+        &managed_id_token("refreshed@example.com", "refreshed-workspace"),
+        "refreshed-workspace",
+        Some("team"),
+    )
+    .expect("refreshed external ChatGPT auth");
+    let manager = AuthManager::from_optional_auth_for_testing(/*auth*/ None);
+    manager
+        .set_external_auth(Arc::new(ReloadingExternalAuth {
+            initial,
+            refreshed: refreshed.clone(),
+            resolve_count: AtomicUsize::new(0),
+        }))
+        .await
+        .expect("external auth should install");
+
+    let resolved = manager.auth().await.expect("refreshed auth should resolve");
+
+    assert_eq!(
+        resolved.get_current_auth_json(),
+        refreshed.get_current_auth_json()
+    );
+    assert_eq!(
+        manager
+            .auth_cached()
+            .and_then(|auth| auth.get_current_auth_json()),
+        refreshed.get_current_auth_json()
+    );
+}
+
+#[tokio::test]
+async fn reload_commits_stored_external_chatgpt_auth_without_provider() {
+    let codex_home = tempdir().expect("tempdir");
+    let access_token = fake_jwt_for_auth_file_params(&AuthFileParams {
+        openai_api_key: None,
+        chatgpt_plan_type: Some("pro".to_string()),
+        chatgpt_account_id: Some("workspace-one".to_string()),
+    })
+    .expect("fake access token");
+    let external_auth =
+        CodexAuth::from_external_chatgpt_tokens(&access_token, "workspace-one", Some("pro"))
+            .expect("external ChatGPT auth");
+    save_auth(
+        codex_home.path(),
+        &external_auth
+            .get_current_auth_json()
+            .expect("external auth JSON"),
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("store external auth");
+    let manager = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("seed"),
+        codex_home.path().to_path_buf(),
+    );
+
+    assert!(!manager.has_external_auth());
+    assert!(
+        load_external_chatgpt_auth(codex_home.path())
+            .expect("load external overlay")
+            .is_none()
+    );
+
+    assert!(manager.reload().await);
+    assert_eq!(manager.auth_cached(), Some(external_auth));
+    assert!(
+        load_external_chatgpt_auth(codex_home.path())
+            .expect("load external overlay")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn reload_preserves_cached_auth_when_stored_auth_cannot_be_resolved() {
+    let codex_home = tempdir().expect("tempdir");
+    let cached_auth = CodexAuth::from_api_key("seed");
+    let manager = AuthManager::from_auth_for_testing_with_home(
+        cached_auth.clone(),
+        codex_home.path().to_path_buf(),
+    );
+    std::fs::write(get_auth_file(codex_home.path()), "not valid JSON")
+        .expect("write invalid auth file");
+
+    assert!(!manager.reload().await);
+    assert_eq!(manager.auth_cached(), Some(cached_auth));
 }
 
 #[tokio::test]
@@ -1978,15 +2094,9 @@ async fn workload_identity_auth_is_immutable_and_process_local() {
     assert_eq!(manager.auth_cached(), Some(auth));
 
     assert!(!get_auth_file(codex_home.path()).exists());
-    let ephemeral_storage = create_auth_storage(
-        codex_home.path().to_path_buf(),
-        AuthCredentialsStoreMode::Ephemeral,
-        AuthKeyringBackendKind::default(),
-    );
     assert!(
-        ephemeral_storage
-            .load()
-            .expect("load ephemeral auth")
+        load_external_chatgpt_auth(codex_home.path())
+            .expect("load external auth overlay")
             .is_some()
     );
 }

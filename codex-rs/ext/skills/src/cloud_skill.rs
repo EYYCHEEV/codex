@@ -11,8 +11,8 @@ use codex_extension_api::TurnStartPhase;
 
 use super::SkillsExtension;
 use crate::provider::SkillListQuery;
-use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
+use crate::state::current_mcp_resource_client;
 
 impl<C: Send + Sync + 'static> TurnLifecycleContributor for SkillsExtension<C> {
     fn turn_start_phase(&self, thread_store: &ExtensionData) -> TurnStartPhase {
@@ -48,10 +48,11 @@ impl<C: Send + Sync + 'static> TurnLifecycleContributor for SkillsExtension<C> {
                 include_host_skills: false,
                 include_bundled_skills: config.bundled_skills_enabled,
                 include_cloud_skills: true,
-                mcp_resources: input
-                    .session_store
-                    .get::<SkillsSessionState>()
-                    .and_then(|state| state.mcp_resources.clone()),
+                mcp_resources: current_mcp_resource_client(
+                    Some(input.turn_store),
+                    input.thread_store,
+                    input.session_store,
+                ),
                 executor_capability_discovery: None,
             };
             if let Err(error) = state.refresh_cloud_catalog(&self.providers, query).await {

@@ -2658,7 +2658,7 @@ mod tests {
 
         let bootstrap = app_server.bootstrap_with_account(&config, account).await?;
 
-        assert_eq!(app_server.next_request_id, next_request_id + 2);
+        assert_eq!(app_server.next_request_id, next_request_id + 3);
         assert_eq!(
             (
                 bootstrap.account_email.as_deref(),
@@ -2689,7 +2689,7 @@ mod tests {
 
         app_server.bootstrap(&config).await?;
 
-        assert_eq!(app_server.next_request_id, next_request_id + 3);
+        assert_eq!(app_server.next_request_id, next_request_id + 4);
         app_server.shutdown().await?;
         Ok(())
     }

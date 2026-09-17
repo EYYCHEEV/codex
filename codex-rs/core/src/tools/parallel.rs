@@ -197,9 +197,14 @@ impl ToolCallRuntime {
             async move {
                 let _message_admission = message_admission?;
                 if let Some(tool_runtime) = tool_runtime
-                    && let Some(readiness) = tool_runtime.wait_until_ready(&session)
+                    && let Some(readiness) =
+                        tool_runtime.wait_until_ready(Arc::clone(&step_context))
                 {
-                    readiness.await;
+                    // Keep readiness work alive if this invocation is interrupted. Deferred MCP
+                    // startup belongs to the captured step binding and may serve a later retry.
+                    tokio::spawn(readiness)
+                        .await
+                        .map_err(Self::tool_task_join_error)?;
                 }
 
                 let guard = if supports_parallel {

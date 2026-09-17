@@ -35,6 +35,7 @@ use codex_app_server_protocol::RequestId;
 use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::config::set_project_trust_level;
 use codex_login::AuthKeyringBackendKind;
+use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_login::login_with_api_key;
 use codex_protocol::config_types::TrustLevel;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -2581,6 +2582,7 @@ async fn app_server_startup_refreshes_cached_remote_catalog_without_blocking_plu
 -> Result<()> {
     let codex_home = TempDir::new()?;
     let server = MockServer::start().await;
+    let refresh_url = format!("{}/oauth/token", server.uri());
     write_remote_plugin_catalog_config(
         codex_home.path(),
         &format!("{}/backend-api/", server.uri()),
@@ -2606,9 +2608,21 @@ async fn app_server_startup_refreshes_cached_remote_catalog_without_blocking_plu
     mount_remote_installed_plugins(&server, "WORKSPACE", empty_remote_installed_plugins_body())
         .await;
     mount_empty_user_installed_plugins(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "chatgpt-token",
+            "refresh_token": "refresh-token",
+        })))
+        .mount(&server)
+        .await;
 
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_env_overrides(&[(
+            REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+            Some(refresh_url.as_str()),
+        )])
         .build()
         .await?;
     timeout(DEFAULT_TIMEOUT, app_server.initialize()).await??;
@@ -2654,9 +2668,22 @@ async fn app_server_startup_refreshes_cached_remote_catalog_without_blocking_plu
     mount_remote_installed_plugins(&server, "WORKSPACE", empty_remote_installed_plugins_body())
         .await;
     mount_empty_user_installed_plugins(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/oauth/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": "chatgpt-token",
+            "refresh_token": "refresh-token",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
 
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
+        .with_env_overrides(&[(
+            REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+            Some(refresh_url.as_str()),
+        )])
         .with_plugin_startup_tasks()
         .build()
         .await?;
@@ -2714,6 +2741,7 @@ async fn app_server_startup_refreshes_cached_remote_catalog_without_blocking_plu
     );
     sleep(Duration::from_millis(100)).await;
     wait_for_remote_plugin_request_count(&server, "/ps/plugins/list", /*expected_count*/ 1).await?;
+    server.verify().await;
 
     Ok(())
 }

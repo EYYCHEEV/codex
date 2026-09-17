@@ -156,6 +156,7 @@ pub(super) enum HistoryCapabilities {
     ItemsAndSummaryTurnsFail,
     ThreadListFails,
     ThreadStartFails,
+    RecordThreadStartWithoutResponse,
     ConfigReadUnsupported(i64),
     ConfigReadFails,
     ConfigReadUnknownVoice,
@@ -334,10 +335,15 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                         .await?;
                 }
                 JSONRPCMessage::Request(request) => {
-                    request_sink
-                        .lock()
-                        .expect("request recorder lock")
-                        .push(request.clone());
+                    let record_thread_start_without_response = history_capabilities
+                        == HistoryCapabilities::RecordThreadStartWithoutResponse
+                        && request.method == "thread/start";
+                    if !record_thread_start_without_response {
+                        request_sink
+                            .lock()
+                            .expect("request recorder lock")
+                            .push(request.clone());
+                    }
                     if realtime_behavior == RealtimeRequestBehavior::AcceptSpeechAndStallStop
                         && request.method == "thread/realtime/stop"
                     {
@@ -525,9 +531,21 @@ pub(super) async fn start_recording_app_server_with_realtime_speech(
                             matches!(inventories, 2 | 4)
                         };
                         let detach = request.method == "thread/unsubscribe";
-                        let request = serde_json::from_value::<ClientRequest>(
-                            serde_json::to_value(request)?,
+                        let decoded_request = serde_json::from_value::<ClientRequest>(
+                            serde_json::to_value(&request)?,
                         )?;
+                        if record_thread_start_without_response {
+                            assert!(matches!(
+                                &decoded_request,
+                                ClientRequest::ThreadStart { .. }
+                            ));
+                            request_sink
+                                .lock()
+                                .expect("request recorder lock")
+                                .push(request);
+                            continue;
+                        }
+                        let request = decoded_request;
                         if let ClientRequest::ThreadList { params, .. } = &request
                             && let Some((root, started, release)) = blocked_thread_list.take()
                         {

@@ -47,6 +47,17 @@ pub(crate) struct ExhaustedResponseRetry {
     pub(crate) retry_at: Option<tokio::time::Instant>,
 }
 
+impl ResponsesStreamRetryState {
+    fn next_connection_retry(&mut self) -> (u64, Duration) {
+        let retry_delay = self.connection_retry_delay;
+        self.connection_retries = self.connection_retries.saturating_add(1);
+        self.connection_retry_delay = retry_delay
+            .saturating_mul(2)
+            .min(MAX_CONNECTION_RETRY_DELAY);
+        (self.connection_retries, retry_delay)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ResponsesRetryDecision {
     Retry,
@@ -82,7 +93,7 @@ pub(crate) async fn handle_retryable_response_stream_error(
         && !turn_context.session_source.is_internal()
         && !turn_context.provider.info().is_amazon_bedrock()
     {
-        let retry_delay = retry_state.connection_retry_delay;
+        let (connection_retries, retry_delay) = retry_state.next_connection_retry();
         warn!(
             turn_id = %turn_context.sub_id,
             error = %err,
@@ -91,12 +102,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
         );
         sess.notify_stream_error(turn_context, "Reconnecting... waiting for network", err)
             .await;
-        retry_state.connection_retries = retry_state.connection_retries.saturating_add(1);
-        codex_client::record_retry!(retry_state.connection_retries, retry_delay, operation);
+        codex_client::record_retry!(connection_retries, retry_delay, operation);
         tokio::time::sleep(retry_delay).await;
-        retry_state.connection_retry_delay = retry_delay
-            .saturating_mul(2)
-            .min(MAX_CONNECTION_RETRY_DELAY);
         return Ok(ResponsesRetryDecision::Retry);
     }
 

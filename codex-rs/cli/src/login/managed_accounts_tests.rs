@@ -141,6 +141,7 @@ fn backend_rate_windows_preserve_duration_and_additional_identity() {
         RateLimitSnapshot {
             limit_id: Some("codex".to_string()),
             limit_name: Some("Codex".to_string()),
+            normal_model_slug: None,
             primary: Some(RateLimitWindow {
                 used_percent: 25.0,
                 window_minutes: Some(300),
@@ -160,6 +161,7 @@ fn backend_rate_windows_preserve_duration_and_additional_identity() {
         RateLimitSnapshot {
             limit_id: Some("research".to_string()),
             limit_name: Some("Research".to_string()),
+            normal_model_slug: None,
             primary: Some(RateLimitWindow {
                 used_percent: 10.0,
                 window_minutes: Some(60),

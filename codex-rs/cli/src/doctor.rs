@@ -50,6 +50,7 @@ use codex_install_context::CodexPackageLayout;
 use codex_install_context::InstallContext;
 use codex_install_context::InstallMethod;
 use codex_install_context::StandalonePlatform;
+#[cfg(test)]
 use codex_login::AuthDotJson;
 use codex_login::AuthManager;
 use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
@@ -1398,6 +1399,7 @@ fn provider_specific_auth_check(
     }
 }
 
+#[cfg(test)]
 fn stored_auth_mode(auth: &codex_login::AuthDotJson) -> &'static str {
     match stored_auth_mode_value(auth) {
         AuthMode::ApiKey => "api_key",
@@ -1411,6 +1413,7 @@ fn stored_auth_mode(auth: &codex_login::AuthDotJson) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn stored_auth_mode_value(auth: &AuthDotJson) -> AuthMode {
     if let Some(mode) = auth.auth_mode {
         return mode;
@@ -1428,6 +1431,7 @@ fn stored_auth_mode_value(auth: &AuthDotJson) -> AuthMode {
     }
 }
 
+#[cfg(test)]
 fn stored_auth_issues(
     auth: &AuthDotJson,
     env_var_present: impl Fn(&str) -> bool,
@@ -3138,6 +3142,7 @@ mod tests {
     use std::sync::Mutex;
 
     use clap::Parser;
+    use codex_core::config::ConfigBuilder;
     use codex_protocol::config_types::SandboxMode;
     use pretty_assertions::assert_eq;
 
@@ -3589,6 +3594,7 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: None,
             bedrock_access_keys: None,
@@ -3609,6 +3615,7 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: None,
             bedrock_api_key: None,
             bedrock_access_keys: None,
@@ -3631,6 +3638,7 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            managed_chatgpt: None,
             personal_access_token: Some("at-test".to_string()),
             bedrock_api_key: None,
             bedrock_access_keys: None,

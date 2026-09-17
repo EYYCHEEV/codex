@@ -69,6 +69,7 @@ use crate::state::HostSkillsStepState;
 use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
 use crate::state::SkillsTurnState;
+use crate::state::current_mcp_resource_client;
 use crate::telemetry::SkillTelemetry;
 use crate::tools::SkillAnalytics;
 use crate::tools::SkillToolAuthority;
@@ -210,9 +211,11 @@ where
                         include_host_skills: false,
                         include_bundled_skills: config.bundled_skills_enabled,
                         include_cloud_skills: false,
-                        mcp_resources: session_store
-                            .get::<SkillsSessionState>()
-                            .and_then(|state| state.mcp_resources.clone()),
+                        mcp_resources: current_mcp_resource_client(
+                            /*request_store*/ None,
+                            thread_store,
+                            session_store,
+                        ),
                         executor_capability_discovery: None,
                     },
                     &thread_state,
@@ -301,6 +304,7 @@ where
         self.build_skill_tools(
             session_store,
             thread_store,
+            /*request_store*/ None,
             /*executor_query*/ None,
             /*selected_plugins*/ None,
             /*sandbox_contexts*/ None,
@@ -336,6 +340,7 @@ where
         self.build_skill_tools(
             session_store,
             thread_store,
+            Some(step_store),
             executor_query,
             step_store.get::<SelectedPluginSnapshot>(),
             step_store.get::<HashMap<String, FileSystemSandboxContext>>(),
@@ -391,9 +396,8 @@ where
             };
 
             let config = thread_state.config();
-            let mcp_resources = session_store
-                .get::<SkillsSessionState>()
-                .and_then(|state| state.mcp_resources.clone());
+            let mcp_resources =
+                current_mcp_resource_client(Some(turn_store), thread_store, session_store);
             let host_snapshot = turn_store.get::<HostSkillsSnapshot>();
             let host_catalog_in_world_state =
                 turn_store.get::<HostSkillsCatalogInWorldState>().is_some();
@@ -595,6 +599,7 @@ impl<C> SkillsExtension<C> {
         &self,
         session_store: &ExtensionData,
         thread_store: &ExtensionData,
+        request_store: Option<&ExtensionData>,
         executor_query: Option<SkillListQuery>,
         selected_plugins: Option<Arc<SelectedPluginSnapshot>>,
         sandbox_contexts: Option<Arc<HashMap<String, FileSystemSandboxContext>>>,
@@ -603,6 +608,7 @@ impl<C> SkillsExtension<C> {
             self.providers.clone(),
             session_store,
             thread_store,
+            request_store,
             executor_query,
             selected_plugins,
             sandbox_contexts,

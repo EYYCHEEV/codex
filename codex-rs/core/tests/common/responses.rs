@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use base64::Engine;
@@ -549,11 +550,16 @@ mod tests {
 #[derive(Debug, Clone)]
 pub struct WebSocketRequest {
     body: Value,
+    received_at: Instant,
 }
 
 impl WebSocketRequest {
     pub fn body_json(&self) -> Value {
         self.body.clone()
+    }
+
+    pub fn received_at(&self) -> Instant {
+        self.received_at
     }
 }
 
@@ -1579,7 +1585,10 @@ async fn start_websocket_server_with_handshake_rejection(
                 if let Some(body) = parse_ws_request_body(message) {
                     let mut log = requests.lock().unwrap();
                     if let Some(connection_log) = log.get_mut(connection_index) {
-                        connection_log.push(WebSocketRequest { body });
+                        connection_log.push(WebSocketRequest {
+                            body,
+                            received_at: Instant::now(),
+                        });
                     }
                     request_log.notify_waiters();
                 }
