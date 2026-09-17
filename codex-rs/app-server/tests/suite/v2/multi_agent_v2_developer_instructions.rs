@@ -70,6 +70,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     let fork_turns = match case {
         "bounded history" | "bounded implicit configured default" => Some("1"),
         "no history" | "explicit configured role" | "implicit configured default" => Some("none"),
+        "full history configured role" => Some("all"),
         _ => None,
     };
     let agent_type = match case {
@@ -556,7 +557,6 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
         "message": INITIAL_TASK,
         "task_name": "worker",
         "fork_turns": "none",
-        "reasoning_effort": "low",
     });
     if let Some(agent_type) = agent_type.filter(|role| *role != "default") {
         spawn_args["agent_type"] = json!(agent_type);
@@ -672,10 +672,15 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
             .into_iter()
             .find(|request| !request.inputs_of_type("agent_message").is_empty())
             .expect("initial worker model request");
+        let expected_initial_reasoning_effort = if agent_type.is_some() {
+            ReasoningEffort::Low
+        } else {
+            ReasoningEffort::High
+        };
         assert_developer_instructions(&initial_child_request, "initial");
         assert_eq!(
             initial_child_request.body_json()["reasoning"]["effort"],
-            json!("low")
+            json!(expected_initial_reasoning_effort)
         );
         if agent_type.is_some() {
             assert!(has_shell_tool(&initial_parent_request.single_request()));
@@ -700,7 +705,10 @@ async fn cold_resume_preserves_effective_developer_instructions_for_worker(
         assert_eq!(baseline.thread.agent_role.as_deref(), agent_type);
         assert_eq!(baseline.model_provider, "mock_provider");
         assert!(matches!(&baseline.sandbox, SandboxPolicy::ReadOnly { .. }));
-        assert_eq!(baseline.reasoning_effort, Some(ReasoningEffort::Low));
+        assert_eq!(
+            baseline.reasoning_effort,
+            Some(expected_initial_reasoning_effort)
+        );
 
         let unsubscribed: ThreadUnsubscribeResponse = app_server
             .request(|request_id| ClientRequest::ThreadUnsubscribe {
@@ -949,11 +957,7 @@ features.shell_tool = false
             "warm metadata-only child resume should not replay token usage"
         );
     }
-    let expected_reasoning_effort = if agent_type.is_some() {
-        ReasoningEffort::High
-    } else {
-        ReasoningEffort::Low
-    };
+    let expected_reasoning_effort = ReasoningEffort::High;
     assert_eq!(
         resumed.reasoning_effort,
         Some(expected_reasoning_effort.clone())

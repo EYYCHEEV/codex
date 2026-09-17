@@ -202,7 +202,7 @@ async fn serve_exec_with_pushed_events(
             Some("environment/info") => {
                 respond_environment_info(&mut websocket, &request["id"], scenario).await;
             }
-            Some("fs/getMetadata") => {
+            Some("fs/getMetadata" | "fs/readDirectory") => {
                 send_exec_server_json(
                     &mut websocket,
                     json!({
@@ -790,7 +790,7 @@ timeout = 900
     let mut saw_patch_denial_approval = false;
     if !managed_network_enabled {
         loop {
-            let event = timeout(Duration::from_secs(5), test.codex.next_event())
+            let event = timeout(STARTUP_TIMEOUT, test.codex.next_event())
                 .await
                 .context("turn should complete")??
                 .msg;

@@ -1,6 +1,7 @@
 //! Immutable MCP catalog and execution handles.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -22,6 +23,7 @@ use serde_json::Value as JsonValue;
 
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
+use crate::client_tool_catalog::CodexAppsToolSnapshot;
 use crate::connection_manager::McpConnectionSet;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
@@ -35,6 +37,7 @@ pub struct McpBinding {
     plugins_available: bool,
     tools: Vec<ToolInfo>,
     calls: HashMap<(String, String), PreparedMcpCall>,
+    deferred_server_catalogs: HashMap<String, Vec<ToolInfo>>,
 }
 
 impl McpBinding {
@@ -47,6 +50,7 @@ impl McpBinding {
             /*plugins_available*/ false,
             Vec::new(),
             HashMap::new(),
+            HashMap::new(),
         )
     }
 
@@ -57,6 +61,7 @@ impl McpBinding {
         plugins_available: bool,
         tools: Vec<ToolInfo>,
         calls: HashMap<(String, String), PreparedMcpCall>,
+        deferred_server_catalogs: HashMap<String, Vec<ToolInfo>>,
     ) -> Self {
         Self {
             connections,
@@ -65,6 +70,7 @@ impl McpBinding {
             plugins_available,
             tools,
             calls,
+            deferred_server_catalogs,
         }
     }
 
@@ -96,6 +102,58 @@ impl McpBinding {
             .cloned()
     }
 
+    /// Binds a model-visible call to this binding's exact advertised catalog.
+    ///
+    /// If the binding was captured from a cached catalog before its server was
+    /// ready, this starts that same captured connection and accepts its startup
+    /// catalog only when the entire raw server execution contract is unchanged.
+    pub async fn prepare_call_exact(&self, server: &str, tool: &str) -> Option<PreparedMcpCall> {
+        if let Some(call) = self.prepare_call(server, tool) {
+            return Some(call);
+        }
+        let advertised_tool = self.tools.iter().find(|tool_info| {
+            tool_info.server_name == server && tool_info.tool.name.as_ref() == tool
+        })?;
+        let expected_server_catalog = self.deferred_server_catalogs.get(server)?;
+        if !self
+            .connections
+            .deferred_catalog_matches(server, expected_server_catalog)
+            .await
+        {
+            return None;
+        }
+
+        let recaptured = self
+            .connections
+            .capture_binding_with_metadata(
+                Arc::clone(&self.config),
+                self.plugins_available,
+                &[server.to_string()],
+                &HashSet::new(),
+            )
+            .await;
+        let recaptured_tool = recaptured.tools.iter().find(|tool_info| {
+            tool_info.server_name == server && tool_info.tool.name.as_ref() == tool
+        })?;
+        if !recaptured_tool.has_same_execution_contract(advertised_tool) {
+            return None;
+        }
+        let mut call = recaptured
+            .prepare_call(server, tool)
+            .filter(|call| call.catalog_revision == 0)?;
+        call.tool_info.callable_name = advertised_tool.callable_name.clone();
+        call.tool_info.callable_namespace = advertised_tool.callable_namespace.clone();
+        Some(call)
+    }
+
+    /// Binds a trusted internal call to the exact permitted client and metadata
+    /// in this binding, including tools hidden from the model.
+    pub fn prepare_internal_call(&self, server: &str, tool: &str) -> Option<PreparedMcpCall> {
+        self.calls
+            .get(&(server.to_string(), tool.to_string()))
+            .cloned()
+    }
+
     pub fn has_servers(&self) -> bool {
         self.connections.has_servers()
     }
@@ -110,6 +168,11 @@ impl McpBinding {
             .await
     }
 
+    /// Starts and awaits a server from this binding's captured connection set.
+    pub async fn wait_for_server_startup(&self, server: &str) -> bool {
+        self.connections.wait_for_server_startup(server).await
+    }
+
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
         self.connections.list_all_tools().await
     }
@@ -117,6 +180,13 @@ impl McpBinding {
     pub async fn hard_refresh_codex_apps_tools_cache(&self) -> Result<Vec<ToolInfo>> {
         self.connections
             .refresh_codex_apps_tools_for_discovery()
+            .await
+    }
+
+    /// Refreshes the exact Apps client captured by this binding.
+    pub async fn refresh_codex_apps_client_catalog(&self) -> Result<CodexAppsToolSnapshot> {
+        self.connections
+            .refresh_codex_apps_client_catalog(&self.config)
             .await
     }
 

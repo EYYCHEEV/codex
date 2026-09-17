@@ -2122,6 +2122,7 @@ async fn managed_selection_change_replaces_singular_rate_state_with_selected_cac
         "codex".to_string(),
         crate::status::RateLimitSnapshotDisplay {
             limit_name: "codex".to_string(),
+            normal_model_slug: None,
             captured_at: chrono::Local::now(),
             primary: None,
             secondary: None,
@@ -2156,6 +2157,7 @@ async fn managed_selection_change_replaces_singular_rate_state_with_selected_cac
         "codex".to_string(),
         crate::status::RateLimitSnapshotDisplay {
             limit_name: "codex".to_string(),
+            normal_model_slug: None,
             captured_at: chrono::Local::now(),
             primary: None,
             secondary: None,
@@ -2350,7 +2352,7 @@ async fn managed_same_id_credential_and_workspace_rebind_clears_all_account_boun
     assert!(chat.refreshing_token_activity_output.is_none());
     assert!(chat.completed_token_activity_output.is_none());
     assert!(chat.refreshing_status_outputs.is_empty());
-    assert_eq!(chat.add_credits_nudge_email_in_flight, None);
+    assert!(chat.add_credits_nudge_email_in_flight.is_none());
     assert_eq!(chat.status_line_workspace_headline, None);
     assert_eq!(chat.status_line_workspace_headline_pending_request_id, None);
     assert_eq!(chat.status_line_workspace_headline_last_requested_at, None);

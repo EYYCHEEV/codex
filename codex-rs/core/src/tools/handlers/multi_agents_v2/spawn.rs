@@ -136,23 +136,12 @@ async fn handle_spawn_agent(
     let mut config =
         build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
-    let mut effective_role_name = if is_full_history_fork {
-        turn.session_source.get_agent_role()
-    } else {
-        role_name.map(str::to_string)
-    };
-    let route = if is_full_history_fork {
-        reject_full_fork_agent_type_override(role_name)?;
-        apply_requested_spawn_agent_model_overrides(
-            &session,
-            turn.as_ref(),
-            &mut config,
-            args.model.as_deref(),
-            args.reasoning_effort.clone(),
-        )
-        .await?;
-        SpawnAgentRoute::Preferred
-    } else if role_name.is_some() {
+    let mut effective_role_name = role_name.map(str::to_string).or_else(|| {
+        is_full_history_fork
+            .then(|| turn.session_source.get_agent_role())
+            .flatten()
+    });
+    let route = if role_name.is_some() {
         if args.model.is_some() || args.reasoning_effort.is_some() {
             return Err(FunctionCallError::RespondToModel(
                 "Typed spawn_agent routes are owned by agent_type; omit model and reasoning_effort"
@@ -163,6 +152,16 @@ async fn handle_spawn_agent(
             .await
             .map_err(FunctionCallError::RespondToModel)?;
         resolve_typed_spawn_agent_route(&session, &mut config, &parent_route).await?
+    } else if is_full_history_fork {
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            turn.as_ref(),
+            &mut config,
+            args.model.as_deref(),
+            args.reasoning_effort.clone(),
+        )
+        .await?;
+        SpawnAgentRoute::Preferred
     } else {
         apply_requested_spawn_agent_model_overrides(
             &session,

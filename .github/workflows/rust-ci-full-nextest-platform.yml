@@ -395,7 +395,7 @@ jobs:
           "${test_command[@]}"
         env:
           RUST_BACKTRACE: 1
-          RUST_MIN_STACK: "8388608" # 8 MiB
+          RUST_MIN_STACK: "33554432" # 32 MiB, matching the repository test runner
           NEXTEST_STATUS_LEVEL: leak
 
       - name: Upload nextest JUnit report

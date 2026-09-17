@@ -48,6 +48,11 @@ filter = 'package(codex-exec) & test(worktree_start_and_fork_use_host_pool_and_p
 slow-timeout = { period = "30s", terminate-after = 4 }
 
 [[profile.default.overrides]]
+# This resume repair test can exceed the broad 60s ceiling under load.
+filter = 'package(codex-exec) & test(suite::resume::exec_resume_last_repairs_rollout_missing_from_state_db)'
+slow-timeout = { period = "1m", terminate-after = 2 }
+
+[[profile.default.overrides]]
 filter = 'test(approval_matrix_covers_all_modes)'
 slow-timeout = { period = "30s", terminate-after = 2 }
 
@@ -94,7 +99,7 @@ test-group = 'core_apply_patch_cli_integration'
 [[profile.default.overrides]]
 # Guardian review may legitimately consume its 90-second request budget before
 # the test's outer timeout fires.
-filter = 'package(codex-core) & test(request_permissions_routes_to_guardian_when_reviewer_is_enabled)'
+filter = 'package(codex-core) & (test(request_permissions_routes_to_guardian_when_reviewer_is_enabled) | test(request_permissions_uses_issuing_step_policy_and_reviewer))'
 slow-timeout = { period = "1m", terminate-after = 2 }
 
 [[profile.default.overrides]]

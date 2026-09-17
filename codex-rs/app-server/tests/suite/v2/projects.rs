@@ -246,15 +246,8 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
             ..Default::default()
         })
         .await?;
-    let JSONRPCMessage::Response(response) = server.read_next_message().await? else {
-        panic!("thread/start must respond before lifecycle notifications");
-    };
-    assert_eq!(response.id, RequestId::Integer(started_id));
-    let started: ThreadStartResponse = serde_json::from_value(response.result)?;
-    let JSONRPCMessage::Notification(thread_started) = server.read_next_message().await? else {
-        panic!("thread/start must emit thread/started");
-    };
-    assert_eq!(thread_started.method, "thread/started");
+    let started: ThreadStartResponse = server.read_response(started_id).await?;
+    let _: serde_json::Value = server.read_notification("thread/started").await?;
     assert_eq!(started.thread.project_id, Some(created.project.id.clone()));
 
     server.clear_message_buffer();
@@ -265,15 +258,8 @@ async fn projects_persist_and_assign_threads() -> Result<()> {
             ..Default::default()
         })
         .await?;
-    let JSONRPCMessage::Response(response) = server.read_next_message().await? else {
-        panic!("ephemeral thread/start must respond before lifecycle notifications");
-    };
-    assert_eq!(response.id, RequestId::Integer(ephemeral_id));
-    let ephemeral: ThreadStartResponse = serde_json::from_value(response.result)?;
-    let JSONRPCMessage::Notification(thread_started) = server.read_next_message().await? else {
-        panic!("ephemeral thread/start must emit thread/started");
-    };
-    assert_eq!(thread_started.method, "thread/started");
+    let ephemeral: ThreadStartResponse = server.read_response(ephemeral_id).await?;
+    let _: serde_json::Value = server.read_notification("thread/started").await?;
     assert_eq!(
         ephemeral.thread.project_id,
         Some(created.project.id.clone())
@@ -1062,11 +1048,7 @@ async fn assigned_forks_inherit_projects_for_persistent_and_ephemeral_children()
             ..Default::default()
         })
         .await?;
-    let JSONRPCMessage::Response(response) = server.read_next_message().await? else {
-        panic!("thread/fork must respond before lifecycle notifications");
-    };
-    assert_eq!(response.id, RequestId::Integer(fork_id));
-    let forked: ThreadForkResponse = serde_json::from_value(response.result)?;
+    let forked: ThreadForkResponse = server.read_response(fork_id).await?;
     let _: serde_json::Value = server.read_notification("thread/started").await?;
     assert_eq!(forked.thread.project_id, Some(project.project.id.clone()));
 
@@ -1078,11 +1060,7 @@ async fn assigned_forks_inherit_projects_for_persistent_and_ephemeral_children()
             ..Default::default()
         })
         .await?;
-    let JSONRPCMessage::Response(response) = server.read_next_message().await? else {
-        panic!("ephemeral thread/fork must respond before lifecycle notifications");
-    };
-    assert_eq!(response.id, RequestId::Integer(ephemeral_id));
-    let ephemeral_fork: ThreadForkResponse = serde_json::from_value(response.result)?;
+    let ephemeral_fork: ThreadForkResponse = server.read_response(ephemeral_id).await?;
     let _: serde_json::Value = server.read_notification("thread/started").await?;
     assert_eq!(ephemeral_fork.thread.project_id, Some(project.project.id));
     assert!(ephemeral_fork.thread.ephemeral);

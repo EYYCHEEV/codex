@@ -289,6 +289,7 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
                 .expect("test context mode");
             // Exercise local compaction's rebuilt user messages, not an opaque checkpoint.
             config.model_provider.name = "Local compaction test provider".to_owned();
+            config.model_provider.requires_openai_auth = false;
             config
                 .features
                 .disable(Feature::TokenBudget)
@@ -577,6 +578,7 @@ async fn legacy_checkpoint_recovers_root_excerpt_before_discarding_backup(
                 .disable(Feature::TokenBudget)
                 .expect("use local compaction");
             config.model_provider.name = "Local compaction test provider".to_owned();
+            config.model_provider.requires_openai_auth = false;
         })
         .build_with_auto_env(&server)
         .await?;
@@ -695,6 +697,7 @@ async fn disabled_capture_stays_incomplete_after_compaction_and_enabled_resume()
                 .disable(Feature::TokenBudget)
                 .expect("use local compaction");
             config.model_provider.name = "Local compaction test provider".to_owned();
+            config.model_provider.requires_openai_auth = false;
         })
         .build_with_auto_env(&server)
         .await?;
@@ -946,6 +949,7 @@ async fn standalone_fork_retains_inherited_user_instructions(
                 .disable(Feature::TokenBudget)
                 .expect("use local compaction for worker checkpoint");
             config.model_provider.name = "Local compaction test provider".to_owned();
+            config.model_provider.requires_openai_auth = false;
             for feature in [
                 Feature::GuardianApproval,
                 Feature::GuardianThreadContext,

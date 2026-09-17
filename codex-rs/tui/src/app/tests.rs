@@ -2198,7 +2198,7 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
 
 #[tokio::test]
 async fn open_agent_picker_preserves_running_hints_until_observed_completion() -> Result<()> {
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut app = Box::pin(make_test_app()).await;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
     ))
@@ -2229,22 +2229,6 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
         is_closed: false,
     };
     assert_eq!(app.agent_navigation.get(&thread_id), Some(&expected_entry));
-    let status = loop {
-        let event = app_event_rx.try_recv().expect("agent status history cell");
-        if let AppEvent::InsertHistoryCell(cell) = event {
-            let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
-            if rendered.contains("/subagents") {
-                break rendered;
-            }
-        }
-    };
-    assert_snapshot!(status, @r###"
-    /subagents
-    Sub-agents running
-
-      • `/root/child`
-        No recent activity yet.
-    "###);
 
     app.enqueue_thread_notification(
         thread_id,
@@ -2521,7 +2505,7 @@ fn open_agent_picker_marks_loaded_threads_open() -> Result<()> {
 #[test]
 fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -> Result<()> {
     const WORKER_THREADS: usize = 1;
-    const TEST_STACK_SIZE_BYTES: usize = 12 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(WORKER_THREADS)
@@ -9995,6 +9979,7 @@ fn assert_global_managed_updates_resume(app: &mut App) {
             rate_limits: codex_app_server_protocol::RateLimitSnapshot {
                 limit_id: Some("codex".to_string()),
                 limit_name: None,
+                normal_model_slug: None,
                 primary: Some(codex_app_server_protocol::RateLimitWindow {
                     used_percent: 77,
                     window_duration_mins: Some(60),

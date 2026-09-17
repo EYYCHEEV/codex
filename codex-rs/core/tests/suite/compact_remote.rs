@@ -1530,6 +1530,7 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_websocket() -> Result<
             responses::ev_completed("warm-1"),
         ],
         vec![
+            responses::ev_response_created("r1"),
             json!({
                 "type": "response.metadata",
                 "headers": {(TURN_STATE_HEADER): "sampling-state"},
@@ -1538,6 +1539,7 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_websocket() -> Result<
             responses::ev_completed_with_tokens("r1", /*total_tokens*/ 500),
         ],
         vec![
+            responses::ev_response_created("r-compact"),
             json!({
                 "type": "response.metadata",
                 "headers": {(TURN_STATE_HEADER): "compact-state"},
@@ -1552,6 +1554,7 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_websocket() -> Result<
             responses::ev_completed("r-compact"),
         ],
         vec![
+            responses::ev_response_created("r2"),
             json!({
                 "type": "response.metadata",
                 "headers": {(TURN_STATE_HEADER): "continuation-state"},
@@ -1560,6 +1563,7 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_websocket() -> Result<
             responses::ev_completed_with_tokens("r2", /*total_tokens*/ 80),
         ],
         vec![
+            responses::ev_response_created("r3"),
             responses::ev_assistant_message("m1", "FINAL_REPLY"),
             responses::ev_completed_with_tokens("r3", /*total_tokens*/ 80),
         ],

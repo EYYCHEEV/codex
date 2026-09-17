@@ -121,10 +121,11 @@ async fn resumed_thread_does_not_wait_for_guardian_websocket_warmup() -> Result<
             close_after_requests: true,
         }])
         .await;
-    let responses_url = format!(
-        "http://{}",
-        responses_server.uri().trim_start_matches("ws://")
-    );
+    let responses_url = responses_server.uri();
+    let responses_url = match responses_url.strip_prefix("ws://") {
+        Some(address) => format!("http://{address}"),
+        None => responses_url.to_string(),
+    };
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&responses_url)
         .with_provider_config("supports_websockets = false")

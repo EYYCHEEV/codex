@@ -470,11 +470,13 @@ async fn orchestrator_skill_can_read_referenced_resource_without_an_executor() -
             anyhow::anyhow!("repeated skills.read output should be sent to the model")
         })?;
     assert_eq!(read_output, repeated_read_output);
+    // Each sampling step captures its own exact MCP binding. Orchestrator resource
+    // discovery and reads are cached within that request authority, not across it.
     assert_eq!(
         ResourceAppsMcpCallCounts {
-            list_resources: 3,
+            list_resources: 15,
             main_prompt_reads: 1,
-            reference_reads: 1,
+            reference_reads: 2,
         },
         apps_server_calls.snapshot()
     );
@@ -522,9 +524,9 @@ async fn orchestrator_skill_can_read_referenced_resource_without_an_executor() -
     assert!(skill_fragments[0].contains(SKILL_REFERENCE_URI));
     assert_eq!(
         ResourceAppsMcpCallCounts {
-            list_resources: 6,
+            list_resources: 18,
             main_prompt_reads: 2,
-            reference_reads: 1,
+            reference_reads: 2,
         },
         apps_server_calls.snapshot()
     );
@@ -1500,7 +1502,9 @@ async fn start_resource_test_app_server_with_extra_config(
         .with_root_config(&format!(
             "chatgpt_base_url = \"{apps_server_url}\"\nmcp_oauth_credentials_store = \"file\""
         ))
+        .with_provider_config("requires_openai_auth = true")
         .enable_feature(Feature::Apps)
+        .disable_feature(Feature::RemoteModels)
         .with_extra_config(&format!(
             "[skills]\ninclude_instructions = true\n{extra_config}"
         ))

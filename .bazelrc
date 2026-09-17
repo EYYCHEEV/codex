@@ -37,10 +37,9 @@ common:macos --strategy=CcConfigureMakeRule=remote,sandboxed,local
 common:windows --test_env=SYSTEMROOT
 common:windows --test_env=COMSPEC
 common:windows --test_env=WINDIR
-# Rust's libtest harness runs test bodies on std-spawned threads. The default
-# 2 MiB stack can be too small for large async test futures on Windows CI; see
-# https://github.com/openai/codex/pull/19067 for the motivating failure.
-common --test_env=RUST_MIN_STACK=8388608 # 8 MiB
+# Rust's libtest harness runs test bodies on std-spawned threads. Keep this in
+# sync with the repository test runner for large async test futures.
+common --test_env=RUST_MIN_STACK=33554432 # 32 MiB
 
 common --test_output=errors
 common --nobuild_runfile_links

@@ -144,7 +144,13 @@ impl McpServerConnection {
     }
 
     fn cancel_startup(&self) {
-        if !self.startup_is_dormant() && !self.client.startup_complete.load(Ordering::Acquire) {
+        // Deferred connections outlive the turn that first demands them. Turn
+        // interruption may drop that waiter, but shutdown still owns their
+        // cancellation through `AsyncManagedClient::shutdown`.
+        if self.startup_trigger.is_some() || self.client.lazy_startup {
+            return;
+        }
+        if !self.client.startup_complete.load(Ordering::Acquire) {
             self.client.cancel_token.cancel();
         }
     }

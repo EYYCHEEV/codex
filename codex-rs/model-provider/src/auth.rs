@@ -140,13 +140,15 @@ struct AuthManagerAuthProvider {
 
 impl AuthManagerAuthProvider {
     fn is_expected_auth(&self, auth: &CodexAuth) -> bool {
+        let binding_auth_mode_matches = self.expected_binding.auth_mode == auth.auth_mode()
+            || self.expected_binding.auth_mode == auth.api_auth_mode();
         if !(auth.uses_codex_backend()
             && auth.get_account_id() == self.expected_auth.get_account_id()
             && auth.get_chatgpt_user_id() == self.expected_auth.get_chatgpt_user_id()
             && auth.is_workspace_account() == self.expected_auth.is_workspace_account()
             && auth.get_account_id() == self.expected_binding.raw_account_id
             && auth.is_fedramp_account() == self.expected_binding.fedramp
-            && auth.auth_mode() == self.expected_binding.auth_mode)
+            && binding_auth_mode_matches)
         {
             return false;
         }
@@ -665,6 +667,31 @@ mod tests {
         let actual = auth_provider_from_auth(&auth).to_auth_headers();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn auth_manager_provider_accepts_external_chatgpt_transport_binding() {
+        let auth = CodexAuth::from_external_chatgpt_tokens(
+            TEST_CHATGPT_ID_TOKEN,
+            "account-123",
+            /*chatgpt_plan_type*/ None,
+        )
+        .expect("external ChatGPT auth");
+        let auth_manager = AuthManager::from_auth_for_testing(auth.clone());
+        let provider = auth_provider_from_auth_manager(
+            auth_manager,
+            &auth,
+            TransportAuthBinding::for_nonmanaged_auth(Some(&auth)),
+            /*expected_credential_revision*/ None,
+        );
+
+        assert_eq!(
+            provider.to_auth_headers().get(AUTHORIZATION),
+            Some(
+                &HeaderValue::from_str(&format!("Bearer {TEST_CHATGPT_ID_TOKEN}"))
+                    .expect("test token should be a valid header value")
+            )
+        );
     }
 
     #[test]

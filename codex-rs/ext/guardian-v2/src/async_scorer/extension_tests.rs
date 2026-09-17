@@ -60,6 +60,7 @@ use core_test_support::responses;
 use core_test_support::responses::WebSocketConnectionConfig;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
@@ -97,6 +98,11 @@ const TEST_CATALOG_GUARDIAN_POLICY: &str =
     "Require review before sending organization data to third-party services.";
 const ASYNC_TEST_TIMEOUT: Duration = Duration::from_secs(30);
 const PREWARM_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn websocket_address(uri: &str) -> &str {
+    uri.trim_start_matches("ws://")
+        .trim_start_matches("http://")
+}
 
 struct RefreshableAuth(std::sync::Mutex<&'static str>);
 
@@ -139,7 +145,7 @@ async fn installed_extension_warms_connections_without_blocking_thread_start() -
     let mut config = test.config.clone();
     config.model_provider = ModelProviderInfo::create_openai_provider(Some(format!(
         "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
+        websocket_address(server.uri())
     )));
     config.features.enable(Feature::GuardianV2)?;
     let mut builder = ExtensionRegistryBuilder::new();
@@ -189,6 +195,7 @@ async fn installed_extension_uses_http_after_warm_socket_auth_expires() -> Resul
         .build_with_auto_env(&thread_server)
         .await?;
     let events = vec![
+        ev_response_created("response-1"),
         ev_assistant_message("sample", "low"),
         ev_completed("response-1"),
     ];
@@ -884,13 +891,17 @@ async fn sample_configured_conversation_history_with_source(
         "output_tokens_details": {"reasoning_tokens": 10},
         "total_tokens": 150,
     });
-    let events = vec![ev_assistant_message("sample", "high"), completed];
+    let events = vec![
+        ev_response_created("response-1"),
+        ev_assistant_message("sample", "high"),
+        completed,
+    ];
     let mut connections = vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS - 1];
     connections.push(vec![events]);
     let server = responses::start_websocket_server(connections).await;
     let provider_info = ModelProviderInfo::create_openai_provider(Some(format!(
         "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
+        websocket_address(server.uri())
     )));
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-api-key"));
     let mut config = test.config.clone();
@@ -1207,6 +1218,7 @@ async fn contributor_fails_closed_when_luna_classification_fails() -> Result<()>
 
     let fixture = GuardianFailureFixture::new().await?;
     let invalid_score = vec![
+        ev_response_created("response-invalid"),
         ev_assistant_message("sample", "invalid"),
         ev_completed("response-invalid"),
     ];
@@ -1216,7 +1228,7 @@ async fn contributor_fails_closed_when_luna_classification_fails() -> Result<()>
     let mut config = fixture.test.config.clone();
     config.model_provider = ModelProviderInfo::create_openai_provider(Some(format!(
         "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
+        websocket_address(server.uri())
     )));
     config.features.enable(Feature::GuardianV2)?;
     fixture.registry.thread_lifecycle_contributors()[0]
@@ -2175,7 +2187,7 @@ async fn contributor_skips_required_models_in_standard_scope() -> Result<()> {
         responses::start_websocket_server(vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS]).await;
     let provider_info = ModelProviderInfo::create_openai_provider(Some(format!(
         "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
+        websocket_address(server.uri())
     )));
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-api-key"));
     let mut config = test.config.clone();
@@ -2927,6 +2939,7 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
         .build_with_auto_env(&thread_server)
         .await?;
     let events = vec![
+        ev_response_created("response-1"),
         ev_assistant_message("sample", "low"),
         ev_completed("response-1"),
     ];
@@ -2935,7 +2948,7 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
     let server = responses::start_websocket_server(connections).await;
     let provider_info = ModelProviderInfo::create_openai_provider(Some(format!(
         "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
+        websocket_address(server.uri())
     )));
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test-api-key"));
     let mut config = test.config.clone();

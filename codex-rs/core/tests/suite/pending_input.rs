@@ -1502,6 +1502,7 @@ async fn steered_user_input_waits_for_model_continuation_after_mid_turn_compact(
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.model_provider.name = "OpenAI (test)".to_string();
+            config.model_provider.requires_openai_auth = false;
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);
         })
@@ -1587,6 +1588,7 @@ async fn steered_user_input_follows_compact_when_only_the_steer_needs_follow_up(
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.model_provider.name = "OpenAI (test)".to_string();
+            config.model_provider.requires_openai_auth = false;
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);
         })
@@ -1704,6 +1706,7 @@ async fn steered_user_input_waits_when_tool_output_triggers_compact_before_next_
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.model_provider.name = "OpenAI (test)".to_string();
+            config.model_provider.requires_openai_auth = false;
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);
         })

@@ -25,6 +25,7 @@ use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_model_verification_metadata;
 use core_test_support::responses::ev_output_text_delta;
+use core_test_support::responses::ev_response_created;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -140,6 +141,11 @@ async fn proxy_websocket_servers_with_prewarm_limit(
     proxy_websocket_servers_with_http(servers, prewarm_limit, /*http_url*/ None).await
 }
 
+fn websocket_address(uri: &str) -> &str {
+    uri.trim_start_matches("ws://")
+        .trim_start_matches("http://")
+}
+
 pub(in crate::async_scorer) async fn proxy_websocket_servers_with_http(
     servers: &[&responses::WebSocketTestServer],
     prewarm_limit: ProxyPrewarmLimit,
@@ -149,7 +155,7 @@ pub(in crate::async_scorer) async fn proxy_websocket_servers_with_http(
     let address = listener.local_addr()?;
     let targets = servers
         .iter()
-        .map(|server| server.uri().trim_start_matches("ws://").to_owned())
+        .map(|server| websocket_address(server.uri()).to_owned())
         .collect::<Vec<_>>();
     let http_target = http_url.map(|url| url.trim_start_matches("http://").to_owned());
     tokio::spawn(async move {
@@ -272,6 +278,7 @@ async fn sampler_records_token_usage_after_returning_an_early_classification() -
     skip_if_no_network!(Ok(()));
 
     let events = vec![
+        ev_response_created("response-1"),
         ev_output_text_delta("low"),
         ev_completed_with_tokens("response-1", /*total_tokens*/ 37),
     ];
@@ -279,10 +286,7 @@ async fn sampler_records_token_usage_after_returning_an_early_classification() -
     connections.push(vec![events]);
     let server = responses::start_websocket_server(connections).await;
     let metrics = Arc::new(RecordingMetrics::default());
-    let mut config = sampler_config(format!(
-        "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
-    ));
+    let mut config = sampler_config(format!("http://{}/v1", websocket_address(server.uri())));
     config.metrics = Some(metrics.clone());
     let sampler = connect_sampler(config).await?;
 
@@ -397,16 +401,14 @@ async fn classifier_uses_free_endpoint_only_with_codex_backend_auth() -> Result<
         ),
     ] {
         let events = vec![
+            ev_response_created("response-1"),
             ev_assistant_message("classification", "low"),
             ev_completed("response-1"),
         ];
         let mut connections = vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS - 1];
         connections.push(vec![events]);
         let server = responses::start_websocket_server(connections).await;
-        let base_url = format!(
-            "http://{}{base_path}",
-            server.uri().trim_start_matches("ws://")
-        );
+        let base_url = format!("http://{}{base_path}", websocket_address(server.uri()));
         let mut config = sampler_config(base_url.clone());
         config.provider = create_model_provider(
             ModelProviderInfo::create_openai_provider(Some(base_url)),
@@ -443,12 +445,14 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
 
     let scripted_requests = vec![
         vec![
+            ev_response_created("response-1"),
             ev_output_text_delta("low"),
             ev_model_verification_metadata("response-1", vec!["trusted_access_for_cyber"]),
             ev_assistant_message("sample-1", "low"),
             ev_completed("response-1"),
         ],
         vec![
+            ev_response_created("response-2"),
             ev_assistant_message("sample-2", "high"),
             ev_completed("response-2"),
         ],
@@ -457,6 +461,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
     let refreshed = responses::start_websocket_server(vec![vec![
         scripted_requests[1].clone(),
         vec![
+            ev_response_created("response-3"),
             ev_assistant_message("sample-3", "low"),
             ev_completed("response-3"),
         ],
@@ -637,16 +642,14 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
         (Some(""), Some(""), false),
     ] {
         let events = vec![
+            ev_response_created("response-1"),
             ev_assistant_message("sample", "low"),
             ev_completed("response-1"),
         ];
         let mut connections = vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS - 1];
         connections.push(vec![events.clone(), events]);
         let server = responses::start_websocket_server(connections).await;
-        let mut config = sampler_config(format!(
-            "http://{}/v1",
-            server.uri().trim_start_matches("ws://")
-        ));
+        let mut config = sampler_config(format!("http://{}/v1", websocket_address(server.uri())));
         config.luna_compaction_hash = luna_hash.map(str::to_owned);
         let sampler = connect_sampler(config).await?;
         let parent_compaction = ResponseItem::Compaction {
@@ -711,7 +714,10 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
     skip_if_no_network!(Ok(()));
 
     let config = WebSocketConnectionConfig {
-        requests: vec![vec![ev_output_text_delta("low")]],
+        requests: vec![vec![
+            ev_response_created("response-1"),
+            ev_output_text_delta("low"),
+        ]],
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
@@ -769,6 +775,7 @@ async fn sampler_keeps_first_classification_token_when_later_output_disagrees() 
     skip_if_no_network!(Ok(()));
 
     let events = vec![
+        ev_response_created("response-1"),
         ev_output_text_delta("low"),
         ev_output_text_delta("high"),
         ev_assistant_message("sample", "lowhigh"),
@@ -779,7 +786,7 @@ async fn sampler_keeps_first_classification_token_when_later_output_disagrees() 
     let server = responses::start_websocket_server(connections).await;
     let sampler = connect_sampler(sampler_config(format!(
         "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
+        websocket_address(server.uri())
     )))
     .await?;
 
@@ -793,6 +800,7 @@ async fn sampler_remains_available_when_second_prewarm_fails() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_websocket_server(vec![vec![vec![
+        ev_response_created("response-1"),
         ev_assistant_message("response-1", "low"),
         ev_completed("response-1"),
     ]]])
@@ -810,17 +818,23 @@ async fn sampler_replaces_scored_drains_before_unfinished_classifications() -> R
     skip_if_no_network!(Ok(()));
 
     let incomplete_response = WebSocketConnectionConfig {
-        requests: vec![vec![ev_output_text_delta("low")]],
+        requests: vec![vec![
+            ev_response_created("incomplete"),
+            ev_output_text_delta("low"),
+        ]],
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
     };
     let scored_response = WebSocketConnectionConfig {
-        requests: vec![vec![ev_assistant_message("scored", "low")]],
+        requests: vec![vec![
+            ev_response_created("scored"),
+            ev_assistant_message("scored", "low"),
+        ]],
         ..incomplete_response.clone()
     };
     let stalled_response = WebSocketConnectionConfig {
-        requests: vec![Vec::new()],
+        requests: vec![vec![ev_response_created("stalled")]],
         response_headers: Vec::new(),
         accept_delay: None,
         close_after_requests: false,
@@ -839,6 +853,7 @@ async fn sampler_replaces_scored_drains_before_unfinished_classifications() -> R
         ["low", "high"]
             .map(|score| {
                 responses::sse(vec![
+                    ev_response_created("overflow"),
                     ev_assistant_message("overflow", score),
                     ev_completed("overflow"),
                 ])
@@ -928,6 +943,7 @@ async fn sampler_retries_expired_websockets_on_another_warm_connection() -> Resu
     skip_if_no_network!(Ok(()));
 
     let healthy = responses::start_websocket_server(vec![vec![vec![
+        ev_response_created("response-1"),
         ev_assistant_message("response-1", "low"),
         ev_completed("response-1"),
     ]]])
@@ -998,6 +1014,7 @@ async fn sampler_uses_http_with_a_fresh_identity_when_warm_connections_expire() 
     skip_if_no_network!(Ok(()));
 
     let response = vec![
+        ev_response_created("response-1"),
         ev_assistant_message("response-1", "low"),
         ev_completed("response-1"),
     ];
@@ -1061,6 +1078,7 @@ async fn sampler_reconnects_after_transient_service_failures() -> Result<()> {
     let recovered = responses::mount_sse_once(
         &http,
         responses::sse(vec![
+            ev_response_created("recovered"),
             ev_assistant_message("recovered", "low"),
             ev_completed("recovered"),
         ]),
@@ -1146,6 +1164,7 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
     skip_if_no_network!(Ok(()));
     for free_guardian in [false, true] {
         let healthy = responses::start_websocket_server(vec![vec![vec![
+            ev_response_created("resp-review"),
             ev_assistant_message("resp-review", "low"),
             ev_completed("resp-review"),
         ]]])

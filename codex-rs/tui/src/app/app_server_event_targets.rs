@@ -193,6 +193,9 @@ pub(super) fn server_notification_thread_target(
                 None => return ServerNotificationThreadTarget::AppScoped,
             }
         }
+        ServerNotification::McpServerStartupComplete(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ProjectChanged(_)
         | ServerNotification::SkillsChanged(_)
         | ServerNotification::McpServerOauthLoginCompleted(_)
@@ -239,6 +242,7 @@ mod tests {
     use codex_app_server_protocol::AccountPoolUpdatedNotification;
     use codex_app_server_protocol::AccountSelectionUpdatedNotification;
     use codex_app_server_protocol::GuardianWarningNotification;
+    use codex_app_server_protocol::McpServerStartupCompleteNotification;
     use codex_app_server_protocol::McpServerStartupState;
     use codex_app_server_protocol::McpServerStatusUpdatedNotification;
     use codex_app_server_protocol::ServerNotification;
@@ -350,6 +354,22 @@ mod tests {
         let target = server_notification_thread_target(&notification);
 
         assert_eq!(target, ServerNotificationThreadTarget::AppScoped);
+    }
+
+    #[test]
+    fn mcp_startup_completion_routes_to_threads() {
+        let thread_id = ThreadId::new();
+        let notification =
+            ServerNotification::McpServerStartupComplete(McpServerStartupCompleteNotification {
+                thread_id: thread_id.to_string(),
+                ready: Vec::new(),
+                failed: Vec::new(),
+                cancelled: Vec::new(),
+            });
+
+        let target = server_notification_thread_target(&notification);
+
+        assert_eq!(target, ServerNotificationThreadTarget::Thread(thread_id));
     }
 
     #[test]

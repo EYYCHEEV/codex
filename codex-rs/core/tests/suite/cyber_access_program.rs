@@ -400,7 +400,12 @@ async fn cyber_access_program_changes_on_one_websocket_with_response_reuse() -> 
     let server = responses::start_websocket_server(vec![
         response_ids
             .iter()
-            .map(|id| vec![responses::ev_completed(id)])
+            .map(|id| {
+                vec![
+                    responses::ev_response_created(id),
+                    responses::ev_completed(id),
+                ]
+            })
             .collect(),
     ])
     .await;

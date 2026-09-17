@@ -75,6 +75,13 @@ fn contains_text(buffer: &Buffer, text: &str) -> bool {
         })
 }
 
+fn normalize_snapshot_version(rendered: String) -> String {
+    const SNAPSHOT_VERSION: &str = "0.0.0";
+    let version = crate::version::CODEX_CLI_VERSION;
+    let padding = " ".repeat(version.len().saturating_sub(SNAPSHOT_VERSION.len()));
+    rendered.replace(&format!("(v{version})"), &format!("(v<VERSION>){padding}"))
+}
+
 #[tokio::test]
 async fn external_writer_view_shows_notice_instead_of_composer() {
     let (mut widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
@@ -215,8 +222,8 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
                 .to_string()
         })
         .collect::<Vec<_>>()
-        .join("\n")
-        .replace(crate::version::CODEX_CLI_VERSION, "<VERSION>");
+        .join("\n");
+    let header = normalize_snapshot_version(header);
 
     let cwd = widget.config.cwd.as_path().display().to_string();
     let normalized_cwd = format!("{:<width$}", "/tmp/project", width = cwd.len());

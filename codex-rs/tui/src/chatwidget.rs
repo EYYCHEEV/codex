@@ -599,7 +599,6 @@ pub(crate) struct ChatWidget {
     status_account_display: Option<StatusAccountDisplay>,
     pending_managed_account_selection: Option<(String, Option<String>, u64)>,
     managed_account_updates_enabled: bool,
-    runtime_model_provider_base_url: Option<String>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     pub(crate) local_worktree_operations: bool,
     token_info: Option<TokenUsageInfo>,

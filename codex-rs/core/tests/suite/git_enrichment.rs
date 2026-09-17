@@ -22,6 +22,7 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::start_websocket_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::startup::STARTUP_TIMEOUT;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -137,7 +138,7 @@ async fn startup_prewarm_skips_git_enrichment_and_user_turn_observes_fresh_state
     let test = builder.build_with_websocket_server(&server).await?;
 
     let prewarm = tokio::time::timeout(
-        Duration::from_secs(5),
+        STARTUP_TIMEOUT,
         server.wait_for_request(/*connection_index*/ 0, /*request_index*/ 0),
     )
     .await?
@@ -270,7 +271,7 @@ async fn guardian_prewarm_and_review_skip_redundant_git_enrichment() -> Result<(
         });
     let test = builder.build_with_websocket_server(&server).await?;
 
-    let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
+    let (first, second) = tokio::time::timeout(STARTUP_TIMEOUT, async {
         tokio::join!(
             server.wait_for_request(/*connection_index*/ 0, /*request_index*/ 0),
             server.wait_for_request(/*connection_index*/ 1, /*request_index*/ 0)
@@ -368,7 +369,7 @@ async fn ephemeral_system_thread_prewarm_skips_and_turn_observes_fresh_state(
         });
     let test = builder.build_with_websocket_server(&server).await?;
     tokio::time::timeout(
-        Duration::from_secs(5),
+        STARTUP_TIMEOUT,
         server.wait_for_request(/*connection_index*/ 0, /*request_index*/ 0),
     )
     .await?;
@@ -383,7 +384,7 @@ async fn ephemeral_system_thread_prewarm_skips_and_turn_observes_fresh_state(
         })
         .await?;
     let prewarm = tokio::time::timeout(
-        Duration::from_secs(5),
+        STARTUP_TIMEOUT,
         server.wait_for_request(/*connection_index*/ 1, /*request_index*/ 0),
     )
     .await?
@@ -518,7 +519,7 @@ async fn concurrent_turns_keep_distinct_worktree_and_repository_metadata() -> Re
         })
         .await?;
 
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(STARTUP_TIMEOUT, async {
         tokio::join!(
             server.wait_for_request(/*connection_index*/ 0, /*request_index*/ 0),
             server.wait_for_request(/*connection_index*/ 1, /*request_index*/ 0),

@@ -141,9 +141,15 @@ async fn backend_banner_state_survives_widget_replacement() -> Result<()> {
             Box::new(PlainHistoryCell::new(Vec::new())),
         );
         app.chat_widget.pre_draw_tick();
-        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 90), before);
+        let after = render_bottom_popup(&app.chat_widget, /*width*/ 90);
+        assert!(!after.contains("View usage"));
+        if dismiss {
+            assert_eq!(after, before);
+        } else {
+            assert_ne!(after, before);
+        }
         app.chat_widget.update_backend_banner(&response);
-        assert_eq!(render_bottom_popup(&app.chat_widget, /*width*/ 90), before);
+        assert!(render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("View usage"));
         response.rate_limit_upsell = None;
         app.chat_widget.update_backend_banner(&response);
         assert!(!render_bottom_popup(&app.chat_widget, /*width*/ 90).contains("View usage"));

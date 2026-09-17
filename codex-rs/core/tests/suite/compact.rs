@@ -1304,6 +1304,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         .with_pre_build_hook(allow_echo_commands)
         .with_config(move |config| {
             config.model_provider.name = non_openai_provider_name;
+            config.model_provider.requires_openai_auth = false;
         })
         .build(&server)
         .await

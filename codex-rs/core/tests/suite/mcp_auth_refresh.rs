@@ -1,7 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 use anyhow::Result;
+use codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID;
+use codex_config::McpServerConfig;
 use codex_config::McpServerTransportConfig;
+use codex_core::TurnInputRequest;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::Constrained;
 use codex_core::plugins_manager_for_config;
@@ -21,15 +24,23 @@ use codex_mcp::McpStartupPolicy;
 use codex_mcp::McpToolCatalogCache;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::user_input::UserInput;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
+use core_test_support::wait_for_mcp_server;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 // Installs a known snapshot through AuthManager's public external-auth path.
@@ -168,5 +179,137 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
         Some("Bearer header.e30.reloaded")
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sampled_mcp_call_uses_the_step_binding_after_runtime_refresh() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let initial_mcp_server = start_mock_server().await;
+    let initial_apps_server = AppsTestServer::mount(&initial_mcp_server).await?;
+    let refreshed_mcp_server = start_mock_server().await;
+    let refreshed_apps_server = AppsTestServer::mount(&refreshed_mcp_server).await?;
+    let (release_tool_call, tool_call_gate) = oneshot::channel();
+    let (responses_server, _) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: core_test_support::responses::sse(vec![
+                    core_test_support::responses::ev_response_created("resp-1"),
+                ]),
+            },
+            StreamingSseChunk {
+                gate: Some(tool_call_gate),
+                body: core_test_support::responses::sse(vec![
+                    core_test_support::responses::ev_function_call_with_namespace(
+                        "sampled-call",
+                        "mcp__binding",
+                        "calendar_list_events",
+                        r#"{"query":"sampled binding"}"#,
+                    ),
+                    core_test_support::responses::ev_completed("resp-1"),
+                ]),
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: core_test_support::responses::sse(vec![
+                core_test_support::responses::ev_assistant_message("msg-1", "done"),
+                core_test_support::responses::ev_completed("resp-2"),
+            ]),
+        }],
+    ])
+    .await;
+    let initial_server_config: McpServerConfig = serde_json::from_value(json!({
+        "url": format!(
+            "{}/api/codex/ps/mcp",
+            initial_apps_server.chatgpt_base_url
+        ),
+        "environment_id": DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+    }))?;
+    let fixture = test_codex()
+        .with_config(move |config| {
+            config
+                .mcp_servers
+                .set([("binding".to_string(), initial_server_config)].into())
+                .expect("test config should allow the MCP server");
+        })
+        .build_with_streaming_server(&responses_server)
+        .await?;
+    wait_for_mcp_server(&fixture.codex, "binding").await?;
+
+    fixture
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "List calendar events.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    responses_server.wait_for_request_count(/*count*/ 1).await;
+
+    let refreshed_server_config: McpServerConfig = serde_json::from_value(json!({
+        "url": format!(
+            "{}/api/codex/ps/mcp",
+            refreshed_apps_server.chatgpt_base_url
+        ),
+        "environment_id": DEFAULT_MCP_SERVER_ENVIRONMENT_ID,
+    }))?;
+    let mut refreshed_config = fixture.config.clone();
+    refreshed_config
+        .mcp_servers
+        .set([("binding".to_string(), refreshed_server_config)].into())?;
+    fixture.codex.refresh_runtime_config(refreshed_config).await;
+    fixture
+        .codex
+        .call_mcp_tool(
+            "binding",
+            "calendar_list_events",
+            Some(json!({"query": "runtime refresh"})),
+            /*meta*/ None,
+        )
+        .await?;
+
+    release_tool_call
+        .send(())
+        .expect("sampled tool call should still be waiting");
+    wait_for_event(&fixture.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let initial_queries = initial_mcp_server
+        .received_requests()
+        .await
+        .expect("initial MCP server should record requests")
+        .into_iter()
+        .filter_map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).ok()?;
+            (body.get("method").and_then(Value::as_str) == Some("tools/call")).then(|| {
+                body.pointer("/params/arguments/query")?
+                    .as_str()
+                    .map(str::to_string)
+            })?
+        })
+        .collect::<Vec<_>>();
+    let refreshed_queries = refreshed_mcp_server
+        .received_requests()
+        .await
+        .expect("refreshed MCP server should record requests")
+        .into_iter()
+        .filter_map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).ok()?;
+            (body.get("method").and_then(Value::as_str) == Some("tools/call")).then(|| {
+                body.pointer("/params/arguments/query")?
+                    .as_str()
+                    .map(str::to_string)
+            })?
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(initial_queries, vec!["sampled binding"]);
+    assert_eq!(refreshed_queries, vec!["runtime refresh"]);
+
+    fixture.codex.shutdown_and_wait().await?;
+    responses_server.shutdown().await;
     Ok(())
 }

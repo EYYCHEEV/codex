@@ -3,6 +3,7 @@ use crate::agent::next_thread_spawn_depth;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::image_preparation::unified_image_budget_enabled;
 use crate::session::session::Session;
+use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::code_mode::execute_spec::create_code_mode_tool;
 use crate::tools::context::ToolInvocation;
@@ -1305,7 +1306,8 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
                         available_models: turn_context.available_models.clone(),
                         agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                        expose_agent_type: !turn_context.config.agent_roles_configured_only
+                            || !turn_context.config.agent_roles.is_empty(),
                         hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
                         expose_spawn_agent_model_overrides: turn_context
                             .config
@@ -1509,8 +1511,8 @@ impl ToolExecutor<ToolInvocation> for MultiAgentV2NamespaceOverride {
 }
 
 impl CoreToolRuntime for MultiAgentV2NamespaceOverride {
-    fn wait_until_ready<'a>(&'a self, session: &'a Arc<Session>) -> Option<BoxFuture<'a, ()>> {
-        self.handler.wait_until_ready(session)
+    fn wait_until_ready(&self, step_context: Arc<StepContext>) -> Option<BoxFuture<'static, ()>> {
+        self.handler.wait_until_ready(step_context)
     }
 
     fn matches_kind(&self, payload: &crate::tools::context::ToolPayload) -> bool {
