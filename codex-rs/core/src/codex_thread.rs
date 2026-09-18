@@ -796,10 +796,12 @@ impl CodexThread {
                 turn_context = self.session.new_default_turn().await;
             }
             // This history-only API runs without run_turn, so it owns its initial step.
-            let step_context = self
-                .session
-                .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
-                .await?;
+            // Keep the step-capture future out of every injection caller's async frame.
+            let step_context = Box::pin(
+                self.session
+                    .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new()),
+            )
+            .await?;
             self.session
                 .record_context_updates_and_set_reference_context_item(step_context.as_ref())
                 .await?;

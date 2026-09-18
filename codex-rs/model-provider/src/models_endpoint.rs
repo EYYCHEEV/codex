@@ -2,6 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use codex_api::AgentIdentityTelemetry;
@@ -58,6 +59,14 @@ pub(crate) struct OpenAiModelsEndpoint {
     auth_manager: Option<Arc<AuthManager>>,
     gateway_auth_manager: Option<Result<Arc<GatewayAuthManager>, String>>,
     transport_builder: Arc<dyn ModelsTransportBuilder>,
+    managed_identity: Mutex<Option<ManagedModelsIdentity>>,
+}
+
+/// Bind upstream's catalog identity to the selected request, invalidating it on pool changes.
+#[derive(Debug)]
+struct ManagedModelsIdentity {
+    auth_revision: u64,
+    identity: String,
 }
 
 impl OpenAiModelsEndpoint {
@@ -75,12 +84,17 @@ impl OpenAiModelsEndpoint {
             provider_info,
             auth_manager,
             gateway_auth_manager,
+            managed_identity: Mutex::default(),
             transport_builder: Arc::new(RouteAwareModelsTransportBuilder { redirect_policy }),
         }
     }
 
     async fn request_setup(&self) -> CoreResult<crate::provider::ProviderRequestSetup> {
-        resolve_provider_request_setup(
+        let auth_revision = self
+            .auth_manager
+            .as_ref()
+            .map(|manager| *manager.auth_change_receiver().borrow());
+        let setup = resolve_provider_request_setup(
             self.auth_manager.clone(),
             &self.provider_info,
             ProviderAuthScope {
@@ -92,7 +106,28 @@ impl OpenAiModelsEndpoint {
                 model: None,
             },
         )
-        .await
+        .await?;
+        let identity = if setup.managed_snapshot.is_some() {
+            auth_revision
+                .map(|auth_revision| {
+                    crate::models_identity::identity(
+                        &self.provider_info,
+                        setup.effective_auth.as_ref(),
+                    )
+                    .map(|identity| ManagedModelsIdentity {
+                        auth_revision,
+                        identity,
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        *self
+            .managed_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+        Ok(setup)
     }
 
     async fn uses_codex_backend(&self) -> bool {
@@ -267,6 +302,15 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
     }
 
     fn identity(&self) -> Option<String> {
+        if let Some(selected) = self
+            .managed_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            let current_revision = *self.auth_manager.as_ref()?.auth_change_receiver().borrow();
+            return (selected.auth_revision == current_revision).then(|| selected.identity.clone());
+        }
         let auth = self
             .auth_manager
             .as_ref()
@@ -442,6 +486,10 @@ impl RequestTelemetry for ModelsRequestTelemetry {
 mod timeout_tests;
 
 #[cfg(test)]
+#[path = "models_endpoint_pool_tests.rs"]
+mod pool_tests;
+
+#[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
     use std::sync::Mutex;
@@ -538,6 +586,7 @@ mod tests {
                 auth_manager: Some(auth.clone()),
                 gateway_auth_manager: None,
                 transport_builder: capture.clone(),
+                managed_identity: Mutex::default(),
             });
             let manager = OpenAiModelsManager::new_without_cache(endpoint.clone(), Some(auth));
             manager.set_api_key_model_discovery_enabled(/*enabled*/ true);
@@ -666,6 +715,7 @@ mod tests {
             transport_builder: Arc::new(RecordingTransportBuilder {
                 observed_request: Arc::clone(&observed_request),
             }),
+            managed_identity: Mutex::default(),
         };
 
         endpoint
@@ -712,6 +762,7 @@ mod tests {
             transport_builder: Arc::new(RecordingTransportBuilder {
                 observed_request: Arc::new(Mutex::new(None)),
             }),
+            managed_identity: Mutex::default(),
         };
 
         set_default_client_residency_requirement(Some(ResidencyRequirement::Us));

@@ -2254,10 +2254,26 @@ async fn assert_incomplete_output_replays_once_over_http(
         .await
         .expect("submit turn");
     let reset = wait_for_event(&test.codex, |msg| {
-        matches!(msg, EventMsg::ResponseAttemptReset(_))
+        matches!(
+            msg,
+            EventMsg::ResponseAttemptReset(_) | EventMsg::Error(_) | EventMsg::TurnComplete(_)
+        )
     })
     .await;
-    assert!(matches!(reset, EventMsg::ResponseAttemptReset(_)));
+    assert!(
+        matches!(reset, EventMsg::ResponseAttemptReset(_)),
+        "expected reset, got {reset:?}; request warmup flags: {:?}",
+        server
+            .connections()
+            .iter()
+            .map(|requests| {
+                requests
+                    .iter()
+                    .map(|request| request.body_json().get("generate").cloned())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+    );
     let replacement = wait_for_event(&test.codex, |msg| {
         matches!(msg, EventMsg::AgentMessage(event) if event.message == "complete HTTPS replacement")
     })
@@ -2500,23 +2516,20 @@ async fn responses_websocket_partial_output_attempts_http_replacement_once() {
     })
     .await;
 
-    if tokio::time::timeout(Duration::from_secs(5), async {
-        while server.http_requests().is_empty() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+    // Observe the replacement's terminal failure instead of using a short wall-clock
+    // window that includes host-dependent client initialization. A second reset or a
+    // successful completion would mean the scripted failure was incorrectly replayed.
+    let terminal = wait_for_event(&test.codex, |msg| {
+        matches!(
+            msg,
+            EventMsg::ResponseAttemptReset(_) | EventMsg::Error(_) | EventMsg::TurnComplete(_)
+        )
     })
-    .await
-    .is_err()
-    {
-        let websocket_requests = server.single_connection().len();
-        let handshakes = server.handshakes().len();
-        server.shutdown().await;
-        panic!(
-            "first HTTPS replacement request timed out after {handshakes} handshakes and {websocket_requests} websocket requests"
-        );
-    }
-    tokio::time::sleep(Duration::from_secs(1)).await;
-
+    .await;
+    assert!(
+        matches!(&terminal, EventMsg::Error(error) if error.message.contains("temporary failure")),
+        "expected terminal replacement failure, got {terminal:?}"
+    );
     assert_eq!(server.http_requests().len(), 1);
     server.shutdown().await;
 }
@@ -2645,12 +2658,19 @@ async fn responses_websocket_zero_retry_budget_does_not_fallback_to_http() {
         }]))
         .await
         .expect("submit turn");
-    wait_for_event(&test.codex, |msg| matches!(msg, EventMsg::Error(_))).await;
+    let error = wait_for_event(&test.codex, |msg| {
+        matches!(msg, EventMsg::Error(_) | EventMsg::TurnComplete(_))
+    })
+    .await;
+    assert!(
+        matches!(error, EventMsg::Error(_)),
+        "expected terminal error, got {error:?}"
+    );
     test.codex.flush_rollout().await.expect("flush rollout");
 
     let diagnostics =
         websocket_close_diagnostics(&test.codex.rollout_path().expect("rollout path"));
-    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics.len(), 1, "terminal error: {error:?}");
     assert_eq!(diagnostics[0].1.close_code, None);
     assert_eq!(diagnostics[0].1.close_reason, None);
     assert_eq!(

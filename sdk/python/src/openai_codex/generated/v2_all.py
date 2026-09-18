@@ -628,6 +628,14 @@ class CodexResponseHandoffMode(Enum):
     bem_tags = "bemTags"
 
 
+class CollabAgentMetadata(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    agent_nickname: Annotated[str | None, Field(alias="agentNickname")] = None
+    agent_role: Annotated[str | None, Field(alias="agentRole")] = None
+
+
 class CollabAgentStatus(Enum):
     pending_init = "pendingInit"
     running = "running"
@@ -2205,6 +2213,32 @@ class LegacyAppPathString(RootModel[str]):
     root: str
 
 
+class ListAccountsParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    model: Annotated[
+        str | None, Field(description="Model used when computing a scoped account selection.")
+    ] = None
+    refresh_tokens: Annotated[
+        bool | None,
+        Field(
+            alias="refreshTokens",
+            description="Refresh due managed OAuth tokens before returning the list.",
+        ),
+    ] = None
+    refresh_usage: Annotated[
+        bool | None,
+        Field(alias="refreshUsage", description="Refresh account usage before returning the list."),
+    ] = None
+    thread_id: Annotated[
+        str | None,
+        Field(
+            alias="threadId", description="Selects the account pinned to this thread when present."
+        ),
+    ] = None
+
+
 class ExecLocalShellAction(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -2390,11 +2424,108 @@ class LoginAppBrand(Enum):
     chatgpt = "chatgpt"
 
 
-class LogoutAccountResponse(BaseModel):
-    pass
+class LogoutAccountParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    account_id: Annotated[str | None, Field(alias="accountId")] = None
+    all: bool | None = None
+
+
+class ManagedChatgptAccountBlock(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    blocked_until: Annotated[
+        int | None,
+        Field(
+            alias="blockedUntil",
+            description="Unix timestamp in seconds when the cooldown expires. `null` means the block has no known automatic expiry.",
+        ),
+    ] = None
+    reason: Annotated[
+        str,
+        Field(
+            description="Stable machine-readable classification supplied by the account-pool owner."
+        ),
+    ]
+
+
+class HealthyManagedChatgptAccountRefreshStatus(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[
+        Literal["healthy"], Field(title="HealthyManagedChatgptAccountRefreshStatusType")
+    ]
+
+
+class TransientUnavailableManagedChatgptAccountRefreshStatus(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    observed_at: Annotated[
+        int,
+        Field(
+            alias="observedAt",
+            description="Unix timestamp in seconds when the refresh outcome was observed.",
+        ),
+    ]
+    type: Annotated[
+        Literal["transientUnavailable"],
+        Field(title="TransientUnavailableManagedChatgptAccountRefreshStatusType"),
+    ]
+
+
+class ReloginRequiredManagedChatgptAccountRefreshStatus(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    observed_at: Annotated[
+        int,
+        Field(
+            alias="observedAt",
+            description="Unix timestamp in seconds when the refresh outcome was observed.",
+        ),
+    ]
+    reason_code: Annotated[
+        str,
+        Field(
+            alias="reasonCode",
+            description="Stable machine-readable classification; never raw backend text.",
+        ),
+    ]
+    type: Annotated[
+        Literal["reloginRequired"],
+        Field(title="ReloginRequiredManagedChatgptAccountRefreshStatusType"),
+    ]
+
+
+class ManagedChatgptAccountRefreshStatus(
+    RootModel[
+        HealthyManagedChatgptAccountRefreshStatus
+        | TransientUnavailableManagedChatgptAccountRefreshStatus
+        | ReloginRequiredManagedChatgptAccountRefreshStatus
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: Annotated[
+        HealthyManagedChatgptAccountRefreshStatus
+        | TransientUnavailableManagedChatgptAccountRefreshStatus
+        | ReloginRequiredManagedChatgptAccountRefreshStatus,
+        Field(
+            description="Outcome of the most recent managed OAuth token refresh.\n\nThis is intentionally separate from selection eligibility, account blocks, and usage freshness. Failure variants contain only stable, non-secret metadata and never carry backend error text."
+        ),
+    ]
+
+
+class ManagedChatgptAccountUsageState(Enum):
+    unknown = "unknown"
+    fresh = "fresh"
+    stale = "stale"
+    unavailable = "unavailable"
 
 
 class ManagedHooksRequirements(BaseModel):
@@ -4521,6 +4652,24 @@ class McpServerEventStreamNotificationServerNotification(BaseModel):
     params: McpServerEventStreamNotification
 
 
+class AccountSelectionUpdatedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["account/selection/updated"],
+        Field(title="Account/selection/updatedNotificationMethod"),
+    ]
+    params: AccountSelectionUpdatedNotification
+
+
 class RemoteControlStatusChangedServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5393,8 +5542,11 @@ class SubAgentActivityThreadItem(BaseModel):
     )
     agent_path: Annotated[str, Field(alias="agentPath")]
     agent_thread_id: Annotated[str, Field(alias="agentThreadId")]
+    agent_type: Annotated[str | None, Field(alias="agentType")] = None
     id: str
     kind: SubAgentActivityKind
+    model: str | None = None
+    reasoning_effort: Annotated[ReasoningEffort | None, Field(alias="reasoningEffort")] = None
     type: Annotated[Literal["subAgentActivity"], Field(title="SubAgentActivityThreadItemType")]
 
 
@@ -6301,6 +6453,14 @@ class TurnPlanStepStatus(Enum):
     completed = "completed"
 
 
+class TurnResponseAttemptResetNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    thread_id: Annotated[str, Field(alias="threadId")]
+    turn_id: Annotated[str, Field(alias="turnId")]
+
+
 class TurnStatus(Enum):
     completed = "completed"
     interrupted = "interrupted"
@@ -6615,6 +6775,13 @@ class AccountLoginCompletedNotification(BaseModel):
     )
     error: str | None = None
     login_id: Annotated[str | None, Field(alias="loginId")] = None
+    managed_account_id: Annotated[
+        str | None,
+        Field(
+            alias="managedAccountId",
+            description="Stable managed OAuth identity, or `null` for API-key and externally managed login.",
+        ),
+    ] = None
     onboarding_entrypoint: Annotated[
         DesktopOnboardingEntrypoint | None, Field(alias="onboardingEntrypoint")
     ] = None
@@ -7452,13 +7619,22 @@ class AccountLoginCancelRequest(BaseModel):
     params: CancelLoginAccountParams
 
 
+class AccountListRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[Literal["account/list"], Field(title="Account/listRequestMethod")]
+    params: ListAccountsParams
+
+
 class AccountLogoutRequest(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
     id: RequestId
     method: Annotated[Literal["account/logout"], Field(title="Account/logoutRequestMethod")]
-    params: None = None
+    params: LogoutAccountParams | None = None
 
 
 class AccountRateLimitsReadRequest(BaseModel):
@@ -8551,6 +8727,17 @@ class McpResourceReadResponse(BaseModel):
     ] = None
 
 
+class McpServerStartupFailure(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    error: str
+    failure_reason: Annotated[
+        McpServerStartupFailureReason | None, Field(alias="failureReason")
+    ] = None
+    name: str
+
+
 class McpServerStatus(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9265,6 +9452,24 @@ class AutoApprovalReviewStrictReviewRequiredServerNotification(BaseModel):
     params: StrictReviewRequiredNotification
 
 
+class TurnResponseAttemptResetServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["turn/responseAttempt/reset"],
+        Field(title="Turn/responseAttempt/resetNotificationMethod"),
+    ]
+    params: TurnResponseAttemptResetNotification
+
+
 class CommandExecOutputDeltaServerNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9873,6 +10078,13 @@ class CollabAgentToolCallThreadItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    agents_metadata: Annotated[
+        dict[str, CollabAgentMetadata] | None,
+        Field(
+            alias="agentsMetadata",
+            description="Human-friendly metadata for target agents, keyed by receiver thread ID.",
+        ),
+    ] = {}
     agents_states: Annotated[
         dict[str, CollabAgentState],
         Field(
@@ -10381,6 +10593,21 @@ class AccountRateLimitsUpdatedNotification(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    account_revision: Annotated[
+        int | None,
+        Field(
+            alias="accountRevision",
+            description="Managed account row revision, or `null` for every non-pooled auth mode.",
+            ge=0,
+        ),
+    ] = None
+    managed_account_id: Annotated[
+        str | None,
+        Field(
+            alias="managedAccountId",
+            description="Stable managed OAuth identity, or `null` for every non-pooled auth mode.",
+        ),
+    ] = None
     rate_limits: Annotated[RateLimitSnapshot, Field(alias="rateLimits")]
 
 
@@ -10578,43 +10805,6 @@ class ComputerUseConfig(BaseModel):
     windows: ComputerUseWindowsConfig | None = None
 
 
-class Config(BaseModel):
-    model_config = ConfigDict(
-        extra="allow",
-        populate_by_name=True,
-    )
-    analytics: AnalyticsConfig | None = None
-    approval_policy: AskForApproval | None = None
-    approvals_reviewer: Annotated[
-        ApprovalsReviewer | None,
-        Field(
-            description="[UNSTABLE] Optional default for where approval requests are routed for review."
-        ),
-    ] = None
-    browser_use: BrowserUseConfig | None = None
-    compact_prompt: str | None = None
-    computer_use: ComputerUseConfig | None = None
-    desktop: dict[str, Any] | None = None
-    developer_instructions: str | None = None
-    forced_chatgpt_workspace_id: ForcedChatgptWorkspaceIds | None = None
-    forced_login_method: ForcedLoginMethod | None = None
-    instructions: str | None = None
-    model: str | None = None
-    model_auto_compact_token_limit: int | None = None
-    model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope | None = None
-    model_context_window: int | None = None
-    model_provider: str | None = None
-    model_reasoning_effort: ReasoningEffort | None = None
-    model_reasoning_summary: ReasoningSummary | None = None
-    model_verbosity: Verbosity | None = None
-    review_model: str | None = None
-    sandbox_mode: SandboxMode | None = None
-    sandbox_workspace_write: SandboxWorkspaceWrite | None = None
-    service_tier: str | None = None
-    tools: ToolsV2 | None = None
-    web_search: WebSearchMode | None = None
-
-
 class ConfigBatchWriteParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10635,15 +10825,6 @@ class ConfigBatchWriteParams(BaseModel):
             description="When true, hot-reload updated runtime settings into loaded threads after writing. Session-static model, reasoning-effort, Plan-mode reasoning-effort, and service-tier defaults are not reloaded. The deprecated personality setting is also not reloaded.",
         ),
     ] = None
-
-
-class ConfigReadResponse(BaseModel):
-    model_config = ConfigDict(
-        populate_by_name=True,
-    )
-    config: Config
-    layers: list[ConfigLayer] | None = None
-    origins: dict[str, ConfigLayerMetadata]
 
 
 class ConfigWriteResponse(BaseModel):
@@ -10869,6 +11050,70 @@ class ListMcpServerStatusResponse(BaseModel):
     ] = None
 
 
+class ManagedChatgptAccountUsage(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    observed_at: Annotated[
+        int | None,
+        Field(
+            alias="observedAt",
+            description="Unix timestamp in seconds for the retained observation.",
+        ),
+    ] = None
+    rate_limits: Annotated[list[RateLimitSnapshot], Field(alias="rateLimits")]
+    state: ManagedChatgptAccountUsageState
+    token_usage: Annotated[AccountTokenUsageSummary | None, Field(alias="tokenUsage")] = None
+    unavailable_observed_at: Annotated[
+        int | None,
+        Field(
+            alias="unavailableObservedAt",
+            description="Unix timestamp in seconds for the failed refresh represented by `unavailable_reason`. This is independent from the retained successful observation timestamp.",
+        ),
+    ] = None
+    unavailable_reason: Annotated[
+        str | None,
+        Field(
+            alias="unavailableReason",
+            description="Diagnostic text for `unavailable`, or `null` for other states.",
+        ),
+    ] = None
+
+
+class ManagedChatgptAccountView(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    account_revision: Annotated[int, Field(alias="accountRevision", ge=0)]
+    block: ManagedChatgptAccountBlock | None = None
+    chatgpt_account_id: Annotated[str | None, Field(alias="chatgptAccountId")] = None
+    credential_revision: Annotated[
+        int,
+        Field(
+            alias="credentialRevision",
+            description="Monotonic revision of the credential generation backing this account.\n\nUnlike `account_revision`, status and usage observations do not change it.",
+            ge=0,
+        ),
+    ]
+    eligibility_reason: Annotated[str | None, Field(alias="eligibilityReason")] = None
+    eligible: bool
+    email: str | None = None
+    managed_account_id: Annotated[str, Field(alias="managedAccountId")]
+    plan_type: Annotated[PlanType, Field(alias="planType")]
+    refresh_status: Annotated[ManagedChatgptAccountRefreshStatus, Field(alias="refreshStatus")]
+    usage: ManagedChatgptAccountUsage
+
+
+class McpServerStartupCompleteNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    cancelled: list[str]
+    failed: list[McpServerStartupFailure]
+    ready: list[str]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class ModelsRequirements(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10976,6 +11221,31 @@ class PluginSummary(BaseModel):
         str | None,
         Field(description="Version advertised by the remote marketplace backend when available."),
     ] = None
+
+
+class ProfileV2(BaseModel):
+    model_config = ConfigDict(
+        extra="allow",
+        populate_by_name=True,
+    )
+    approval_policy: AskForApproval | None = None
+    approvals_reviewer: Annotated[
+        ApprovalsReviewer | None,
+        Field(
+            description="[UNSTABLE] Optional profile-level override for where approval requests are routed for review. If omitted, the enclosing config default is used."
+        ),
+    ] = None
+    chatgpt_base_url: str | None = None
+    model: str | None = None
+    model_auto_compact_token_limit: int | None = None
+    model_context_window: int | None = None
+    model_provider: str | None = None
+    model_reasoning_effort: ReasoningEffort | None = None
+    model_reasoning_summary: ReasoningSummary | None = None
+    model_verbosity: Verbosity | None = None
+    service_tier: str | None = None
+    tools: ToolsV2 | None = None
+    web_search: WebSearchMode | None = None
 
 
 class FunctionCallOutputResponseItem(BaseModel):
@@ -11167,6 +11437,24 @@ class ItemFileChangePatchUpdatedServerNotification(BaseModel):
         Field(title="Item/fileChange/patchUpdatedNotificationMethod"),
     ]
     params: FileChangePatchUpdatedNotification
+
+
+class McpServerStartupStatusCompletedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["mcpServer/startupStatus/completed"],
+        Field(title="McpServer/startupStatus/completedNotificationMethod"),
+    ]
+    params: McpServerStartupCompleteNotification
 
 
 class AccountRateLimitsUpdatedServerNotification(BaseModel):
@@ -11537,6 +11825,37 @@ class TurnsPage(BaseModel):
     next_cursor: Annotated[str | None, Field(alias="nextCursor")] = None
 
 
+class AccountPoolUpdatedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    accounts: list[ManagedChatgptAccountView]
+    pool_revision: Annotated[
+        int,
+        Field(
+            alias="poolRevision",
+            description="Monotonic revision of global account-pool membership and account data.",
+            ge=0,
+        ),
+    ]
+
+
+class AccountUsageUpdatedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    account_revision: Annotated[
+        int,
+        Field(
+            alias="accountRevision",
+            description="Revision of the managed account row carrying this usage observation.",
+            ge=0,
+        ),
+    ]
+    managed_account_id: Annotated[str, Field(alias="managedAccountId")]
+    usage: ManagedChatgptAccountUsage
+
+
 class AdditionalFileSystemPermissions(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -11569,6 +11888,54 @@ class ConfigBatchWriteRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["config/batchWrite"], Field(title="Config/batchWriteRequestMethod")]
     params: ConfigBatchWriteParams
+
+
+class Config(BaseModel):
+    model_config = ConfigDict(
+        extra="allow",
+        populate_by_name=True,
+    )
+    analytics: AnalyticsConfig | None = None
+    approval_policy: AskForApproval | None = None
+    approvals_reviewer: Annotated[
+        ApprovalsReviewer | None,
+        Field(
+            description="[UNSTABLE] Optional default for where approval requests are routed for review."
+        ),
+    ] = None
+    browser_use: BrowserUseConfig | None = None
+    compact_prompt: str | None = None
+    computer_use: ComputerUseConfig | None = None
+    desktop: dict[str, Any] | None = None
+    developer_instructions: str | None = None
+    forced_chatgpt_workspace_id: ForcedChatgptWorkspaceIds | None = None
+    forced_login_method: ForcedLoginMethod | None = None
+    instructions: str | None = None
+    model: str | None = None
+    model_auto_compact_token_limit: int | None = None
+    model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope | None = None
+    model_context_window: int | None = None
+    model_provider: str | None = None
+    model_reasoning_effort: ReasoningEffort | None = None
+    model_reasoning_summary: ReasoningSummary | None = None
+    model_verbosity: Verbosity | None = None
+    profile: str | None = None
+    profiles: dict[str, ProfileV2] | None = {}
+    review_model: str | None = None
+    sandbox_mode: SandboxMode | None = None
+    sandbox_workspace_write: SandboxWorkspaceWrite | None = None
+    service_tier: str | None = None
+    tools: ToolsV2 | None = None
+    web_search: WebSearchMode | None = None
+
+
+class ConfigReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    config: Config
+    layers: list[ConfigLayer] | None = None
+    origins: dict[str, ConfigLayerMetadata]
 
 
 class ConfigRequirements(BaseModel):
@@ -11753,6 +12120,39 @@ class ItemStartedNotification(BaseModel):
     turn_id: Annotated[str, Field(alias="turnId")]
 
 
+class ListAccountsResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    accounts: list[ManagedChatgptAccountView]
+    pool_revision: Annotated[
+        int,
+        Field(
+            alias="poolRevision",
+            description="Monotonic revision of global account-pool membership and account data.",
+            ge=0,
+        ),
+    ]
+    selected_account_id: Annotated[str | None, Field(alias="selectedAccountId")] = None
+    selection_revision: Annotated[
+        int | None,
+        Field(
+            alias="selectionRevision",
+            description="Scoped selected-account revision when the list was requested for a thread, or `null` for an unscoped list.",
+            ge=0,
+        ),
+    ] = None
+
+
+class LogoutAccountResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    accounts: list[ManagedChatgptAccountView] | None = []
+    removed_account_ids: Annotated[list[str] | None, Field(alias="removedAccountIds")] = []
+    selected_account_id: Annotated[str | None, Field(alias="selectedAccountId")] = None
+
+
 class PluginDetail(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -11915,6 +12315,40 @@ class ItemCompletedServerNotification(BaseModel):
     ] = None
     method: Annotated[Literal["item/completed"], Field(title="Item/completedNotificationMethod")]
     params: ItemCompletedNotification
+
+
+class AccountPoolUpdatedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["account/pool/updated"], Field(title="Account/pool/updatedNotificationMethod")
+    ]
+    params: AccountPoolUpdatedNotification
+
+
+class AccountUsageUpdatedServerNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    emitted_at_ms: Annotated[
+        int | None,
+        Field(
+            alias="emittedAtMs",
+            description="Unix timestamp (in milliseconds) when app-server emitted this notification.",
+        ),
+    ] = None
+    method: Annotated[
+        Literal["account/usage/updated"], Field(title="Account/usage/updatedNotificationMethod")
+    ]
+    params: AccountUsageUpdatedNotification
 
 
 class Thread(BaseModel):
@@ -12525,6 +12959,7 @@ class ClientRequest(
         | WindowsSandboxReadinessRequest
         | AccountLoginStartRequest
         | AccountLoginCancelRequest
+        | AccountListRequest
         | AccountLogoutRequest
         | AccountRateLimitsReadRequest
         | AccountRateLimitResetCreditConsumeRequest
@@ -12635,6 +13070,7 @@ class ClientRequest(
         | WindowsSandboxReadinessRequest
         | AccountLoginStartRequest
         | AccountLoginCancelRequest
+        | AccountListRequest
         | AccountLogoutRequest
         | AccountRateLimitsReadRequest
         | AccountRateLimitResetCreditConsumeRequest
@@ -12864,6 +13300,7 @@ class ServerNotification(
         | ItemAutoApprovalReviewCompletedServerNotification
         | AutoApprovalReviewStrictReviewRequiredServerNotification
         | ItemCompletedServerNotification
+        | TurnResponseAttemptResetServerNotification
         | ItemAgentMessageDeltaServerNotification
         | ItemPlanDeltaServerNotification
         | CommandExecOutputDeltaServerNotification
@@ -12877,10 +13314,14 @@ class ServerNotification(
         | ItemMcpToolCallProgressServerNotification
         | McpServerOauthLoginCompletedServerNotification
         | McpServerStartupStatusUpdatedServerNotification
+        | McpServerStartupStatusCompletedServerNotification
         | McpServerEventStreamNotificationServerNotification
         | AccountUpdatedServerNotification
         | AccountGatewayOAuthChangedServerNotification
         | AccountRateLimitsUpdatedServerNotification
+        | AccountPoolUpdatedServerNotification
+        | AccountSelectionUpdatedServerNotification
+        | AccountUsageUpdatedServerNotification
         | AppListUpdatedServerNotification
         | RemoteControlStatusChangedServerNotification
         | ExternalAgentConfigImportProgressServerNotification
@@ -12953,6 +13394,7 @@ class ServerNotification(
         | ItemAutoApprovalReviewCompletedServerNotification
         | AutoApprovalReviewStrictReviewRequiredServerNotification
         | ItemCompletedServerNotification
+        | TurnResponseAttemptResetServerNotification
         | ItemAgentMessageDeltaServerNotification
         | ItemPlanDeltaServerNotification
         | CommandExecOutputDeltaServerNotification
@@ -12966,10 +13408,14 @@ class ServerNotification(
         | ItemMcpToolCallProgressServerNotification
         | McpServerOauthLoginCompletedServerNotification
         | McpServerStartupStatusUpdatedServerNotification
+        | McpServerStartupStatusCompletedServerNotification
         | McpServerEventStreamNotificationServerNotification
         | AccountUpdatedServerNotification
         | AccountGatewayOAuthChangedServerNotification
         | AccountRateLimitsUpdatedServerNotification
+        | AccountPoolUpdatedServerNotification
+        | AccountSelectionUpdatedServerNotification
+        | AccountUsageUpdatedServerNotification
         | AppListUpdatedServerNotification
         | RemoteControlStatusChangedServerNotification
         | ExternalAgentConfigImportProgressServerNotification

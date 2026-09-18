@@ -2492,7 +2492,9 @@ fn websocket_error_detail(err: &ApiError) -> String {
         ApiError::Api { status, message } => {
             format!("handshake API error: {status} {message}")
         }
-        ApiError::Stream(message) => format!("handshake stream error: {message}"),
+        ApiError::Stream(message) | ApiError::StreamDisconnected(message) => {
+            format!("handshake stream error: {message}")
+        }
         ApiError::WebsocketClosed(details) => format!(
             "handshake stream closed: code={:?}, reason={:?}",
             details.code, details.reason

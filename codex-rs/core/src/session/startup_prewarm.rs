@@ -359,7 +359,11 @@ async fn schedule_startup_prewarm_inner(
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
     ) {
         crate::session::get_service_tier(
-            session.services.agent_control.service_tier(),
+            session
+                .services
+                .local_agent_runtime
+                .control(session.session_id())
+                .service_tier(),
             session.features().enabled(Feature::FastMode),
             &preconnect_model_info,
         )

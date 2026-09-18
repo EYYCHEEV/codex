@@ -430,9 +430,16 @@ impl ModelProvider for AmazonBedrockModelProvider {
         _scope: ProviderAuthScope,
     ) -> ModelProviderFuture<'_, Result<ProviderRequestSetup>> {
         Box::pin(async move {
+            let auth_owner_generation = self.auth_manager.as_ref().map(|manager| {
+                manager
+                    .auth_change_state_receiver()
+                    .borrow()
+                    .owner_generation
+            });
             if self.info.has_command_auth() {
                 let effective_auth = self.auth().await;
                 return Ok(ProviderRequestSetup {
+                    auth_owner_generation,
                     api_provider: self.api_provider().await?,
                     api_auth: self.api_auth().await?,
                     transport_auth_binding: transport_binding_for_auth(effective_auth.as_ref()),
@@ -460,6 +467,7 @@ impl ModelProvider for AmazonBedrockModelProvider {
             .await?;
             let transport_auth_binding = transport_binding_for_auth(effective_auth.as_ref());
             Ok(ProviderRequestSetup {
+                auth_owner_generation,
                 effective_auth,
                 api_provider,
                 api_auth,

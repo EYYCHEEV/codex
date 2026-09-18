@@ -2337,7 +2337,7 @@ fn record_items_projects_large_user_message_without_losing_text_or_metadata() {
         estimate_item_token_count(&chunk.item)
             <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
     }));
-    assert_eq!(history.logical_items(), vec![item.clone()]);
+    assert_eq!(history.logical_items(), vec![item]);
     assert_eq!(
         history
             .annotated_items()
@@ -2372,7 +2372,7 @@ fn marker_shaped_user_text_is_projected_as_an_ordinary_turn() {
     };
     let history = create_history_with_items(vec![item.clone()]);
 
-    assert_eq!(history.logical_items(), vec![item.clone()]);
+    assert_eq!(history.logical_items(), vec![item]);
     assert_eq!(
         history
             .annotated_items()
@@ -2863,7 +2863,7 @@ fn replacement_enforces_cap_preserves_metadata_and_clears_stale_pair_tracker() {
     });
     let replacement = ResponseItemEnvelope {
         item: assistant_msg("replacement"),
-        metadata: replacement_metadata.clone(),
+        metadata: replacement_metadata,
     };
     let oversized_replacement = ResponseItemEnvelope {
         item: assistant_msg(&"x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES)),

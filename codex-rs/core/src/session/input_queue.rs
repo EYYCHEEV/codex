@@ -95,7 +95,6 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
-    queued_response_items_for_next_turn: Mutex<Vec<ResponseItemEnvelope>>,
 }
 
 struct PendingMailboxCommunication {
@@ -110,7 +109,6 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
-            queued_response_items_for_next_turn: Mutex::new(Vec::new()),
         }
     }
 
@@ -227,31 +225,6 @@ impl InputQueue {
             .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
             .collect();
         (items, start_options)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn queue_response_items_for_next_turn(
-        &self,
-        input: Vec<ResponseItemEnvelope>,
-    ) {
-        self.queued_response_items_for_next_turn
-            .lock()
-            .await
-            .extend(input);
-    }
-
-    pub(crate) async fn take_queued_response_items_for_next_turn(
-        &self,
-    ) -> Vec<ResponseItemEnvelope> {
-        std::mem::take(&mut *self.queued_response_items_for_next_turn.lock().await)
-    }
-
-    pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
-        !self
-            .queued_response_items_for_next_turn
-            .lock()
-            .await
-            .is_empty()
     }
 
     pub(crate) async fn turn_state_for_sub_id(
@@ -371,30 +344,6 @@ impl InputQueue {
         turn_state: &Mutex<TurnState>,
     ) -> Vec<TurnInput> {
         turn_state.lock().await.pending_input.items.split_off(0)
-    }
-
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
-    #[cfg(test)]
-    pub(crate) async fn inject_response_items(
-        &self,
-        active_turn: &Mutex<Option<ActiveTurn>>,
-        input: Vec<ResponseItemEnvelope>,
-    ) -> Result<(), Vec<ResponseItemEnvelope>> {
-        let mut active = active_turn.lock().await;
-        match active.as_mut() {
-            Some(active_turn) if active_turn.task.is_some() || active_turn.is_preparing() => {
-                self.extend_pending_input_for_turn_state(
-                    active_turn.turn_state.as_ref(),
-                    input.into_iter().map(TurnInput::ResponseItem).collect(),
-                )
-                .await;
-                Ok(())
-            }
-            Some(_) | None => Err(input),
-        }
     }
 
     #[expect(

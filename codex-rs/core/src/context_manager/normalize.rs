@@ -248,13 +248,9 @@ pub(crate) fn remove_corresponding_for(
                 matches!(&envelope.item, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
             }) {
                 Some(items.remove(pos))
-            } else if let Some(pos) = items.iter().position(|envelope| {
+            } else { items.iter().position(|envelope| {
                 matches!(&envelope.item, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
-            }) {
-                Some(items.remove(pos))
-            } else {
-                None
-            }
+            }).map(|pos| items.remove(pos)) }
         }
         ResponseItem::ToolSearchCall {
             call_id: Some(call_id),
