@@ -125,6 +125,7 @@ async fn hook_shell_startup_does_not_stop_on_controlling_terminal() {
         kind: ConfiguredHandlerKind::Command {
             command: command.to_string(),
             r#async: false,
+            failure_policy: codex_config::HookFailurePolicy::Allow,
             env: env.clone(),
         },
     };
