@@ -54,6 +54,7 @@ impl SamplingExecution {
                 ApiError::Retryable { .. }
                 | ApiError::RateLimitExceeded { .. }
                 | ApiError::Stream(_)
+                | ApiError::StreamDisconnected(_)
                 | ApiError::WebsocketClosed(_)
                 | ApiError::ServerOverloaded { .. }
                 | ApiError::FlexUnavailable,

@@ -104,6 +104,9 @@ pub enum CodexErrorDetails {
         "stream disconnected before completion: websocket closed by server before response.completed"
     )]
     WebsocketClosed(Box<WebsocketCloseDetails>),
+    /// SSE transport loss before completion. Only rewindable output may be replaced.
+    #[error("stream disconnected before completion: {0}")]
+    StreamDisconnected(String),
     /// Returned by ResponsesClient when a response stream disconnects or errors out **after** the
     /// handshake has succeeded but **before** it finished emitting `response.completed`.
     ///
@@ -428,6 +431,7 @@ impl CodexErr {
             | CodexErrorDetails::BioPolicy { .. }
             | CodexErrorDetails::MisalignmentPolicyViolation { .. } => None,
             CodexErrorDetails::WebsocketClosed(_)
+            | CodexErrorDetails::StreamDisconnected(_)
             | CodexErrorDetails::Stream(..)
             | CodexErrorDetails::RateLimitExceeded(_)
             | CodexErrorDetails::Timeout
@@ -502,9 +506,11 @@ impl CodexErr {
                     http_status_code: self.http_status_code_value(),
                 }
             }
-            CodexErrorDetails::WebsocketClosed(_) => CodexErrorInfo::ResponseStreamDisconnected {
-                http_status_code: None,
-            },
+            CodexErrorDetails::WebsocketClosed(_) | CodexErrorDetails::StreamDisconnected(_) => {
+                CodexErrorInfo::ResponseStreamDisconnected {
+                    http_status_code: None,
+                }
+            }
             CodexErrorDetails::RefreshTokenFailed(_) => CodexErrorInfo::Unauthorized,
             CodexErrorDetails::SessionConfiguredNotFirstEvent
             | CodexErrorDetails::InternalServerError

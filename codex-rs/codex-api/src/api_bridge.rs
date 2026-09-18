@@ -57,6 +57,9 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
             CodexErr::new(CodexErrorDetails::RateLimitExceeded(message))
         }
         ApiError::Stream(msg) => CodexErr::Stream(msg),
+        ApiError::StreamDisconnected(message) => {
+            CodexErr::new(CodexErrorDetails::StreamDisconnected(message))
+        }
         ApiError::WebsocketClosed(details) => CodexErr::WebsocketClosed(details),
         ApiError::ServerOverloaded { .. } => CodexErr::ServerOverloaded,
         ApiError::FlexUnavailable => CodexErr::new(CodexErrorDetails::FlexUnavailable),

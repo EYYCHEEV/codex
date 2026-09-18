@@ -238,7 +238,7 @@ async fn reconstruction_bounds_checkpoint_and_suffix_as_one_history() {
         item: assistant_message("safe checkpoint"),
         metadata: Some(CodexHarnessMetadata {
             client_authored: true,
-            fallback_token_limit_override: Some(512),
+            history_truncation_token_limit: Some(512),
             ..Default::default()
         }),
     };

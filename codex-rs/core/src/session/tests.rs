@@ -12920,64 +12920,23 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
 }
 
 #[tokio::test]
-async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
-    let (sess, tc, _rx) = make_session_and_context_with_rx().await;
-    let queued_item = ResponseItemEnvelope::new(user_message("queued before wake"));
-
-    sess.input_queue
-        .queue_response_items_for_next_turn(vec![queued_item.clone()])
-        .await;
-
-    sess.spawn_task(
-        Arc::clone(&tc),
-        Vec::new(),
-        NeverEndingTask {
-            kind: TaskKind::Regular,
-            listen_to_cancellation_token: false,
-        },
-    )
-    .await;
-
-    assert_eq!(
-        sess.input_queue
-            .get_pending_input(&sess.active_turn)
-            .await
-            .0,
-        vec![TurnInput::ResponseItem(queued_item)]
-    );
-}
-
-#[tokio::test]
-async fn preparing_active_turn_accepts_injected_response_items() {
-    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
-    let pending_item = ResponseItemEnvelope::new(user_message("queued while turn is preparing"));
-    let turn_state = {
-        let mut active = sess.active_turn.lock().await;
-        let active_turn = ActiveTurn::preparing();
-        let turn_state = Arc::clone(&active_turn.turn_state);
-        *active = Some(active_turn);
-        turn_state
-    };
-
-    sess.inject_response_items(vec![pending_item.clone()])
-        .await
-        .expect("preparing turn should accept pending input");
-
-    assert_eq!(
-        sess.input_queue
-            .take_pending_input_for_turn_state(turn_state.as_ref())
-            .await,
-        vec![TurnInput::ResponseItem(pending_item)]
-    );
-}
-
-#[tokio::test]
 async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
-    let queued_item = ResponseItemEnvelope::new(user_message("queued before wake"));
-    sess.queue_response_items_for_next_turn(vec![queued_item])
+    sess.input_queue
+        .enqueue_mailbox_communication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "pending trigger".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            Default::default(),
+        )
         .await;
-    *sess.active_turn.lock().await = Some(ActiveTurn::preparing());
+    let reserved = ActiveTurn::default();
+    let reserved_state = Arc::clone(&reserved.turn_state);
+    *sess.active_turn.lock().await = Some(reserved);
 
     sess.maybe_start_turn_for_pending_work_with_sub_id("duplicate-wake".to_string())
         .await;
@@ -12985,29 +12944,10 @@ async fn preparing_active_turn_blocks_duplicate_pending_work_turn() {
     {
         let active = sess.active_turn.lock().await;
         let active_turn = active.as_ref().expect("preparing turn should remain");
-        assert!(active_turn.is_preparing());
+        assert!(Arc::ptr_eq(&active_turn.turn_state, &reserved_state));
         assert!(active_turn.task.is_none());
     }
-    assert!(sess.has_queued_response_items_for_next_turn().await);
-}
-
-#[tokio::test]
-async fn idle_interrupt_does_not_wake_queued_next_turn_items() {
-    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
-    let queued_item = ResponseItemEnvelope::new(user_message("queued before interrupt"));
-
-    sess.input_queue
-        .queue_response_items_for_next_turn(vec![queued_item])
-        .await;
-
-    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
-
-    assert!(sess.active_turn.lock().await.is_none());
-    assert!(
-        sess.input_queue
-            .has_queued_response_items_for_next_turn()
-            .await
-    );
+    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
 }
 
 #[tokio::test]

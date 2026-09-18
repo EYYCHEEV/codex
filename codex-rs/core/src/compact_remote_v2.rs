@@ -11,10 +11,10 @@ use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;
 use crate::compact::build_compaction_initial_context;
 use crate::compact::compaction_status_from_result;
+use crate::compact::emit_managed_selection_updates;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
-use crate::compact::emit_managed_selection_updates;
 use crate::compact_remote_history::HistoryItemGroup;
 use crate::compact_remote_history::history_item_groups;
 use crate::context_manager::estimate_item_token_count;
@@ -410,7 +410,8 @@ async fn run_remote_compaction_request_v2(
             sess.reasoning_effort_for_request(
                 &turn_context.initial_settings,
                 RequestEffortUsage::Compaction,
-            ).await,
+            )
+            .await,
             turn_context.reasoning_summary(),
             service_tier,
             responses_metadata,
@@ -432,20 +433,16 @@ async fn run_remote_compaction_request_v2(
         }
         Err(err) => AttemptOutcome::uncommitted(Err(err)),
     };
-    match &outcome.result {
-        Err(error) => {
-            if let CodexErrorDetails::UsageLimitReached(details) = error.details()
-                && let Some(rate_limits) = details.rate_limits.as_ref()
-            {
-                sess.update_rate_limits(
-                    turn_context,
-                    (**rate_limits).clone(),
-                    managed_rate_limit_binding,
-                )
-                .await;
-            }
-        }
-        Ok(_) => {}
+    if let Err(error) = &outcome.result
+        && let CodexErrorDetails::UsageLimitReached(details) = error.details()
+        && let Some(rate_limits) = details.rate_limits.as_ref()
+    {
+        sess.update_rate_limits(
+            turn_context,
+            (**rate_limits).clone(),
+            managed_rate_limit_binding,
+        )
+        .await;
     }
     outcome
 }
