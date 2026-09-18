@@ -1122,10 +1122,6 @@
         "model": {
           "type": "string"
         },
-        "model_auto_compact_token_limit": {
-          "format": "int64",
-          "type": "integer"
-        },
         "model_catalog_json": {
           "allOf": [
             {
@@ -1133,10 +1129,6 @@
             }
           ],
           "description": "Optional path to a JSON model catalog (applied on startup only)."
-        },
-        "model_context_window": {
-          "format": "int64",
-          "type": "integer"
         },
         "model_instructions_file": {
           "allOf": [

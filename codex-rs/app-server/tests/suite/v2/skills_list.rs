@@ -369,11 +369,23 @@ async fn runtime_remote_plugin_toggle_updates_local_curated_plugin_skills() -> R
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
     let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/codex/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "models": [] })))
+        .mount(&server)
+        .await;
     write_cached_local_curated_plugin_with_skill(codex_home.path(), "openai-curated")?;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
-            r#"chatgpt_base_url = "{}/backend-api/"
+            r#"chatgpt_base_url = "{base_url}/backend-api/"
+model_provider = "openai-fixture"
+
+[model_providers.openai-fixture]
+name = "OpenAI"
+base_url = "{base_url}/backend-api/codex"
+requires_openai_auth = true
+supports_websockets = false
 
 [features]
 plugins = true
@@ -381,7 +393,7 @@ plugins = true
 [plugins."google-calendar@openai-curated"]
 enabled = true
 "#,
-            server.uri()
+            base_url = server.uri()
         ),
     )?;
     write_chatgpt_auth(
@@ -431,6 +443,29 @@ enabled = true
     }));
     let _: ThreadStartResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(thread_start_request_id)).await??;
+
+    std::fs::write(
+        codex_home.path().join(
+            "plugins/cache/openai-curated/google-calendar/local/skills/meeting-prep/SKILL.md",
+        ),
+        "---\nname: meeting-prep\ndescription: Updated meeting preparation\n---\n\n# Body\n",
+    )?;
+    for force_reload in [true, false] {
+        let request_id = mcp
+            .send_skills_list_request(SkillsListParams {
+                cwds: vec![cwd.path().to_path_buf()],
+                force_reload,
+            })
+            .await?;
+        let SkillsListResponse { data } =
+            timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+        assert!(data.iter().any(|entry| {
+            entry.skills.iter().any(|skill| {
+                skill.name == "google-calendar:meeting-prep"
+                    && skill.description == "Updated meeting preparation"
+            })
+        }));
+    }
 
     let enablement_request_id = mcp
         .send_experimental_feature_enablement_set_request(ExperimentalFeatureEnablementSetParams {

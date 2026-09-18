@@ -2738,33 +2738,6 @@ impl Session {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) async fn inject_response_items(
-        &self,
-        input: Vec<ResponseItemEnvelope>,
-    ) -> Result<(), Vec<ResponseItemEnvelope>> {
-        self.input_queue
-            .inject_response_items(&self.active_turn, input)
-            .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn queue_response_items_for_next_turn(
-        &self,
-        input: Vec<ResponseItemEnvelope>,
-    ) {
-        self.input_queue
-            .queue_response_items_for_next_turn(input)
-            .await;
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn has_queued_response_items_for_next_turn(&self) -> bool {
-        self.input_queue
-            .has_queued_response_items_for_next_turn()
-            .await
-    }
-
     async fn active_turn_context_and_cancellation_token(
         &self,
     ) -> Option<(Arc<TurnContext>, CancellationToken)> {
@@ -4450,7 +4423,9 @@ impl Session {
                 .token_budget
                 .as_ref()
                 .is_some_and(|config| config.use_history_notes_extension)
-                && let Some(call) = step_context.mcp.prepare_internal_call("notes", "thread_hint")
+                && let Some(call) = step_context
+                    .mcp
+                    .prepare_internal_call("notes", "thread_hint")
                 && let Some(mcp_result) = call
                     .call(
                         /*arguments*/ None,

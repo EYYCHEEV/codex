@@ -42,6 +42,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::Transport(TransportError::RetryLimit) => "retry_limit",
             ApiError::Transport(TransportError::Build(_)) => "request_build_error",
             ApiError::Stream(_) => "stream_error",
+            ApiError::StreamDisconnected(_) => "stream_disconnected",
             ApiError::WebsocketClosed(_) => "websocket_closed",
             ApiError::ContextWindowExceeded => "context_window_exceeded",
             ApiError::QuotaExceeded => "quota_exceeded",

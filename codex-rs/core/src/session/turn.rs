@@ -1646,7 +1646,7 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     let mut prepared_attempt = Some((step_context, initial_request_setup));
-    let mut https_replacement_started = false;
+    let mut replacement_attempt_started = false;
     loop {
         attempt_number = attempt_number.saturating_add(1);
         let (attempt_step_context, request_setup) = match prepared_attempt.take() {
@@ -1718,7 +1718,7 @@ async fn run_sampling_request(
                 &sess,
                 &prompt,
                 &turn_context.config,
-                &step_context.settings.model_info,
+                &attempt_step_context.settings.model_info,
                 responses_metadata,
             )?;
         }
@@ -1809,11 +1809,11 @@ async fn run_sampling_request(
             _ => err,
         };
 
-        if https_replacement_started {
+        if replacement_attempt_started {
             return Err(err);
         }
 
-        if can_fallback_rewindable_websocket_attempt(replay_state, &err, client_session) {
+        if can_replace_rewindable_stream_attempt(replay_state, &err, client_session) {
             if cancellation_token.is_cancelled() {
                 return Err(CodexErr::TurnAborted);
             }
@@ -1831,8 +1831,11 @@ async fn run_sampling_request(
             sess.send_event(
                 &turn_context,
                 EventMsg::Warning(WarningEvent {
-                    message: "WebSocket disconnected after incomplete output. Retrying over HTTPS."
-                        .to_string(),
+                    message: match err.details() {
+                        CodexErrorDetails::WebsocketClosed(_) =>
+                            "WebSocket disconnected after incomplete output. Retrying over HTTPS.",
+                        _ => "Response stream disconnected after incomplete output. Retrying over HTTPS.",
+                    }.to_string(),
                 }),
             )
             .await;
@@ -1847,7 +1850,7 @@ async fn run_sampling_request(
             if cancellation_token.is_cancelled() {
                 return Err(CodexErr::TurnAborted);
             }
-            https_replacement_started = true;
+            replacement_attempt_started = true;
             turn_context.turn_timing_state.record_sampling_retry();
             continue;
         }
@@ -2193,15 +2196,22 @@ fn response_item_replay_state(item: &ResponseItem) -> AttemptReplayState {
     }
 }
 
-fn can_fallback_rewindable_websocket_attempt(
+fn can_replace_rewindable_stream_attempt(
     replay_state: AttemptReplayState,
     err: &CodexErr,
     client_session: &ModelClientSession,
 ) -> bool {
     replay_state.is_rewindable()
-        && matches!(err.details(), CodexErrorDetails::WebsocketClosed(_))
         && err.is_retryable()
-        && client_session.rewindable_websocket_fallback_allowed()
+        && match err.details() {
+            CodexErrorDetails::WebsocketClosed(_) => {
+                client_session.rewindable_websocket_fallback_allowed()
+            }
+            CodexErrorDetails::StreamDisconnected(_) => {
+                client_session.websocket_http_fallback_allowed()
+            }
+            _ => false,
+        }
 }
 
 pub(crate) fn response_event_commits_attempt(event: &ResponseEvent) -> bool {
@@ -2982,7 +2992,9 @@ async fn try_run_sampling_request(
         sess.observe_managed_rate_limit_binding(managed_rate_limit_binding.as_ref())
             .await;
         let mut stream = stream_result??;
-        let defer_rewindable_output = client_session.rewindable_websocket_fallback_allowed();
+        // Both transports may replace an incomplete response. Completed text/ reasoning
+        // items must stay provisional until response.completed or an irreversible effect.
+        let defer_rewindable_output = client_session.websocket_http_fallback_allowed();
         let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
         let mut needs_follow_up = false;
         let mut last_agent_message: Option<String> = None;
@@ -3528,7 +3540,7 @@ async fn try_run_sampling_request(
         };
         let discard_pending_items = matches!(
             &outcome,
-            Err(err) if can_fallback_rewindable_websocket_attempt(
+            Err(err) if can_replace_rewindable_stream_attempt(
                 replay_state,
                 err,
                 client_session,

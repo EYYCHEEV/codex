@@ -892,8 +892,12 @@ async fn drain_compaction_stream(
                 );
                 match event {
                     ResponseEvent::OutputItemDone(item) => {
-                        sess.record_conversation_items(turn_context, turn_context.model_info(), std::slice::from_ref(&item))
-                            .await;
+                        sess.record_conversation_items(
+                            turn_context,
+                            turn_context.model_info(),
+                            std::slice::from_ref(&item),
+                        )
+                        .await;
                     }
                     ResponseEvent::ServerReasoningIncluded(included) => {
                         sess.set_server_reasoning_included(included).await;

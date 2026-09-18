@@ -3541,7 +3541,7 @@ impl AuthManager {
                             ))
                         })?;
                         self.refresh_and_persist_chatgpt_token(
-                            &chatgpt_auth,
+                            chatgpt_auth,
                             token_data.refresh_token,
                         )
                         .await

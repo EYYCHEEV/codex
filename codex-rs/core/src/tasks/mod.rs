@@ -302,7 +302,7 @@ impl Session {
                     Arc::clone(&active_turn.turn_state)
                 }
                 None => {
-                    let active_turn = active.get_or_insert_with(ActiveTurn::preparing);
+                    let active_turn = active.get_or_insert_with(ActiveTurn::default);
                     active_turn.preparing_turn_context = Some(Arc::clone(&turn_context));
                     Arc::clone(&active_turn.turn_state)
                 }
@@ -327,27 +327,19 @@ impl Session {
         )
         .await;
 
-        let queued_response_items = self
-            .input_queue
-            .take_queued_response_items_for_next_turn()
-            .await;
         let (mailbox_items, _) = self.input_queue.drain_mailbox_input_items().await;
         let turn_state = Arc::clone(&reserved_turn_state);
         turn_state.lock().await.token_usage_at_turn_start = token_usage_at_turn_start.clone();
-        let mut pending_items = queued_response_items
-            .into_iter()
-            .map(TurnInput::ResponseItem)
-            .collect::<Vec<_>>();
-        pending_items.extend(mailbox_items);
         self.input_queue
-            .extend_pending_input_for_turn_state(turn_state.as_ref(), pending_items)
+            .extend_pending_input_for_turn_state(turn_state.as_ref(), mailbox_items)
             .await;
         self.emit_turn_start_lifecycle(turn_context.as_ref(), &token_usage_at_turn_start)
             .await;
 
         let mut active = self.active_turn.lock().await;
-        let turn = active.get_or_insert_with(|| {
-            ActiveTurn::preparing_with_turn_state(Arc::clone(&reserved_turn_state))
+        let turn = active.get_or_insert_with(|| ActiveTurn {
+            turn_state: Arc::clone(&reserved_turn_state),
+            ..Default::default()
         });
         debug_assert!(Arc::ptr_eq(&turn.turn_state, &reserved_turn_state));
         debug_assert!(turn.task.is_none());
@@ -459,20 +451,16 @@ impl Session {
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
     /// session.
     ///
-    /// The turn is created only when the session is idle and queued response items are waiting,
-    /// mailbox mail requests a turn, or mailbox mail can wake an outstanding durable sleep.
+    /// The turn is created only when the session is idle and mailbox mail requests a turn,
+    /// or mailbox mail can wake an outstanding durable sleep.
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        // Queued response items and trigger-turn mailbox items must wake an idle
-        // session. Ordinary pending mailbox work wakes only a durable sleep.
-        if !self
-            .input_queue
-            .has_queued_response_items_for_next_turn()
-            .await
-            && !self.input_queue.has_trigger_turn_mailbox_items().await
-            && !(self.input_queue.has_pending_mailbox_items().await
+        // Trigger-turn mailbox items must wake an idle session. Ordinary pending
+        // mailbox work wakes only a durable sleep.
+        if !(self.input_queue.has_trigger_turn_mailbox_items().await
+            || self.input_queue.has_pending_mailbox_items().await
                 && self.has_outstanding_durable_sleep())
         {
             return;
@@ -483,7 +471,7 @@ impl Session {
             if active_turn.is_some() {
                 return;
             }
-            let active_turn = active_turn.get_or_insert_with(ActiveTurn::preparing);
+            let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
             Arc::clone(&active_turn.turn_state)
         };
 

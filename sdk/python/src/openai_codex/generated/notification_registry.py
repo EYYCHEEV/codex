@@ -8,8 +8,11 @@ from typing import TypeAlias
 from pydantic import BaseModel
 
 from .v2_all import AccountLoginCompletedNotification
+from .v2_all import AccountPoolUpdatedNotification
 from .v2_all import AccountRateLimitsUpdatedNotification
+from .v2_all import AccountSelectionUpdatedNotification
 from .v2_all import AccountUpdatedNotification
+from .v2_all import AccountUsageUpdatedNotification
 from .v2_all import AgentMessageDeltaNotification
 from .v2_all import AppListUpdatedNotification
 from .v2_all import AuthRecoveryNotification
@@ -36,6 +39,7 @@ from .v2_all import ItemGuardianApprovalReviewStartedNotification
 from .v2_all import ItemStartedNotification
 from .v2_all import McpServerEventStreamNotification
 from .v2_all import McpServerOauthLoginCompletedNotification
+from .v2_all import McpServerStartupCompleteNotification
 from .v2_all import McpServerStatusUpdatedNotification
 from .v2_all import McpToolCallProgressNotification
 from .v2_all import ModelReroutedNotification
@@ -83,6 +87,7 @@ from .v2_all import TurnCompletedNotification
 from .v2_all import TurnDiffUpdatedNotification
 from .v2_all import TurnModerationMetadataNotification
 from .v2_all import TurnPlanUpdatedNotification
+from .v2_all import TurnResponseAttemptResetNotification
 from .v2_all import TurnStartedNotification
 from .v2_all import WarningNotification
 from .v2_all import WindowsSandboxSetupCompletedNotification
@@ -90,8 +95,11 @@ from .v2_all import WindowsWorldWritableWarningNotification
 
 KnownNotificationPayload: TypeAlias = (
     AccountLoginCompletedNotification
+    | AccountPoolUpdatedNotification
     | AccountRateLimitsUpdatedNotification
+    | AccountSelectionUpdatedNotification
     | AccountUpdatedNotification
+    | AccountUsageUpdatedNotification
     | AgentMessageDeltaNotification
     | AppListUpdatedNotification
     | AuthRecoveryNotification
@@ -118,6 +126,7 @@ KnownNotificationPayload: TypeAlias = (
     | ItemStartedNotification
     | McpServerEventStreamNotification
     | McpServerOauthLoginCompletedNotification
+    | McpServerStartupCompleteNotification
     | McpServerStatusUpdatedNotification
     | McpToolCallProgressNotification
     | ModelReroutedNotification
@@ -165,6 +174,7 @@ KnownNotificationPayload: TypeAlias = (
     | TurnDiffUpdatedNotification
     | TurnModerationMetadataNotification
     | TurnPlanUpdatedNotification
+    | TurnResponseAttemptResetNotification
     | TurnStartedNotification
     | WarningNotification
     | WindowsSandboxSetupCompletedNotification
@@ -173,8 +183,11 @@ KnownNotificationPayload: TypeAlias = (
 
 NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "account/login/completed": AccountLoginCompletedNotification,
+    "account/pool/updated": AccountPoolUpdatedNotification,
     "account/rateLimits/updated": AccountRateLimitsUpdatedNotification,
+    "account/selection/updated": AccountSelectionUpdatedNotification,
     "account/updated": AccountUpdatedNotification,
+    "account/usage/updated": AccountUsageUpdatedNotification,
     "app/list/updated": AppListUpdatedNotification,
     "autoApprovalReview/strictReviewRequired": StrictReviewRequiredNotification,
     "command/exec/outputDelta": CommandExecOutputDeltaNotification,
@@ -205,6 +218,7 @@ NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "item/started": ItemStartedNotification,
     "mcpServer/event/stream/notification": McpServerEventStreamNotification,
     "mcpServer/oauthLogin/completed": McpServerOauthLoginCompletedNotification,
+    "mcpServer/startupStatus/completed": McpServerStartupCompleteNotification,
     "mcpServer/startupStatus/updated": McpServerStatusUpdatedNotification,
     "model/rerouted": ModelReroutedNotification,
     "model/safetyBuffering/updated": ModelSafetyBufferingUpdatedNotification,
@@ -250,6 +264,7 @@ NOTIFICATION_MODELS: dict[str, type[KnownNotificationPayload]] = {
     "turn/diff/updated": TurnDiffUpdatedNotification,
     "turn/moderationMetadata": TurnModerationMetadataNotification,
     "turn/plan/updated": TurnPlanUpdatedNotification,
+    "turn/responseAttempt/reset": TurnResponseAttemptResetNotification,
     "turn/started": TurnStartedNotification,
     "warning": WarningNotification,
     "windows/worldWritableWarning": WindowsWorldWritableWarningNotification,
@@ -285,6 +300,7 @@ DIRECT_TURN_ID_NOTIFICATION_TYPES: tuple[type[BaseModel], ...] = (
     TurnDiffUpdatedNotification,
     TurnModerationMetadataNotification,
     TurnPlanUpdatedNotification,
+    TurnResponseAttemptResetNotification,
 )
 
 NESTED_TURN_NOTIFICATION_TYPES: tuple[type[BaseModel], ...] = (

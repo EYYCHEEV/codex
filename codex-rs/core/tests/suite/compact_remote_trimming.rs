@@ -1,6 +1,8 @@
 //! Checks request-history trimming at the streamed remote compaction boundary.
 
 use super::*;
+use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use core_test_support::apps_test_server::configure_search_capable_model;
 use pretty_assertions::assert_eq;
 
@@ -12,6 +14,62 @@ fn compact_response() -> String {
         }),
         responses::ev_completed("compact"),
     ])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_v2_trim_estimate_includes_model_visible_tool_specs() -> Result<()> {
+    let trailing_output = "x".repeat(12_000);
+    for (description, expected_output) in [
+        (
+            "Short tool description".to_string(),
+            trailing_output.as_str(),
+        ),
+        (
+            "tool description ".repeat(1_600),
+            CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE,
+        ),
+    ] {
+        let harness = TestCodexHarness::with_builder(
+            test_codex()
+                .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+                .with_config(|config| {
+                    config.model_context_window = Some(8_000);
+                    config.base_instructions = Some("Compact these messages.".to_string());
+                }),
+        )
+        .await?;
+        let started = harness
+            .test()
+            .thread_manager
+            .start_thread(StartThreadOptions {
+                dynamic_tools: vec![DynamicToolSpec::Function(DynamicToolFunctionSpec {
+                    name: "budget_probe".to_string(),
+                    description,
+                    input_schema: json!({"type": "object", "properties": {}}),
+                    defer_loading: false,
+                })],
+                ..StartThreadOptions::new(harness.test().config.clone())
+            })
+            .await?;
+        let codex = &started.thread;
+        let history = [
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"summarize this tool result"}]}),
+            json!({"type":"function_call","call_id":"trailing","name":"budget_probe","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":"trailing","output":trailing_output}),
+        ].into_iter().map(serde_json::from_value).collect::<serde_json::Result<Vec<ResponseItem>>>()?;
+        codex.inject_response_items(history).await?;
+        let mock = mount_sse_once(harness.server(), compact_response()).await;
+        codex.submit(Op::Compact).await?;
+        wait_for_turn_complete(codex).await;
+        let request = mock.single_request();
+        assert_eq!(request.path(), "/v1/responses");
+        assert!(request.has_function_call("trailing"));
+        assert_eq!(
+            request.function_call_output_text("trailing").as_deref(),
+            Some(expected_output)
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

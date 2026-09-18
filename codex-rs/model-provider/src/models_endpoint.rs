@@ -2,6 +2,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use codex_api::AgentIdentityTelemetry;
@@ -51,6 +52,14 @@ pub(crate) struct OpenAiModelsEndpoint {
     provider_info: ModelProviderInfo,
     auth_manager: Option<Arc<AuthManager>>,
     transport_builder: Arc<dyn ModelsTransportBuilder>,
+    managed_identity: Mutex<Option<ManagedModelsIdentity>>,
+}
+
+/// Bind upstream's catalog identity to the selected request, invalidating it on pool changes.
+#[derive(Debug)]
+struct ManagedModelsIdentity {
+    auth_revision: u64,
+    identity: String,
 }
 
 impl OpenAiModelsEndpoint {
@@ -62,11 +71,16 @@ impl OpenAiModelsEndpoint {
             provider_info,
             auth_manager,
             transport_builder: Arc::new(RouteAwareModelsTransportBuilder),
+            managed_identity: Mutex::default(),
         }
     }
 
     async fn request_setup(&self) -> CoreResult<crate::provider::ProviderRequestSetup> {
-        resolve_provider_request_setup(
+        let auth_revision = self
+            .auth_manager
+            .as_ref()
+            .map(|manager| *manager.auth_change_receiver().borrow());
+        let setup = resolve_provider_request_setup(
             self.auth_manager.clone(),
             &self.provider_info,
             ProviderAuthScope {
@@ -78,7 +92,28 @@ impl OpenAiModelsEndpoint {
                 model: None,
             },
         )
-        .await
+        .await?;
+        let identity = if setup.managed_snapshot.is_some() {
+            auth_revision
+                .map(|auth_revision| {
+                    crate::models_identity::identity(
+                        &self.provider_info,
+                        setup.effective_auth.as_ref(),
+                    )
+                    .map(|identity| ManagedModelsIdentity {
+                        auth_revision,
+                        identity,
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        *self
+            .managed_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+        Ok(setup)
     }
 
     async fn uses_codex_backend(&self) -> bool {
@@ -128,7 +163,10 @@ impl OpenAiModelsEndpoint {
                     &self.provider_info,
                     setup.effective_auth.as_ref(),
                 )?;
-                if setup.effective_auth.as_ref().is_some_and(CodexAuth::is_api_key_auth)
+                if setup
+                    .effective_auth
+                    .as_ref()
+                    .is_some_and(CodexAuth::is_api_key_auth)
                     && self.supports_api_key_models()
                     && self.provider_info.base_url.is_none()
                 {
@@ -171,7 +209,11 @@ impl OpenAiModelsEndpoint {
                             .map_err(|err| CodexErr::Io(err.into()))?;
                         setup = self.request_setup().await?;
                     }
-                    result => return result.map(|(models, etag)| (models, etag, identity)).map_err(map_api_error),
+                    result => {
+                        return result
+                            .map(|(models, etag)| (models, etag, identity))
+                            .map_err(map_api_error);
+                    }
                 }
             }
         })
@@ -199,6 +241,15 @@ impl ModelsEndpointClient for OpenAiModelsEndpoint {
     }
 
     fn identity(&self) -> Option<String> {
+        if let Some(selected) = self
+            .managed_identity
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            let current_revision = *self.auth_manager.as_ref()?.auth_change_receiver().borrow();
+            return (selected.auth_revision == current_revision).then(|| selected.identity.clone());
+        }
         let auth = self
             .auth_manager
             .as_ref()
@@ -356,6 +407,10 @@ impl RequestTelemetry for ModelsRequestTelemetry {
 }
 
 #[cfg(test)]
+#[path = "models_endpoint_pool_tests.rs"]
+mod pool_tests;
+
+#[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
     use std::sync::Mutex;
@@ -449,6 +504,7 @@ mod tests {
                 },
                 auth_manager: Some(auth.clone()),
                 transport_builder: capture.clone(),
+                managed_identity: Mutex::default(),
             });
             let manager = OpenAiModelsManager::new_without_cache(endpoint.clone(), Some(auth));
             manager.set_api_key_model_discovery_enabled(/*enabled*/ true);
@@ -539,6 +595,7 @@ mod tests {
             transport_builder: Arc::new(RecordingTransportBuilder {
                 observed_request: Arc::clone(&observed_request),
             }),
+            managed_identity: Mutex::default(),
         };
 
         endpoint
@@ -584,6 +641,7 @@ mod tests {
             transport_builder: Arc::new(RecordingTransportBuilder {
                 observed_request: Arc::new(Mutex::new(None)),
             }),
+            managed_identity: Mutex::default(),
         };
 
         set_default_client_residency_requirement(Some(ResidencyRequirement::Us));

@@ -23,6 +23,9 @@ use tempfile::tempdir;
 use url::Url;
 
 const DEFAULT_LOGIN_PORT: u16 = 1455;
+
+#[path = "login_multi_account.rs"]
+mod multi_account;
 const FALLBACK_LOGIN_PORT: u16 = 1457;
 const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";

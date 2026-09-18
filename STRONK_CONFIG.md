@@ -9,10 +9,15 @@ configured_only = true
 ```
 
 This file uses the existing Stronk config schema. Fork extensions include
-`agents.configured_only`, legacy profile `model_context_window` and
-`model_auto_compact_token_limit`, and command-hook `onFailure` (`on_failure` alias).
+`agents.configured_only` and command-hook `onFailure` (`on_failure` alias).
 Standalone `hooks.json` continues to support the hook extension independently;
 an existing Sentinel installation does not need to move its hooks.
+
+Starting with the .155-based fork, profile token budgets use upstream profile
+files: put `model_context_window` and `model_auto_compact_token_limit` at the top
+level of `$CODEX_HOME/<profile>.config.toml` and select that profile normally.
+Move these keys out of legacy `[profiles.<profile>]` tables, including tables in
+`stronk.toml`; the fork no longer carries those legacy schema extensions.
 
 Private settings are user defaults: shared `config.toml`, selected profiles,
 project settings, and CLI overrides retain their normal precedence over them.

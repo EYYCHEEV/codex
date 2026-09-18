@@ -330,7 +330,10 @@ async fn schedule_startup_prewarm_inner(
                 &step_context.settings.model_info,
                 &step_context.session_telemetry,
                 session
-                    .reasoning_effort_for_request(&step_context.settings, RequestEffortUsage::Sampling)
+                    .reasoning_effort_for_request(
+                        &step_context.settings,
+                        RequestEffortUsage::Sampling,
+                    )
                     .await,
                 step_context.settings.reasoning_summary,
                 step_context.settings.service_tier.clone(),

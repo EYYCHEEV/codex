@@ -1052,13 +1052,13 @@ impl TurnEnvironmentSnapshot {
     pub(crate) fn configuration_selections(&self) -> Vec<TurnEnvironmentSelection> {
         self.environments
             .iter()
-            .filter_map(|environment| match environment {
-                TurnEnvironmentState::Ready(environment) => Some(environment.selection.clone()),
-                TurnEnvironmentState::Starting(environment) => Some(environment.selection.clone()),
+            .map(|environment| match environment {
+                TurnEnvironmentState::Ready(environment) => environment.selection.clone(),
+                TurnEnvironmentState::Starting(environment) => environment.selection.clone(),
                 TurnEnvironmentState::Failed { selection, error } => {
                     let mut selection = selection.clone();
                     selection.config = EnvironmentConfigState::Failed(error.clone());
-                    Some(selection)
+                    selection
                 }
             })
             .collect()

@@ -359,7 +359,10 @@ pub(crate) async fn resolve_provider_request_setup(
 ) -> codex_protocol::error::Result<ProviderRequestSetup> {
     // Capture ownership before resolving credentials, matching upstream's WebSocket guard.
     let auth_owner_generation = auth_manager.as_ref().map(|manager| {
-        manager.auth_change_state_receiver().borrow().owner_generation
+        manager
+            .auth_change_state_receiver()
+            .borrow()
+            .owner_generation
     });
     let first_party_auth = provider_uses_first_party_auth_path(provider);
     let effective_manager_auth = if first_party_auth {
@@ -687,9 +690,9 @@ impl ModelProvider for ConfiguredModelProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use base64::Engine;
     use chrono::Utc;
+    use std::future::Future;
     use std::num::NonZeroU64;
     use std::task::Context;
     use std::task::Waker;

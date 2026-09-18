@@ -1324,9 +1324,6 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
-    pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
-        Arc::clone(&self.turn_state)
-    }
     /// Resolves one atomic provider/auth setup for an outer request-attempt owner.
     pub async fn current_client_setup(
         &self,

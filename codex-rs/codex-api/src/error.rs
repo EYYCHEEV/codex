@@ -14,6 +14,9 @@ pub enum ApiError {
     Api { status: StatusCode, message: String },
     #[error("stream error: {0}")]
     Stream(String),
+    /// Transport loss after the SSE handshake, distinct from server-declared failures.
+    #[error("stream error: {0}")]
+    StreamDisconnected(String),
     #[error("stream error: websocket closed by server before response.completed")]
     WebsocketClosed(Box<WebsocketCloseDetails>),
     #[error("context window exceeded")]

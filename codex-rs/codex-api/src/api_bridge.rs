@@ -38,6 +38,9 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
             }
         }
         ApiError::Stream(msg) => CodexErr::Stream(msg),
+        ApiError::StreamDisconnected(message) => {
+            CodexErr::new(CodexErrorDetails::StreamDisconnected(message))
+        }
         ApiError::WebsocketClosed(details) => CodexErr::WebsocketClosed(details),
         ApiError::ServerOverloaded => CodexErr::ServerOverloaded,
         ApiError::Api { status, message } => {

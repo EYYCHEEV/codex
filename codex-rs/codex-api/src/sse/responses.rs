@@ -600,20 +600,23 @@ async fn process_sse_with_treatment(
             Ok(Some(Ok(sse))) => sse,
             Ok(Some(Err(e))) => {
                 debug!("SSE Error: {e:#}");
-                let _ = tx_event.send(Err(ApiError::Stream(e.to_string()))).await;
+                let error =
+                    response_error.unwrap_or_else(|| ApiError::StreamDisconnected(e.to_string()));
+                let _ = tx_event.send(Err(error)).await;
                 return;
             }
             Ok(None) => {
-                let error = response_error.unwrap_or(ApiError::Stream(
+                let error = response_error.unwrap_or(ApiError::StreamDisconnected(
                     "stream closed before response.completed".into(),
                 ));
                 let _ = tx_event.send(Err(error)).await;
                 return;
             }
             Err(_) => {
-                let _ = tx_event
-                    .send(Err(ApiError::Stream("idle timeout waiting for SSE".into())))
-                    .await;
+                let error = response_error.unwrap_or(ApiError::StreamDisconnected(
+                    "idle timeout waiting for SSE".into(),
+                ));
+                let _ = tx_event.send(Err(error)).await;
                 return;
             }
         };
@@ -756,6 +759,10 @@ fn rate_limit_regex() -> &'static regex_lite::Regex {
         regex_lite::Regex::new(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)").unwrap()
     })
 }
+
+#[cfg(test)]
+#[path = "responses_disconnect_tests.rs"]
+mod disconnect_tests;
 
 #[cfg(test)]
 mod tests {
@@ -980,7 +987,7 @@ mod tests {
         assert_matches!(events[0], Ok(ResponseEvent::OutputItemDone(_)));
 
         match &events[1] {
-            Err(ApiError::Stream(msg)) => {
+            Err(ApiError::StreamDisconnected(msg)) => {
                 assert_eq!(msg, "stream closed before response.completed")
             }
             other => panic!("unexpected second event: {other:?}"),

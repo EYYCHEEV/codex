@@ -1,6 +1,7 @@
 use anyhow::Result;
 use pretty_assertions::assert_eq;
 
+use super::super::FunctionCallOutputBody;
 use super::super::FunctionCallOutputPayload;
 use super::super::ResponseInputItem;
 use super::*;

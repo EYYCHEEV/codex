@@ -94,11 +94,10 @@ async fn fork_private_config_preserves_paths_extensions_and_override_precedence(
         r#"
 model = "private"
 model_instructions_file = "private.md"
-[agents]
-configured_only = true
-[profiles.large]
 model_context_window = 200000
 model_auto_compact_token_limit = 180000
+[agents]
+configured_only = true
 [[hooks.PreToolUse]]
 matcher = "Bash"
 [[hooks.PreToolUse.hooks]]
@@ -116,12 +115,9 @@ onFailure = "deny"
         effective["model_instructions_file"].as_str(),
         home.path().join("private.md").to_str()
     );
+    assert_eq!(effective["model_context_window"].as_integer(), Some(200000));
     assert_eq!(
-        effective["profiles"]["large"]["model_context_window"].as_integer(),
-        Some(200000)
-    );
-    assert_eq!(
-        effective["profiles"]["large"]["model_auto_compact_token_limit"].as_integer(),
+        effective["model_auto_compact_token_limit"].as_integer(),
         Some(180000)
     );
     assert_eq!(
