@@ -6853,6 +6853,19 @@ async fn late_reasoning_summary_precedes_one_consolidated_answer() -> Result<()>
     let mut tui = crate::tui::test_support::make_test_tui()?;
 
     app.chat_widget.handle_server_notification(
+        ServerNotification::ItemStarted(codex_app_server_protocol::ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 0,
+            item: ThreadItem::Reasoning {
+                id: "reasoning-1".to_string(),
+                summary: Vec::new(),
+                content: Vec::new(),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+    app.chat_widget.handle_server_notification(
         ServerNotification::ReasoningSummaryTextDelta(
             codex_app_server_protocol::ReasoningSummaryTextDeltaNotification {
                 thread_id: "thread-1".to_string(),
@@ -6931,13 +6944,21 @@ async fn late_reasoning_summary_precedes_one_consolidated_answer() -> Result<()>
             .is::<ReasoningSummaryCell>()
     );
     assert!(app.transcript_cells[1].as_any().is::<AgentMarkdownCell>());
-    let rendered = app
+    let compact = app
         .render_transcript_lines_for_reflow(/*width*/ 80)
         .lines
         .iter()
         .map(rendered_line_text)
         .collect::<Vec<_>>()
         .join("\n");
+    assert!(!compact.contains("Late summary"));
+    let rendered = app
+        .transcript_cells
+        .iter()
+        .map(|cell| lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    assert_eq!(rendered.matches("Late summary").count(), 1);
     assert_eq!(rendered.matches("first answer line").count(), 1);
     assert_eq!(rendered.matches("second answer line").count(), 1);
     assert_app_snapshot!(
