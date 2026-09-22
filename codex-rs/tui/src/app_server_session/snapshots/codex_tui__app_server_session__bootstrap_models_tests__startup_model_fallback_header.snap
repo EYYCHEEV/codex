@@ -1,0 +1,10 @@
+---
+source: tui/src/app_server_session/bootstrap_models_tests.rs
+expression: rendered
+---
+╭───────────────────────────────────────────╮
+│ >_ OpenAI Codex (vtest)                   │
+│                                           │
+│ model:     gpt-5.6-sol   /model to change │
+│ directory: project                        │
+╰───────────────────────────────────────────╯
