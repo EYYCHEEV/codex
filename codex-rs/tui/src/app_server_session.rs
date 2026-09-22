@@ -3,6 +3,7 @@
 //! This module owns the typed JSON-RPC calls needed by the TUI and keeps
 //! request/response plumbing out of `App` and `ChatWidget`.
 
+mod bootstrap_models;
 mod external_agent_config;
 pub(crate) mod fs;
 mod history;
@@ -10,6 +11,10 @@ mod models;
 mod realtime;
 mod rollout_history;
 mod thread_list;
+
+#[cfg(test)]
+#[path = "app_server_session/bootstrap_models_tests.rs"]
+mod bootstrap_models_tests;
 
 #[cfg(test)]
 #[path = "app_server_session/collaboration_catalog_tests.rs"]
@@ -56,8 +61,6 @@ use codex_app_server_protocol::LogoutAccountParams;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::Model as ApiModel;
-use codex_app_server_protocol::ModelListParams;
-use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::NewThreadModelDefaults;
 use codex_app_server_protocol::RateLimitSnapshot;
 use codex_app_server_protocol::RequestId;
@@ -673,22 +676,8 @@ impl AppServerSession {
         // requirements together so an uncached model fetch can overlap both config requests.
         let model_request_id = self.next_request_id();
         let requirements_request_id = self.next_request_id();
-        let (models, requirements, collaboration_modes) = tokio::try_join!(
-            async {
-                self.client
-                    .request_typed::<ModelListResponse>(ClientRequest::ModelList {
-                        request_id: model_request_id,
-                        params: ModelListParams {
-                            cursor: None,
-                            limit: None,
-                            include_hidden: Some(true),
-                        },
-                    })
-                    .await
-                    .map_err(|err| {
-                        bootstrap_request_error("model/list failed during TUI bootstrap", err)
-                    })
-            },
+        let (available_models, requirements, collaboration_modes) = tokio::try_join!(
+            bootstrap_models::load(&self.client, model_request_id, &account),
             async {
                 self.client
                     .request_typed::<ConfigRequirementsReadResponse>(
@@ -711,11 +700,6 @@ impl AppServerSession {
             .requirements
             .and_then(|requirements| requirements.models)
             .and_then(|models| models.new_thread);
-        let available_models = models
-            .data
-            .into_iter()
-            .map(model_preset_from_api_model)
-            .collect::<Vec<_>>();
         let default_model = config
             .model
             .clone()
