@@ -143,7 +143,7 @@ impl Session {
             )
         };
         let environments = self.services.turn_environments.snapshot().await;
-        let environment_selections = environments.all_selections();
+        let environment_selections = environments.configuration_selections();
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)
             .await;
@@ -204,7 +204,7 @@ impl Session {
             local_process_cwd,
         )
         .with_selected_environments(
-            environments.all_selections().into(),
+            environments.configuration_selections().into(),
             environments.ready_environment_handles(),
         )
     }
@@ -226,7 +226,7 @@ impl Session {
         loop {
             // Compare and rebuild from current environments, not choices saved for a future turn.
             let environments = self.services.turn_environments.snapshot().await;
-            let environment_selections = environments.all_selections();
+            let environment_selections = environments.configuration_selections();
             if !self.services.mcp_runtime.current_environments_match(
                 &environment_selections,
                 &environments.ready_environment_handles(),
@@ -322,7 +322,6 @@ impl Session {
             .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
         let auth = self.services.auth_manager.auth().await;
         let environments = self.services.turn_environments.snapshot().await;
-        let environment_selections = environments.all_selections();
         let desired = self.latest_mcp_desired_state(auth, environments).await;
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&desired.environments)
@@ -448,7 +447,7 @@ impl Session {
 
         let auth = request_setup.effective_auth.clone();
         let cache_key = codex_apps_tools_cache_key_for_setup(turn_context, request_setup);
-        let environment_selections = environments.all_selections();
+        let environment_selections = environments.configuration_selections();
         let selected_environments = environments
             .turn_environments()
             .map(|environment| {
@@ -847,7 +846,6 @@ impl Session {
             .mcp_runtime
             .current_ready_selected_capability_roots();
         let environments = self.services.turn_environments.snapshot().await;
-        let environment_selections = environments.all_selections();
         let mut desired = self.latest_mcp_desired_state(auth, environments).await;
         desired.config = Arc::new(refresh_config.clone());
         let executor_capability_discovery = self

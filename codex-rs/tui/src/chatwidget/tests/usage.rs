@@ -173,7 +173,7 @@ async fn managed_usage_uses_selected_row_plan_and_never_exposes_singular_reset_f
     chat.dispatch_command(SlashCommand::Usage);
 
     let rendered = render_bottom_popup(&chat, /*width*/ 80);
-    assert!(rendered.contains("Show usage"));
+    assert!(rendered.contains("View analytics"));
     assert!(!rendered.contains("Redeem usage limit reset"));
     assert!(
         !std::iter::from_fn(|| rx.try_recv().ok())
@@ -181,32 +181,7 @@ async fn managed_usage_uses_selected_row_plan_and_never_exposes_singular_reset_f
     );
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTokenActivity));
-    chat.add_token_activity_output(TokenActivityView::Daily);
-    let request_id = match rx.try_recv() {
-        Ok(AppEvent::RefreshManagedTokenActivity { request_id }) => request_id,
-        other => panic!("expected scoped managed token activity refresh, got {other:?}"),
-    };
-    let summary = chat
-        .managed_accounts()
-        .and_then(|accounts| accounts.selected_account())
-        .and_then(|account| account.usage.token_usage.clone())
-        .expect("selected managed token usage");
-    assert!(chat.finish_managed_token_activity_refresh(
-        request_id,
-        Ok(codex_app_server_protocol::GetAccountTokenUsageResponse {
-            summary,
-            daily_usage_buckets: None,
-            thread_usage: None,
-        }),
-    ));
-    let rendered = lines_to_single_string(
-        &chat
-            .pending_token_activity_output()
-            .expect("completed managed token activity")
-            .display_lines(/*width*/ 80),
-    );
-    assert!(rendered.contains("123"));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAnalytics { view: None }));
 }
 
 #[tokio::test]

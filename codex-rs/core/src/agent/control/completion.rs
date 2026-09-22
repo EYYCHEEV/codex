@@ -75,6 +75,9 @@ impl LocalAgentControl {
                             kind: SubAgentActivityKind::Completed,
                             agent_thread_id: outcome.thread_id,
                             agent_path: child_agent_path.clone(),
+                            agent_type: None,
+                            model: None,
+                            reasoning_effort: None,
                         },
                     )
                     .await

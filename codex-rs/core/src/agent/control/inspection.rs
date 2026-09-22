@@ -20,13 +20,16 @@ impl LocalAgentControl {
             }
             Err(err) => return Err(err),
         };
+        let config = thread.config_snapshot().await;
         Ok(AgentInfo::Loaded {
             agent: LiveAgent {
                 thread_id,
                 metadata: self.get_agent_metadata(thread_id).unwrap_or_default(),
                 status: thread.agent_status().await,
+                model: config.model.clone(),
+                reasoning_effort: config.reasoning_effort.clone(),
             },
-            config: Box::new(thread.config_snapshot().await),
+            config: Box::new(config),
         })
     }
 }

@@ -332,7 +332,6 @@ impl McpRuntime {
     }
 
     async fn publish(&self, input: McpRuntimeInput, previous: Option<&McpConnectionSet>) {
-        let current = self.current.load_full();
         let (publish, publication_gate) = McpPublicationGate::pending();
         let config = Arc::clone(&input.config);
         let auth = input.auth.clone();
@@ -406,6 +405,10 @@ impl McpRuntime {
     pub fn invalidate_resource_caches(&self) {
         self.resource_cache_generation
             .fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub(crate) fn resource_cache_generation(&self) -> u64 {
+        self.resource_cache_generation.load(Ordering::Acquire)
     }
 
     pub(crate) fn resource_cache_key(&self, server: &str) -> Option<McpResourceServerCacheKey> {

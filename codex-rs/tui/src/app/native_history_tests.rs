@@ -116,7 +116,7 @@ async fn settled_tool_precedes_queued_output_and_is_not_emitted_twice() -> Resul
     for cell in app.transcript_cells.iter().rev().take(CELLS_PER_FRAME + 1) {
         app.native_history.defer(cell);
     }
-    app.rebuild_transcript_after_backtrack(
+    app.rebuild_transcript_after_history_rewrite(
         &mut tui,
         ratatui::layout::Size::new(/*width*/ 80, /*height*/ 24).into(),
     )?;

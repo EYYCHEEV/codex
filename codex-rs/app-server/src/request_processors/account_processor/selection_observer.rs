@@ -683,19 +683,14 @@ impl AccountRequestProcessor {
             .as_deref()
             .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
         {
-            Some(thread_id) => self
-                .thread_manager
-                .get_thread(thread_id)
-                .await
-                .ok()
-                .map(|thread| {
-                    let configured = thread.session_configured();
-                    ManagedChatgptSelectionScope {
-                        thread_id: Some(configured.thread_id.to_string()),
-                        session_id: Some(configured.session_id.to_string()),
-                        model: Some(configured.model),
-                    }
+            Some(thread_id) => match self.thread_manager.get_thread(thread_id).await {
+                Ok(thread) => Some(ManagedChatgptSelectionScope {
+                    thread_id: Some(thread.startup_metadata().thread_id.to_string()),
+                    session_id: Some(thread.startup_metadata().session_id.to_string()),
+                    model: Some(thread.config_snapshot().await.model),
                 }),
+                Err(_) => None,
+            },
             None => None,
         };
         Self::selection_scope_from_observed(params, observed.as_ref(), configured.as_ref())

@@ -318,13 +318,27 @@ impl McpResourceClient {
 
     /// Returns a server's resource cache identity without starting its connection.
     pub fn server_cache_key(&self, server: &str) -> Option<McpResourceServerCacheKey> {
-        self.runtime.resource_cache_key(server)
+        match &self.backend {
+            McpResourceClientBackend::Runtime(runtime) => runtime.resource_cache_key(server),
+            McpResourceClientBackend::Binding(binding) => binding.resource_cache_key(server, 0),
+            McpResourceClientBackend::RuntimeAndBinding { runtime, binding } => {
+                binding.resource_cache_key(server, runtime.resource_cache_generation())
+            }
+        }
     }
 
     /// Tracks published auth and source availability without invalidating on unrelated
     /// environment changes. This key contains no credentials.
     pub fn auth_cache_key_for_server(&self, server: &str) -> McpResourceClientAuthKey {
-        self.runtime.auth_cache_key_for_server(server)
+        match &self.backend {
+            McpResourceClientBackend::Runtime(runtime) => runtime.auth_cache_key_for_server(server),
+            McpResourceClientBackend::Binding(binding) => binding.auth_cache_key_for_server(server),
+            McpResourceClientBackend::RuntimeAndBinding { runtime, binding } => {
+                let mut key = runtime.auth_cache_key_for_server(server);
+                key.available = binding.has_server(server);
+                key
+            }
+        }
     }
 
     /// Returns whether this client can address the named server.

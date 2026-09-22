@@ -75,7 +75,7 @@ fn unavailable_thread_dispatches_recovery_and_local_commands() {
         SlashCommand::Clear,
         SlashCommand::Resume,
         SlashCommand::Agents,
-        SlashCommand::MultiAgents,
+        SlashCommand::Agent,
         SlashCommand::Quit,
         SlashCommand::Exit,
         SlashCommand::Status,

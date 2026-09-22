@@ -71,9 +71,17 @@ impl Handler {
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_else(|| agent.thread_id.to_string()),
-                agent_type: config_snapshot.as_ref().and_then(|config| config.session_source.get_agent_role()).unwrap_or_else(|| crate::agent::role::DEFAULT_ROLE_NAME.to_string()),
-                model: config_snapshot.as_ref().map(|config| config.model.clone()).unwrap_or_default(),
-                reasoning_effort: config_snapshot.as_ref().and_then(|config| config.reasoning_effort.clone()),
+                agent_type: config_snapshot
+                    .as_ref()
+                    .and_then(|config| config.session_source.get_agent_role())
+                    .unwrap_or_else(|| crate::agent::role::DEFAULT_ROLE_NAME.to_string()),
+                model: config_snapshot
+                    .as_ref()
+                    .map(|config| config.model.clone())
+                    .unwrap_or_default(),
+                reasoning_effort: config_snapshot
+                    .as_ref()
+                    .and_then(|config| config.reasoning_effort.clone()),
                 agent_status: agent.status,
                 mcp_startup,
             });

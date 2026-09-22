@@ -425,9 +425,7 @@ pub(super) async fn ensure_listener_task_running(
                         thread_outgoing,
                         thread_state.clone(),
                         thread_watch_manager.clone(),
-                        thread_list_state_permit.clone(),
                         account_selection_event_route,
-                        fallback_model_provider.clone(),
                     )
                     .await;
                     if matches!(event.msg, EventMsg::ShutdownComplete)

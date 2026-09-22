@@ -4,6 +4,7 @@ use crate::common::ResponseStream;
 use crate::common::ResponsesWsRequest;
 use crate::common::SafetyBufferingTreatment;
 use crate::common::WS_REQUEST_HEADER_TRACEPARENT_CLIENT_METADATA_KEY;
+use crate::endpoint::responses::ResponsesEndpoint;
 use crate::error::ApiError;
 use crate::provider::Provider;
 use crate::rate_limits::parse_all_rate_limits;
@@ -190,6 +191,7 @@ struct ResponsesWebsocketTimingLogContext {
 
 pub struct ResponsesWebsocketConnection {
     stream: Arc<Mutex<Option<WsStream>>>,
+    endpoint: ResponsesEndpoint,
     // TODO (pakrym): is this the right place for timeout?
     idle_timeout: Duration,
     server_reasoning_included: bool,
@@ -202,6 +204,7 @@ impl std::fmt::Debug for ResponsesWebsocketConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ResponsesWebsocketConnection")
             .field("stream", &"<ws-stream>")
+            .field("endpoint", &self.endpoint)
             .field("idle_timeout", &self.idle_timeout)
             .field("server_reasoning_included", &self.server_reasoning_included)
             .field("server_model", &self.server_model)
@@ -222,9 +225,11 @@ impl ResponsesWebsocketConnection {
         server_model: Option<String>,
         handshake_rate_limits: Vec<RateLimitSnapshot>,
         telemetry: Option<Arc<dyn WebsocketTelemetry>>,
+        endpoint: ResponsesEndpoint,
     ) -> Self {
         Self {
             stream: Arc::new(Mutex::new(Some(stream))),
+            endpoint,
             idle_timeout,
             server_reasoning_included,
             server_model,
@@ -245,7 +250,7 @@ impl ResponsesWebsocketConnection {
         name = "responses_websocket.stream_request",
         level = "info",
         skip_all,
-        fields(transport = "responses_websocket", api.path = "/responses")
+        fields(transport = "responses_websocket", api.path = self.endpoint.path())
     )]
     pub async fn stream_request(
         &self,
@@ -371,6 +376,7 @@ impl ResponsesWebsocketConnection {
 pub struct ResponsesWebsocketClient {
     provider: Provider,
     auth: SharedAuthProvider,
+    endpoint: ResponsesEndpoint,
 }
 
 /// Sanitized close information captured by a handshake probe.
@@ -405,14 +411,23 @@ pub struct ResponsesWebsocketProbe {
 impl ResponsesWebsocketClient {
     /// Creates a Responses WebSocket client for an already-resolved provider and auth source.
     pub fn new(provider: Provider, auth: SharedAuthProvider) -> Self {
-        Self { provider, auth }
+        Self {
+            provider,
+            auth,
+            endpoint: ResponsesEndpoint::Responses,
+        }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: ResponsesEndpoint) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 
     #[instrument(
         name = "responses_websocket.connect",
         level = "info",
         skip_all,
-        fields(transport = "responses_websocket", api.path = "/responses")
+        fields(transport = "responses_websocket", api.path = self.endpoint.path())
     )]
     pub async fn connect(
         &self,
@@ -424,7 +439,7 @@ impl ResponsesWebsocketClient {
     ) -> Result<ResponsesWebsocketConnection, ApiError> {
         let ws_url = self
             .provider
-            .websocket_url_for_path("/responses")
+            .websocket_url_for_path(self.endpoint.path())
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 
         let mut headers =
@@ -440,6 +455,7 @@ impl ResponsesWebsocketClient {
             server_model,
             handshake_rate_limits,
             telemetry,
+            self.endpoint,
         ))
     }
 
@@ -459,7 +475,7 @@ impl ResponsesWebsocketClient {
     ) -> Result<ResponsesWebsocketProbe, ApiError> {
         let ws_url = self
             .provider
-            .websocket_url_for_path("/responses")
+            .websocket_url_for_path(self.endpoint.path())
             .map_err(|err| ApiError::Stream(format!("failed to build websocket URL: {err}")))?;
 
         let mut headers =

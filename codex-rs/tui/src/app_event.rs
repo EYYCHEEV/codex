@@ -774,29 +774,6 @@ pub(crate) enum AppEvent {
         result: Result<ConsumeAccountRateLimitResetCreditResponse, String>,
     },
 
-    /// Fetch account-wide token activity for a `/usage` history card.
-    RefreshTokenActivity {
-        request_id: u64,
-    },
-
-    /// Refresh selected managed-account token activity through scoped `account/list`.
-    RefreshManagedTokenActivity {
-        request_id: u64,
-    },
-
-    /// Result of a scoped managed-account token-activity refresh.
-    ManagedTokenActivityLoaded {
-        origin: ManagedAccountRequestOrigin,
-        request_id: u64,
-        result: Result<codex_app_server_protocol::ListAccountsResponse, String>,
-    },
-
-    /// Result of fetching account-wide token activity.
-    TokenActivityLoaded {
-        request_id: u64,
-        result: Result<GetAccountTokenUsageResponse, String>,
-    },
-
     /// Fetch backend-estimated usage for the currently visible enterprise thread.
     RefreshThreadUsage {
         thread_id: ThreadId,

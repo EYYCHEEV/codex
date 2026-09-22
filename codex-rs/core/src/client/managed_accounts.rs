@@ -451,10 +451,13 @@ impl ModelClientSession {
                 .state
                 .provider
                 .include_internal_metadata(&client_setup.api_provider);
+            let endpoint = self
+                .client
+                .responses_endpoint(client_setup.effective_auth.as_ref(), &model_info.slug);
             let responses_headers = self
                 .client
                 .responses_headers(client_setup.effective_auth.as_ref(), &model_info.slug);
-            tracing::Span::current().record("api.path", "/responses");
+            tracing::Span::current().record("api.path", endpoint.path());
             let fresh_request_scope_recovery = if explicit_setup {
                 unauthorized_recovery_for_setup(auth_manager.as_ref(), &client_setup)
             } else {
@@ -464,7 +467,7 @@ impl ModelClientSession {
                 .client
                 .build_api_transport(
                     &client_setup.api_provider,
-                    "/responses",
+                    endpoint.path(),
                     client_setup.redirect_policy,
                 )
                 .await?;
@@ -480,7 +483,7 @@ impl ModelClientSession {
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
                 request_auth_context,
-                RequestRouteTelemetry::for_endpoint("/responses"),
+                RequestRouteTelemetry::for_endpoint(endpoint.path()),
                 self.client.state.auth_env_telemetry.clone(),
             );
             let compression =
@@ -502,13 +505,15 @@ impl ModelClientSession {
                 responses_metadata,
                 include_internal,
             )?;
+
             self.client.set_guardian_metadata(
                 &mut request.client_metadata,
                 responses_metadata.parent_response_id.as_deref(),
                 client_setup.effective_auth.as_ref(),
+                endpoint,
                 &responses_headers,
             );
-            if is_guardian_reviewer(&responses_headers) {
+            if endpoint == ResponsesEndpoint::Guardian || is_guardian_reviewer(&responses_headers) {
                 request.service_tier = None;
             }
             if let Some(header_value) = self.client.build_routing_hint_header(

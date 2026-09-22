@@ -221,31 +221,6 @@ impl App {
         });
     }
 
-    pub(super) fn refresh_managed_token_activity(
-        &mut self,
-        app_server: &AppServerSession,
-        request_id: u64,
-    ) {
-        let request_handle = app_server.request_handle();
-        let app_event_tx = self.app_event_tx.clone();
-        let origin = self.managed_account_request_origin();
-        tokio::spawn(async move {
-            let result = fetch_managed_accounts(
-                request_handle,
-                origin.thread_id,
-                Some(origin.model.clone()),
-                /*refresh_usage*/ true,
-            )
-            .await
-            .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::ManagedTokenActivityLoaded {
-                origin,
-                request_id,
-                result,
-            });
-        });
-    }
-
     pub(super) fn refresh_managed_accounts_cache(&mut self, app_server: &AppServerSession) {
         let origin = self.managed_account_request_origin();
         self.refresh_managed_accounts_cache_from(app_server, origin, /*refresh_usage*/ false);
@@ -315,25 +290,6 @@ impl App {
             .managed_accounts()
             .and_then(|accounts| accounts.selected_account_binding_key());
         previous_binding != current_binding
-    }
-
-    pub(super) fn refresh_token_activity(
-        &mut self,
-        app_server: &AppServerSession,
-        request_id: u64,
-    ) {
-        let request_handle = app_server.request_handle();
-        let app_event_tx = self.app_event_tx.clone();
-        tokio::spawn(async move {
-            let result = tokio::time::timeout(
-                TOKEN_ACTIVITY_FETCH_TIMEOUT,
-                fetch_account_token_activity(request_handle),
-            )
-            .await
-            .map_err(|_| "account/usage/read timed out in TUI".to_string())
-            .and_then(|result| result.map_err(|err| err.to_string()));
-            app_event_tx.send(AppEvent::TokenActivityLoaded { request_id, result });
-        });
     }
 
     pub(super) fn refresh_thread_usage(

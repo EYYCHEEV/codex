@@ -222,6 +222,7 @@ pub(super) fn sampler_config(base_url: String) -> LunaSamplerConfig {
         thread_id: "thread-1".to_owned(),
         originator: Some("guardian-v2-test".to_owned()),
 
+        free_guardian: false,
         service_tier: None,
         luna_compaction_hash: None,
         max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
@@ -405,25 +406,39 @@ impl ExternalAuth for RefreshableAuth {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn classifier_sends_guardian_header_only_with_codex_backend_auth() -> Result<()> {
+async fn classifier_uses_free_endpoint_only_with_codex_backend_auth() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    for (auth, base_path, expected_header, expected_service_tier) in [
+    for (auth, base_path, free_guardian, expected_path, expected_header, expected_service_tier) in [
         (
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             "/backend-api/codex",
+            false,
+            "/backend-api/codex/responses",
+            None,
+            Some("priority"),
+        ),
+        (
+            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+            "/backend-api/codex",
+            true,
+            "/backend-api/codex/guardian-classifier",
             Some("classifier"),
             None,
         ),
         (
             CodexAuth::create_dummy_chatgpt_auth_for_testing(),
             "/v1",
+            true,
+            "/v1/responses",
             None,
             Some("priority"),
         ),
         (
             CodexAuth::from_api_key("test-api-key"),
             "/v1",
+            true,
+            "/v1/responses",
             None,
             Some("priority"),
         ),
@@ -442,12 +457,13 @@ async fn classifier_sends_guardian_header_only_with_codex_backend_auth() -> Resu
             ModelProviderInfo::create_openai_provider(Some(base_url)),
             Some(AuthManager::from_auth_for_testing(auth)),
         );
+        config.free_guardian = free_guardian;
         config.service_tier = Some("priority".to_owned());
         let sampler = connect_sampler(config).await?;
 
         assert_eq!(sampler.sample(sample_request("turn-1")).await?, "low");
         for handshake in server.handshakes() {
-            assert_eq!(handshake.uri(), format!("{base_path}/responses"));
+            assert_eq!(handshake.uri(), expected_path);
             assert_eq!(
                 handshake.header("x-codex-guardian").as_deref(),
                 expected_header
@@ -529,6 +545,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         thread_id: "thread-1".to_owned(),
         originator: Some("guardian-v2-test".to_owned()),
 
+        free_guardian: false,
         service_tier: None,
         luna_compaction_hash: None,
         max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
@@ -778,6 +795,7 @@ async fn sampler_returns_classification_token_before_terminal_response_events() 
         thread_id: "thread-1".to_owned(),
         originator: None,
 
+        free_guardian: false,
         service_tier: None,
         luna_compaction_hash: None,
         max_input_tokens: codex_guardian_context::DEFAULT_MAX_INPUT_TOKENS,
@@ -1226,6 +1244,7 @@ async fn parent_response_id_survives_classifier_transport_retry() -> Result<()> 
         let base_url = proxy_websocket_servers(&[&healthy, &expired]).await?;
         let mut config = sampler_config(base_url.clone());
         if uses_codex_backend {
+            config.free_guardian = true;
             config.provider = create_model_provider(
                 ModelProviderInfo::create_openai_provider(Some(format!(
                     "{}/backend-api/codex",

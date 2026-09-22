@@ -397,6 +397,11 @@ impl CodexErr {
         &self.details
     }
 
+    /// Whether this error can be retried by a caller with remaining budget.
+    pub fn is_retryable(&self) -> bool {
+        self.retry_delay(1).is_some()
+    }
+
     /// Returns the delay before the given retry attempt, or `None` for a terminal error.
     ///
     /// The first retry is attempt one. Retryable errors use server advice when available and

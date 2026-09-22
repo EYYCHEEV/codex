@@ -36,6 +36,9 @@ impl Session {
             TokenCountEvent {
                 info: history.token_info(),
                 rate_limits: None,
+                managed_account_id: None,
+                account_state_revision: None,
+                managed_transport_binding: None,
             },
         )));
         items

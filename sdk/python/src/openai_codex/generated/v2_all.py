@@ -49,6 +49,22 @@ class AccountRoutingOverride(Enum):
     us_cr = "us_cr"
 
 
+class AccountSelectionUpdatedNotification(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    selected_account_id: Annotated[str | None, Field(alias="selectedAccountId")] = None
+    selection_revision: Annotated[
+        int,
+        Field(
+            alias="selectionRevision",
+            description="Monotonic revision of this thread's selected-account state.",
+            ge=0,
+        ),
+    ]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class AccountTokenUsageDailyBucket(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,

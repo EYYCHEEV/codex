@@ -13,11 +13,11 @@ use codex_api::is_azure_responses_provider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::GatewayAuthManager;
-use codex_login::WorkspaceRoutingRequest;
-use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::ManagedChatgptAuthSnapshot;
 use codex_login::ManagedChatgptSelectionScope;
 use codex_login::TransportAuthBinding;
+use codex_login::WorkspaceRoutingRequest;
+use codex_login::default_client::ClientRedirectPolicy;
 use codex_login::default_client::RESIDENCY_HEADER_NAME;
 use codex_login::default_client::ResidencyRequirement;
 use codex_login::default_client::read_default_client_residency_requirement;
@@ -29,6 +29,7 @@ use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
 use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
+use http::HeaderValue;
 
 use crate::ResolvedResponsesProvider;
 use crate::amazon_bedrock::AmazonBedrockModelProvider;
@@ -40,6 +41,15 @@ use crate::auth::resolve_provider_auth_for_scope;
 use crate::combined_auth::compose_auth;
 use crate::models_endpoint::OpenAiModelsEndpoint;
 use crate::workspace_routing::WorkspaceRoutingContext;
+
+pub(crate) fn enforce_managed_residency(provider: &mut Provider) {
+    if let Some(requirement) = read_default_client_residency_requirement() {
+        let value = match requirement {
+            ResidencyRequirement::Us => HeaderValue::from_static("us"),
+        };
+        provider.headers.insert(RESIDENCY_HEADER_NAME, value);
+    }
+}
 
 /// Remote context-compaction protocols supported by a model provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +114,9 @@ pub struct ProviderAuthRecoveryMessages {
 pub struct ProviderRequestSetup {
     pub effective_auth: Option<CodexAuth>,
     pub auth_owner_generation: Option<u64>,
+    pub auth_revision: Option<u64>,
     pub api_provider: Provider,
+    pub redirect_policy: ClientRedirectPolicy,
     pub api_auth: SharedAuthProvider,
     pub agent_identity_telemetry: Option<AgentIdentityTelemetry>,
     pub managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
@@ -306,6 +318,15 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         })
     }
 
+    /// Routes the exact selected request identity to its workspace backend.
+    fn route_request_setup<'a>(
+        &'a self,
+        _routing_context: &'a WorkspaceRoutingContext,
+        _setup: &'a mut ProviderRequestSetup,
+    ) -> ModelProviderFuture<'a, codex_protocol::error::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     /// Returns the provider base URL that will be used at request time.
     fn runtime_base_url(
         &self,
@@ -416,6 +437,9 @@ pub(crate) async fn resolve_provider_request_setup(
             .borrow()
             .owner_generation
     });
+    let auth_revision = auth_manager
+        .as_ref()
+        .map(|manager| *manager.auth_change_receiver().borrow());
     let first_party_auth = provider_uses_first_party_auth_path(provider);
     let effective_manager_auth = if first_party_auth {
         match auth_manager.as_ref() {
@@ -511,7 +535,9 @@ pub(crate) async fn resolve_provider_request_setup(
     Ok(ProviderRequestSetup {
         effective_auth,
         auth_owner_generation,
+        auth_revision,
         api_provider,
+        redirect_policy: ClientRedirectPolicy::Default,
         api_auth: resolved.auth,
         agent_identity_telemetry: resolved.agent_identity_telemetry,
         managed_id: managed_snapshot
@@ -661,7 +687,7 @@ impl ModelProvider for ConfiguredModelProvider {
             Ok(compose_auth(
                 &self.info,
                 self.gateway_auth_manager.as_ref(),
-                ResolvedProviderAuth::new(primary),
+                ResolvedProviderAuth::new(primary, auth),
             )
             .await?
             .auth)
@@ -674,19 +700,85 @@ impl ModelProvider for ConfiguredModelProvider {
     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ResolvedProviderAuth>> {
         Box::pin(async move {
             let resolved = if provider_uses_first_party_auth_path(&self.info) {
-                let auth = self.auth().await;
-                resolve_provider_auth_for_scope(
-                    self.auth_manager.clone(),
-                    auth.as_ref(),
-                    &self.info,
-                    scope,
-                )
-                .await?
+                let setup =
+                    resolve_provider_request_setup(self.auth_manager(), &self.info, scope).await?;
+                ResolvedProviderAuth {
+                    auth: setup.api_auth,
+                    effective_auth: setup.effective_auth,
+                    agent_identity_telemetry: setup.agent_identity_telemetry,
+                }
             } else {
                 let auth = self.auth().await;
-                ResolvedProviderAuth::new(resolve_provider_auth(auth.as_ref(), &self.info)?)
+                ResolvedProviderAuth::new(resolve_provider_auth(auth.as_ref(), &self.info)?, auth)
             };
             compose_auth(&self.info, self.gateway_auth_manager.as_ref(), resolved).await
+        })
+    }
+
+    fn request_setup(
+        &self,
+        scope: ProviderAuthScope,
+    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderRequestSetup>> {
+        Box::pin(async move {
+            let mut setup =
+                resolve_provider_request_setup(self.auth_manager(), &self.info, scope).await?;
+            let composed = compose_auth(
+                &self.info,
+                self.gateway_auth_manager.as_ref(),
+                ResolvedProviderAuth {
+                    auth: setup.api_auth.clone(),
+                    effective_auth: setup.effective_auth.clone(),
+                    agent_identity_telemetry: setup.agent_identity_telemetry.clone(),
+                },
+            )
+            .await?;
+            setup.api_auth = composed.auth;
+            Ok(setup)
+        })
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "serialize workspace discovery for the selected request identity"
+    )]
+    fn route_request_setup<'a>(
+        &'a self,
+        routing_context: &'a WorkspaceRoutingContext,
+        setup: &'a mut ProviderRequestSetup,
+    ) -> ModelProviderFuture<'a, codex_protocol::error::Result<()>> {
+        Box::pin(async move {
+            if provider_uses_first_party_auth_path(&self.info)
+                && self.info.supports_codex_backend_routes()
+                && let Some(auth) = setup
+                    .managed_snapshot
+                    .as_ref()
+                    .map(|snapshot| &snapshot.auth)
+                    .or(setup.effective_auth.as_ref())
+                    .filter(|auth| auth.is_chatgpt_auth())
+                && let Some(auth_manager) = &self.auth_manager
+            {
+                let mut previously_routed = routing_context.previously_routed.lock().await;
+                if let Some(routing) = auth_manager
+                    .workspace_routing(
+                        auth,
+                        WorkspaceRoutingRequest {
+                            provider_base_url: setup.api_provider.base_url.clone(),
+                            chatgpt_base_url: routing_context.chatgpt_base_url.clone(),
+                            previously_routed: *previously_routed,
+                            session: routing_context.session.clone(),
+                        },
+                    )
+                    .await?
+                {
+                    crate::workspace_routing::apply_workspace_routing(
+                        &mut setup.api_provider,
+                        routing,
+                    )?;
+                    setup.redirect_policy = ClientRedirectPolicy::Reject;
+                    *previously_routed = true;
+                }
+            }
+            Ok(())
         })
     }
 
