@@ -55,6 +55,8 @@ impl AnalyticsSession {
             .with_auth_provider(codex_model_provider::auth_provider_from_auth_manager(
                 Arc::clone(&auth_manager),
                 &auth,
+                codex_login::TransportAuthBinding::for_nonmanaged_auth(Some(&auth)),
+                /*expected_credential_revision*/ None,
             ));
         let mut session = Self {
             client,

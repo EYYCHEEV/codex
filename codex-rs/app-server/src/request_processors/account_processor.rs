@@ -19,8 +19,8 @@ mod bedrock_setup;
 mod gateway_oauth;
 mod managed_accounts;
 mod rate_limit_resets;
-mod workspace_routing;
 mod selection_observer;
+mod workspace_routing;
 
 #[cfg(test)]
 use managed_accounts::managed_rate_observation;
@@ -796,7 +796,7 @@ impl AccountRequestProcessor {
                 };
 
             processor
-                .send_chatgpt_login_completion_notifications(AccountLoginCompletedNotification {
+                .send_account_login_notifications(AccountLoginCompletedNotification {
                     login_id: Some(login_id.to_string()),
                     success,
                     error: error_msg,
@@ -868,7 +868,7 @@ impl AccountRequestProcessor {
             };
 
             processor
-                .send_chatgpt_login_completion_notifications(AccountLoginCompletedNotification {
+                .send_account_login_notifications(AccountLoginCompletedNotification {
                     login_id: Some(login_id.to_string()),
                     success,
                     error: error_msg,
@@ -1170,29 +1170,6 @@ impl AccountRequestProcessor {
         };
 
         Ok(response)
-    }
-
-    async fn get_account_response(
-        &self,
-        params: GetAccountParams,
-    ) -> Result<GetAccountResponse, JSONRPCErrorError> {
-        let do_refresh = params.refresh_token;
-
-        self.refresh_token_if_requested(do_refresh).await;
-
-        let config = self.load_latest_config().await;
-        let provider =
-            create_model_provider(config.model_provider, Some(self.auth_manager.clone()));
-        let account_state = match provider.account_state() {
-            Ok(account_state) => account_state,
-            Err(err) => return Err(invalid_request(err.to_string())),
-        };
-        let account = account_state.account.map(Account::from);
-
-        Ok(GetAccountResponse {
-            account,
-            requires_openai_auth: account_state.requires_openai_auth,
-        })
     }
 
     async fn get_account_rate_limits_response(

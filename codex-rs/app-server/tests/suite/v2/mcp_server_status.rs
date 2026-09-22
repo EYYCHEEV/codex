@@ -1210,6 +1210,8 @@ async fn mcp_server_status_retains_capabilities_when_tool_discovery_fails() -> R
     }
     handle.abort();
     let _ = handle.await;
+    Ok(())
+}
 
 #[tokio::test]
 async fn mcp_status_and_oauth_use_thread_runtime_after_global_config_changes() -> Result<()> {

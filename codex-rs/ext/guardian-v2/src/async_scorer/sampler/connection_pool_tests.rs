@@ -251,6 +251,7 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
                 CodexAuth::from_api_key("test-api-key")
             })),
         );
+        config.free_guardian = uses_codex_backend;
         config.service_tier = Some("priority".to_owned());
         let sampler = LunaSampler::new(config);
         let opener = sampler.connections.replenish().unwrap();
@@ -288,7 +289,7 @@ async fn cold_pool_uses_http_during_open_timeout_then_recovers_after_cooldown() 
         let requests = http_mock.requests();
         let first = &requests[0];
         let expected_path = if uses_codex_backend {
-            "/backend-api/codex/responses"
+            "/backend-api/codex/guardian-classifier"
         } else {
             "/v1/responses"
         };

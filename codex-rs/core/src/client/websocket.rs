@@ -67,6 +67,17 @@ impl WebsocketCloseDiagnosticContext {
 }
 
 impl WebsocketSession {
+    pub(super) fn reset(&mut self, reason: Option<&'static str>) {
+        let continuation_reset_reason = self
+            .continuation_reset_reason
+            .or_else(|| self.last_request.as_ref().and(reason));
+        *self = Self {
+            auth_owner_generation: self.auth_owner_generation,
+            continuation_reset_reason,
+            ..Default::default()
+        };
+    }
+
     pub(super) fn set_connection_reused(&self, connection_reused: bool) {
         *self
             .connection_reused
@@ -84,6 +95,8 @@ impl WebsocketSession {
     pub(super) fn reset_transport_state(&mut self) {
         self.connection = None;
         self.endpoint = None;
+        self.connection_key = None;
+        self.responses_headers.clear();
         self.last_request = None;
         self.last_response_rx = None;
         self.last_response_from_untraced_warmup = false;
@@ -255,10 +268,13 @@ impl ModelClientSession {
                 .state
                 .provider
                 .include_internal_metadata(&client_setup.api_provider);
+            let endpoint = self
+                .client
+                .responses_endpoint(client_setup.effective_auth.as_ref(), &model_info.slug);
             let responses_headers = self
                 .client
                 .responses_headers(client_setup.effective_auth.as_ref(), &model_info.slug);
-            tracing::Span::current().record("api.path", "/responses");
+            tracing::Span::current().record("api.path", endpoint.path());
             let mut fresh_request_scope_recovery = if explicit_setup {
                 unauthorized_recovery_for_setup(auth_manager.as_ref(), &client_setup)
             } else {
@@ -282,7 +298,7 @@ impl ModelClientSession {
                 responses_metadata,
                 include_internal,
             )?;
-            if is_guardian_reviewer(&responses_headers) {
+            if endpoint == ResponsesEndpoint::Guardian || is_guardian_reviewer(&responses_headers) {
                 request.service_tier = None;
             }
             request.access_programs = cyber_access_program::for_auth(
@@ -319,8 +335,9 @@ impl ModelClientSession {
                     binding: client_setup.transport_auth_binding,
                     responses_metadata: &websocket_metadata,
                     auth_context: request_auth_context,
-                    request_route_telemetry: RequestRouteTelemetry::for_endpoint("/responses"),
+                    request_route_telemetry: RequestRouteTelemetry::for_endpoint(endpoint.path()),
                     responses_headers: &responses_headers,
+                    endpoint,
                 })
                 .await
             {
@@ -416,7 +433,9 @@ impl ModelClientSession {
             }
     
             let (previous_response_id, mut incremental_items) = match continuation {
-                Some(continuation) => (Some(continuation.response_id), Some(continuation.items)),
+                Some(WebsocketContinuation {
+                    response_id, items, ..
+                }) => (Some(response_id), Some(items)),
                 None => (None, None),
             };
             let original_item_ids = if let Some(incremental_items) = &mut incremental_items {
@@ -447,6 +466,7 @@ impl ModelClientSession {
                 &mut ws_payload.client_metadata,
                 responses_metadata.parent_response_id.as_deref(),
                 client_setup.effective_auth.as_ref(),
+                endpoint,
                 &responses_headers,
             );
             let interceptors = crate::model_request::prepare(

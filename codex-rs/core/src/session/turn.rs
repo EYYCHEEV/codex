@@ -3051,12 +3051,13 @@ async fn try_run_sampling_request(
                 .effective_auth
                 .as_ref()
                 .map(codex_login::CodexAuth::auth_mode),
-            tags_json = tracing::field::display(serde_json::json!(crate::feedback_config::usage_tags(
-                &turn_context.config,
-                &sess.features,
-                &step_context.settings.model_info,
-                step_context.settings.service_tier.as_deref(),
-            ))),
+            tags_json =
+                tracing::field::display(serde_json::json!(crate::feedback_config::usage_tags(
+                    &turn_context.config,
+                    &sess.features,
+                    &step_context.settings.model_info,
+                    step_context.settings.service_tier.as_deref(),
+                ))),
         );
         let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(
             turn_context.sub_id.as_str(),
@@ -3501,7 +3502,11 @@ async fn try_run_sampling_request(
                     )
                     .await;
                     let budget_result = sess
-                        .record_token_usage_info(&turn_context, token_usage.as_ref())
+                        .record_token_usage_info(
+                            &turn_context,
+                            &step_context.settings,
+                            token_usage.as_ref(),
+                        )
                         .await;
                     should_emit_token_count = true;
                     should_emit_turn_diff = true;

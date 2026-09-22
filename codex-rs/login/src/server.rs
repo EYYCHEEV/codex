@@ -27,12 +27,10 @@ use std::thread;
 use std::time::Duration;
 
 use crate::auth::AuthKeyringBackendKind;
-use crate::auth::save_auth;
-use crate::callback_params::LIFE_SCIENCES_OAUTH_STATE_SUFFIX;
 use crate::auth::AuthManager;
 use crate::auth::ManagedChatgptOauthCredentials;
 use crate::callback_params::LoginCallbackResult;
-use crate::callback_params::LoginOnboardingEntrypoint;
+use crate::callback_params::login_callback_result_from_state;
 use crate::default_client::originator;
 use crate::oauth::AuthorizationCodeGrant;
 use crate::oauth::AuthorizationRequest;
@@ -62,7 +60,6 @@ use codex_http_client::HttpClient;
 use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
-use codex_protocol::auth::AuthMode;
 use codex_utils_template::Template;
 use serde_json::Value as JsonValue;
 use tiny_http::Header;
@@ -363,15 +360,21 @@ async fn process_request(
     match path.as_str() {
         "/auth/callback" => {
             let mut params = CallbackParameters::from_url(&parsed_url);
-            let mut callback_result = LoginCallbackResult::default();
             // ChatGPT may append onboarding metadata to the otherwise exact callback state.
-            if let Some(callback_state) = params.state.as_mut()
-                && callback_state.strip_suffix(LIFE_SCIENCES_OAUTH_STATE_SUFFIX) == Some(state)
-            {
-                callback_state.truncate(state.len());
-                callback_result.onboarding_entrypoint =
-                    Some(LoginOnboardingEntrypoint::LifeSciences);
-            }
+            let mut callback_result = params
+                .state
+                .as_mut()
+                .and_then(|callback_state| {
+                    let result = login_callback_result_from_state(callback_state, state);
+                    if result
+                        .as_ref()
+                        .is_some_and(|result| result.onboarding_entrypoint.is_some())
+                    {
+                        callback_state.truncate(state.len());
+                    }
+                    result
+                })
+                .unwrap_or_default();
             let validation = params.validate(state);
             let has_code = params.code.as_ref().is_some_and(|code| !code.is_empty());
             let has_state = params.state.as_ref().is_some_and(|state| !state.is_empty());
@@ -414,7 +417,6 @@ async fn process_request(
                     );
                 }
             };
-            let mut callback_result = callback_result.unwrap_or_default();
 
             match exchange_code_for_tokens(
                 &opts.issuer,

@@ -16,6 +16,7 @@ use codex_api::SharedAuthProvider;
 use codex_api::TransportError;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::default_client::ClientRedirectPolicy;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_LUNA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_6_TERRA_MODEL_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_ID;
@@ -436,10 +437,16 @@ impl ModelProvider for AmazonBedrockModelProvider {
                     .borrow()
                     .owner_generation
             });
+            let auth_revision = self
+                .auth_manager
+                .as_ref()
+                .map(|manager| *manager.auth_change_receiver().borrow());
             if self.info.has_command_auth() {
                 let effective_auth = self.auth().await;
                 return Ok(ProviderRequestSetup {
                     auth_owner_generation,
+                    auth_revision,
+                    redirect_policy: ClientRedirectPolicy::Default,
                     api_provider: self.api_provider().await?,
                     api_auth: self.api_auth().await?,
                     transport_auth_binding: transport_binding_for_auth(effective_auth.as_ref()),
@@ -468,6 +475,8 @@ impl ModelProvider for AmazonBedrockModelProvider {
             let transport_auth_binding = transport_binding_for_auth(effective_auth.as_ref());
             Ok(ProviderRequestSetup {
                 auth_owner_generation,
+                auth_revision,
+                redirect_policy: ClientRedirectPolicy::Default,
                 effective_auth,
                 api_provider,
                 api_auth,

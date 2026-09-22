@@ -400,7 +400,8 @@ async fn run_compact_task_inner_impl(
                 )
             })?
     } else {
-        get_last_assistant_message_from_turn(history_items.iter().map(|envelope| &envelope.item)).unwrap_or_default()
+        get_last_assistant_message_from_turn(history_items.iter().map(|envelope| &envelope.item))
+            .unwrap_or_default()
     };
     let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
     let user_messages = collect_annotated_user_messages(&history_items);
@@ -840,7 +841,14 @@ async fn drain_to_completed(
         Ok(stream) => stream,
         Err(err) => return AttemptOutcome::uncommitted(Err(err)),
     };
-    drain_compaction_stream(sess, turn_context, stream, phase, managed_rate_limit_binding).await
+    drain_compaction_stream(
+        sess,
+        turn_context,
+        stream,
+        phase,
+        managed_rate_limit_binding,
+    )
+    .await
 }
 
 async fn drain_compaction_stream(
@@ -915,7 +923,10 @@ async fn drain_compaction_stream(
                         let result = sess
                             .update_token_usage_info(turn_context, token_usage.as_ref())
                             .await
-                            .map(|()| CompactionResponse { response_id, output });
+                            .map(|()| CompactionResponse {
+                                response_id,
+                                output,
+                            });
                         return AttemptOutcome::new(result, replay_state);
                     }
                     _ => continue,

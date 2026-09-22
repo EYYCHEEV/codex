@@ -105,7 +105,6 @@ use crate::auth::storage::create_auth_storage;
 use crate::auth::storage::delete_external_chatgpt_auth;
 use crate::auth::storage::load_external_chatgpt_auth;
 use crate::auth::storage::save_external_chatgpt_auth;
-use crate::auth::util::try_parse_error_message;
 use crate::default_client::create_client;
 use crate::default_client::create_default_auth_client;
 use crate::oauth::ErrorBodyLimit;

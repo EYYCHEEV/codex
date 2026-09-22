@@ -326,10 +326,6 @@ impl Session {
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
 
-        let queued_response_items = self
-            .input_queue
-            .take_queued_response_items_for_next_turn()
-            .await;
         codex_guardian_reviewer::ReviewDenials::clear_turn(
             &self.services.thread_extension_data,
             &turn_context.sub_id,

@@ -42,8 +42,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let turn_context = &step_context.turn;
     let responses_metadata = sess
         .responses_metadata(
-            turn_context.as_ref(),
-            CodexResponsesRequestKind::Compaction(compaction_metadata),
+            step_context.as_ref(),
+            crate::responses_metadata::CodexResponsesRequestKind::Compaction(compaction_metadata),
         )
         .await;
     let mut owned_client_session = None;

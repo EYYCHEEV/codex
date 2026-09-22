@@ -365,7 +365,7 @@ async fn wait_for_final_status(
 }
 
 async fn build_wait_agent_mcp_startup(
-    agent_control: &crate::agent::AgentControl,
+    agent_control: &crate::agent::LocalAgentControl,
     target_by_thread_id: &HashMap<ThreadId, String>,
 ) -> Option<HashMap<String, McpStartupSnapshot>> {
     let mut snapshots = HashMap::new();
@@ -384,7 +384,7 @@ pub(super) fn mcp_startup_snapshot_has_server_evidence(snapshot: &McpStartupSnap
 }
 
 pub(super) async fn build_wait_agent_latest_status(
-    agent_control: &crate::agent::AgentControl,
+    agent_control: &crate::agent::LocalAgentControl,
     target_by_thread_id: &HashMap<ThreadId, String>,
     final_statuses: &mut HashMap<ThreadId, AgentStatus>,
 ) -> HashMap<String, AgentStatus> {

@@ -2486,7 +2486,6 @@ async fn managed_same_id_credential_and_workspace_rebind_clears_all_account_boun
     chat.status_line_workspace_headline_pending_request_id = Some(14);
     chat.status_line_workspace_headline_last_requested_at = Some(Instant::now());
     chat.status_line_workspace_messages_disabled = true;
-    chat.add_token_activity_output(TokenActivityView::Daily);
     chat.add_status_output(/*refreshing_rate_limits*/ true, Some(99));
     while rx.try_recv().is_ok() {}
 
@@ -2516,8 +2515,6 @@ async fn managed_same_id_credential_and_workspace_rebind_clears_all_account_boun
         chat.rate_limit_switch_prompt,
         RateLimitSwitchPromptState::Idle
     ));
-    assert!(chat.refreshing_token_activity_output.is_none());
-    assert!(chat.completed_token_activity_output.is_none());
     assert!(chat.refreshing_status_outputs.is_empty());
     assert!(chat.add_credits_nudge_email_in_flight.is_none());
     assert_eq!(chat.status_line_workspace_headline, None);

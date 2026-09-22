@@ -290,15 +290,18 @@ fn spawn_agent_tool_caps_reasoning_effort_value_length() {
 
 #[test]
 fn spawn_agent_tool_hides_route_controls_when_spawn_metadata_is_hidden() {
-    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
-        available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
-        agent_type_description: "role help".to_string(),
-        expose_agent_type: false,
-        hide_agent_type_model_reasoning: true,
-        expose_spawn_agent_model_overrides: true,
-        multi_agent_version: MultiAgentVersion::V2,
-        usage_hint_text: None,
-    }, /*description_override*/ None);
+    let tool = create_spawn_agent_tool_v2(
+        SpawnAgentToolOptions {
+            available_models: vec![model_preset("visible", /*show_in_picker*/ true)],
+            agent_type_description: "role help".to_string(),
+            expose_agent_type: false,
+            hide_agent_type_model_reasoning: true,
+            expose_spawn_agent_model_overrides: true,
+            multi_agent_version: MultiAgentVersion::V2,
+            usage_hint_text: None,
+        },
+        /*description_override*/ None,
+    );
 
     let ToolSpec::Function(ResponsesApiTool {
         description,
@@ -627,7 +630,8 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
         Some("Task-path prefix filter without a trailing slash. Omit to list all live agents.")
     );
     assert_eq!(
-        output_schema.expect("list_agents output schema").to_value()["properties"]["agents"]["items"]["required"],
+        output_schema.expect("list_agents output schema").to_value()["properties"]["agents"]["items"]
+            ["required"],
         json!([
             "agent_name",
             "agent_type",

@@ -1744,6 +1744,7 @@ impl Session {
                     extensions.model_request_contributors().to_vec(),
                 )
                 .with_executed_tool_calls(executed_tool_calls.clone())
+                .with_free_guardian_enabled(config.free_guardian_enabled())
                 .with_restored_history(matches!(
                     &initial_history,
                     InitialHistory::Resumed(_) | InitialHistory::Forked(_)
@@ -1855,7 +1856,7 @@ impl Session {
                 mcp_auth_changes.mark_unchanged();
             }
             let latest_auth = sess.services.auth_manager.auth().await;
-            let resolved_environment_selections = resolved_environments.all_selections();
+            let resolved_environment_selections = resolved_environments.configuration_selections();
             let mcp_projection = if startup_auth_changed
                 || mcp_auth_changes.has_changed().unwrap_or(false)
                 || resolved_environment_selections.as_slice() != environment_selections

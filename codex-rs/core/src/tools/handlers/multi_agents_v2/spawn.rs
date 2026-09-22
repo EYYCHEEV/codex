@@ -148,7 +148,8 @@ async fn handle_spawn_agent(
     }
     if role_name.is_some() && (args.model.is_some() || args.reasoning_effort.is_some()) {
         return Err(FunctionCallError::RespondToModel(
-            "Typed spawn_agent routes are owned by agent_type; omit model and reasoning_effort".to_string(),
+            "Typed spawn_agent routes are owned by agent_type; omit model and reasoning_effort"
+                .to_string(),
         ));
     }
     let prepared = prepare_agent_spawn_config(

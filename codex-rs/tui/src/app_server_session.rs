@@ -2795,6 +2795,7 @@ mod tests {
         let account = GetAccountResponse {
             account: None,
             requires_openai_auth: true,
+            workspace_routing: None,
         };
         assert!(should_list_managed_accounts(&account));
 
@@ -2826,6 +2827,7 @@ mod tests {
                 plan_type: codex_protocol::account::PlanType::Plus,
             }),
             requires_openai_auth: true,
+            workspace_routing: None,
         };
         assert!(should_list_managed_accounts(&account));
 
@@ -2846,10 +2848,12 @@ mod tests {
         assert!(!should_list_managed_accounts(&GetAccountResponse {
             account: Some(Account::ApiKey {}),
             requires_openai_auth: true,
+            workspace_routing: None,
         }));
         assert!(!should_list_managed_accounts(&GetAccountResponse {
             account: None,
             requires_openai_auth: false,
+            workspace_routing: None,
         }));
     }
 

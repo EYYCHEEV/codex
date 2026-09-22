@@ -374,6 +374,7 @@ impl LocalAgentControl {
         thread.mcp_startup_snapshot().await
     }
 
+
     pub(crate) async fn list_agents(
         &self,
         current_session_source: &SessionSource,
@@ -420,6 +421,8 @@ impl LocalAgentControl {
                     ..Default::default()
                 },
                 status: root_thread.agent_status().await,
+                model: root_thread.config_snapshot().await.model,
+                reasoning_effort: root_thread.config_snapshot().await.reasoning_effort,
             });
         }
 
@@ -441,6 +444,8 @@ impl LocalAgentControl {
                 thread_id,
                 metadata,
                 status: thread.agent_status().await,
+                model: thread.config_snapshot().await.model,
+                reasoning_effort: thread.config_snapshot().await.reasoning_effort,
             });
         }
 

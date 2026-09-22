@@ -2167,6 +2167,7 @@ mod tests {
                 collaboration_mode_kind: Default::default(),
                 started_at: None,
                 trace_id: None,
+                root_turn_id: None,
             }),
             EventMsg::ItemCompleted(ItemCompletedEvent {
                 thread_id,

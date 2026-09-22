@@ -764,7 +764,6 @@ approvals_reviewer = "user"
     Ok(())
 }
 
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn codex_apps_auth_failure_requests_elicitation_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -779,7 +778,10 @@ async fn codex_apps_auth_failure_requests_elicitation_by_default() -> Result<()>
                 "name": "calendar_create_event",
             },
         })))
-        .respond_with(AuthFailureResponder { scenario: Scenario::DefaultAuth, format: AuthFailureFormat::Text })
+        .respond_with(AuthFailureResponder {
+            scenario: Scenario::DefaultAuth,
+            format: AuthFailureFormat::Text,
+        })
         .with_priority(/*p*/ 1)
         .mount(&server)
         .await;

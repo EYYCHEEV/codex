@@ -23,8 +23,8 @@ use serde_json::Value as JsonValue;
 
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
-use crate::client_tool_catalog::ToolCatalogSnapshot;
 use crate::client_tool_catalog::CodexAppsToolSnapshot;
+use crate::client_tool_catalog::ToolCatalogSnapshot;
 use crate::connection_manager::McpConnectionSet;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
@@ -34,6 +34,7 @@ use crate::tools::ToolInfo;
 pub struct McpBinding {
     connections: Arc<McpConnectionSet>,
     clients: Arc<McpBindingClients>,
+    auth_generation: Arc<()>,
     config: Arc<McpConfig>,
     plugins_available: bool,
     tools: Vec<ToolInfo>,
@@ -67,6 +68,7 @@ impl McpBinding {
         Self {
             connections,
             clients,
+            auth_generation: Arc::new(()),
             config,
             plugins_available,
             tools,
@@ -141,7 +143,7 @@ impl McpBinding {
         }
         let mut call = recaptured
             .prepare_call(server, tool)
-            .filter(|call| call.catalog_revision == 0)?;
+            .filter(|call| call.catalog_snapshot.revision == 0)?;
         call.tool_info.callable_name = advertised_tool.callable_name.clone();
         call.tool_info.callable_namespace = advertised_tool.callable_namespace.clone();
         Some(call)
@@ -153,6 +155,25 @@ impl McpBinding {
         self.calls
             .get(&(server.to_string(), tool.to_string()))
             .cloned()
+    }
+
+    pub(crate) fn resource_cache_key(
+        &self,
+        server: &str,
+        generation: u64,
+    ) -> Option<crate::McpResourceServerCacheKey> {
+        self.connections.resource_cache_key(server, generation)
+    }
+
+    pub(crate) fn auth_cache_key_for_server(
+        &self,
+        server: &str,
+    ) -> crate::McpResourceClientAuthKey {
+        crate::McpResourceClientAuthKey {
+            generation: Arc::clone(&self.auth_generation),
+            server: server.to_string(),
+            available: self.connections.contains_server(server),
+        }
     }
 
     pub fn has_servers(&self) -> bool {

@@ -164,7 +164,10 @@ impl OpenAiModelsEndpoint {
     ) -> CoreResult<ModelsEndpointResponse> {
         let mut setup = self.request_setup().await?;
         let metric_auth_mode = if self.has_provider_api_key()
-            || setup.effective_auth.as_ref().is_some_and(CodexAuth::is_api_key_auth)
+            || setup
+                .effective_auth
+                .as_ref()
+                .is_some_and(CodexAuth::is_api_key_auth)
         {
             "api_key"
         } else if setup.effective_auth.is_some() {
@@ -190,7 +193,10 @@ impl OpenAiModelsEndpoint {
                 )?;
                 let auth_mode = setup.effective_auth.as_ref().map(CodexAuth::auth_mode);
                 let mut api_provider = setup.api_provider.clone();
-                if (setup.effective_auth.as_ref().is_some_and(CodexAuth::is_api_key_auth)
+                if (setup
+                    .effective_auth
+                    .as_ref()
+                    .is_some_and(CodexAuth::is_api_key_auth)
                     || self.has_provider_api_key())
                     && self.supports_api_key_models()
                     && self.provider_info.base_url.is_none()
@@ -215,20 +221,20 @@ impl OpenAiModelsEndpoint {
                         client_version,
                     )
                     .map_err(map_api_error)?,
-                    None => ModelsClient::<ReqwestTransport>::request_url(
-                        &api_provider,
-                        client_version,
-                    ),
+                    None => {
+                        ModelsClient::<ReqwestTransport>::request_url(&api_provider, client_version)
+                    }
                 };
                 let auth_telemetry = auth_header_telemetry(resolved.auth.as_ref());
-                let request_telemetry: Arc<dyn RequestTelemetry> = Arc::new(ModelsRequestTelemetry {
-                    include_response_debug: self.provider_info.model_catalog_url.is_none(),
-                    auth_mode: auth_mode.map(|mode| TelemetryAuthMode::from(mode).to_string()),
-                    auth_header_attached: auth_telemetry.attached,
-                    auth_header_name: auth_telemetry.name,
-                    agent_identity_telemetry: resolved.agent_identity_telemetry,
-                    auth_env: self.auth_env(),
-                });
+                let request_telemetry: Arc<dyn RequestTelemetry> =
+                    Arc::new(ModelsRequestTelemetry {
+                        include_response_debug: self.provider_info.model_catalog_url.is_none(),
+                        auth_mode: auth_mode.map(|mode| TelemetryAuthMode::from(mode).to_string()),
+                        auth_header_attached: auth_telemetry.attached,
+                        auth_header_name: auth_telemetry.name,
+                        agent_identity_telemetry: resolved.agent_identity_telemetry,
+                        auth_env: self.auth_env(),
+                    });
                 let transport = self
                     .transport_builder
                     .build(http_client_factory.clone(), request_url.clone())
@@ -263,7 +269,10 @@ impl OpenAiModelsEndpoint {
                             .map_err(|mut error| {
                                 if self.provider_info.model_catalog_url.is_some()
                                     && let ApiError::Transport(TransportError::Http {
-                                        url, headers, body, ..
+                                        url,
+                                        headers,
+                                        body,
+                                        ..
                                     }) = &mut error
                                 {
                                     *url = None;
@@ -278,7 +287,11 @@ impl OpenAiModelsEndpoint {
         })
         .await
         .map_err(|_| CodexErr::RequestTimeout)??;
-        Ok(ModelsEndpointResponse { models, etag, identity })
+        Ok(ModelsEndpointResponse {
+            models,
+            etag,
+            identity,
+        })
     }
 
     fn auth_env(&self) -> AuthEnvTelemetry {

@@ -44,6 +44,8 @@ pub struct LiveAgent {
     pub thread_id: ThreadId,
     pub metadata: AgentMetadata,
     pub status: AgentStatus,
+    pub model: String,
+    pub reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
 }
 
 #[derive(Clone, Debug, Default)]

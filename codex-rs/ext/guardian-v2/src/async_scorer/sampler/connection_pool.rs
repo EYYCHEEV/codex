@@ -16,6 +16,7 @@ use codex_api::ReqwestTransport;
 use codex_api::ResponseStream;
 use codex_api::ResponsesApiRequest;
 use codex_api::ResponsesClient;
+use codex_api::ResponsesEndpoint;
 use codex_api::ResponsesOptions;
 use codex_api::ResponsesWebsocketClient;
 use codex_api::ResponsesWebsocketConnection;
@@ -247,7 +248,8 @@ impl ConnectionPool {
                 self.replenish();
                 // Sampling owns the retry budget across both transports.
                 provider.retry.max_attempts = 0;
-                let url = provider.url_for_path("/responses");
+                let endpoint = Self::endpoint_for(request_kind);
+                let url = provider.url_for_path(endpoint.path());
                 let redirect_policy = if provider.headers.contains_key(ACCOUNT_ROUTING_HEADER) {
                     ClientRedirectPolicy::Reject
                 } else {
@@ -292,7 +294,8 @@ impl ConnectionPool {
                     })
                     .await?
                     .clone();
-                let client = ResponsesClient::new(transport, provider, auth);
+                let client =
+                    ResponsesClient::new(transport, provider, auth).with_endpoint(endpoint);
                 (
                     Connection::Http(client),
                     ThreadId::new().to_string(),
@@ -401,12 +404,21 @@ impl ConnectionPool {
         }
         Ok(headers)
     }
+
+    fn endpoint_for(request_kind: RequestMode) -> ResponsesEndpoint {
+        match request_kind {
+            RequestMode::Regular => ResponsesEndpoint::Responses,
+            RequestMode::GuardianClassifier => ResponsesEndpoint::GuardianClassifier,
+        }
+    }
+
     fn responses_request_kind(&self, setup: &ProviderRequestSetup) -> RequestMode {
         let provider = self.config.provider.info();
-        if setup
-            .effective_auth
-            .as_ref()
-            .is_some_and(CodexAuth::uses_codex_backend)
+        if self.config.free_guardian
+            && setup
+                .effective_auth
+                .as_ref()
+                .is_some_and(CodexAuth::uses_codex_backend)
             && provider.supports_codex_backend_routes()
             && provider.requires_openai_auth
             && provider.env_key.is_none()
@@ -443,7 +455,8 @@ impl ConnectionPool {
         );
 
         let provider_info = self.config.provider.info();
-        let client = ResponsesWebsocketClient::new(provider, auth);
+        let endpoint = Self::endpoint_for(request_kind);
+        let client = ResponsesWebsocketClient::new(provider, auth).with_endpoint(endpoint);
         let connect = client.connect(
             &self.config.http_client_factory,
             headers,
@@ -458,7 +471,7 @@ impl ConnectionPool {
             .and_then(|result| result.map_err(LunaSamplerError::Api));
         if let Some(metrics) = self.config.metrics.as_deref() {
             let outcome = if result.is_ok() { "success" } else { "failure" };
-            let mut tags = vec![("endpoint", "/responses"), ("outcome", outcome)];
+            let mut tags = vec![("endpoint", endpoint.path()), ("outcome", outcome)];
             if let Err(error) = &result {
                 tags.push(("failure_reason", sampler_failure_reason(error)));
             }

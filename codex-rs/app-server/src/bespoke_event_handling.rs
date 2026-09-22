@@ -2,9 +2,6 @@ use crate::notification_media::without_notification_media;
 use crate::outgoing_message::ClientRequestResult;
 use crate::outgoing_message::ThreadScopedOutgoingMessageSender;
 use crate::request_processors::AccountSelectionObserver;
-use crate::request_processors::apply_live_thread_settings;
-use crate::request_processors::populate_thread_turns_from_history;
-use crate::request_processors::thread_from_stored_thread;
 use crate::request_processors::thread_settings_from_config_snapshot;
 use crate::server_request_error::is_turn_transition_server_request_error;
 use crate::thread_state::ThreadState;
@@ -153,9 +150,7 @@ pub(crate) async fn apply_bespoke_event_handling(
     outgoing: ThreadScopedOutgoingMessageSender,
     thread_state: Arc<tokio::sync::Mutex<ThreadState>>,
     thread_watch_manager: ThreadWatchManager,
-    thread_list_state_permit: Arc<tokio::sync::Semaphore>,
     account_selection_event_route: Option<AccountSelectionObserver>,
-    fallback_model_provider: String,
 ) {
     let Event {
         id: event_turn_id,

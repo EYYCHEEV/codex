@@ -257,7 +257,6 @@ impl ChatWidget {
         self.invalidate_permission_discovery();
         self.invalidate_connector_scope();
         self.refresh_connector_mentions(/*force_refresh*/ false);
-        self.clear_pending_token_activity_refreshes();
         self.clear_pending_rate_limit_reset_requests();
         self.clear_backend_banner();
         self.luna_reserve_notice_account_id = None;

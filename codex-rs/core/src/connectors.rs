@@ -345,10 +345,10 @@ pub async fn list_accessible_connectors_from_mcp_runtime(
     cache_key: ConnectorDirectoryCacheKey,
     force_refetch: bool,
 ) -> anyhow::Result<AccessibleConnectorsStatus> {
-    let tool_plugin_provenance = tool_plugin_provenance(runtime.config());
+    let tool_plugin_context = tool_plugin_context(runtime.config());
     if !force_refetch && let Some(connectors) = read_cached_accessible_connectors(&cache_key) {
         return Ok(AccessibleConnectorsStatus {
-            connectors: with_app_plugin_sources(connectors, &tool_plugin_provenance),
+            connectors: with_app_plugin_sources(connectors, &tool_plugin_context),
             codex_apps_ready: true,
         });
     }
@@ -380,7 +380,7 @@ pub async fn list_accessible_connectors_from_mcp_runtime(
         write_cached_accessible_connectors(cache_key, &connectors);
     }
     Ok(AccessibleConnectorsStatus {
-        connectors: with_app_plugin_sources(connectors, &tool_plugin_provenance),
+        connectors: with_app_plugin_sources(connectors, &tool_plugin_context),
         codex_apps_ready,
     })
 }

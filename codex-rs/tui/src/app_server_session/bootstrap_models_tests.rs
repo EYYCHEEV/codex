@@ -57,6 +57,7 @@ async fn bootstrap_uses_bundled_models_when_catalog_request_stalls() -> Result<(
     let account = GetAccountResponse {
         account: None,
         requires_openai_auth: false,
+        workspace_routing: None,
     };
     let bootstrap = tokio::time::timeout(
         Duration::from_secs(/*secs*/ 7),
