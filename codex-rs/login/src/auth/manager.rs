@@ -3625,7 +3625,7 @@ impl AuthManager {
             self.reload().await;
             return Ok(removed);
         }
-        self.resume_managed_chatgpt_tombstones().await?;
+        self.wait_for_managed_chatgpt_tombstones().await?;
         self.ensure_global_logout_unambiguous()?;
         self.selection_pins.clear();
         let removed = logout_all_stores(
@@ -3656,7 +3656,7 @@ impl AuthManager {
         self.ensure_logout_allowed()?;
         let overlay = load_external_chatgpt_auth(&self.codex_home)?;
         if overlay.is_none() && !self.has_external_auth() {
-            self.resume_managed_chatgpt_tombstones().await?;
+            self.wait_for_managed_chatgpt_tombstones().await?;
             self.ensure_global_logout_unambiguous()?;
         }
         let auth_dot_json = overlay.or_else(|| {

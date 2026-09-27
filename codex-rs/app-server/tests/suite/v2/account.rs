@@ -1,3 +1,9 @@
+#[path = "account_lifecycle_tests.rs"]
+mod account_lifecycle_tests;
+
+#[path = "account_unavailable_tests.rs"]
+mod account_unavailable_tests;
+
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::TestAppServer;
@@ -1278,7 +1284,8 @@ async fn account_list_refresh_timeout_is_globally_observable() -> Result<()> {
         .clone();
     assert!(matches!(
         &timeout_status,
-        ManagedChatgptAccountRefreshStatus::TransientUnavailable { .. }
+        ManagedChatgptAccountRefreshStatus::ReloginRequired { reason_code, .. }
+            if reason_code == "token_refresh_timeout"
     ));
 
     let first: ListAccountsResponse = to_response(

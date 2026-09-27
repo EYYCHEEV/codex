@@ -29,7 +29,9 @@ async fn provider_requirements_resolve_bedrock_overrides(provider_id: &str) -> R
         CloudConfigBundleFixture::loader_with_enterprise_requirement(&requirements),
     );
     let current = manager.load_latest_config(/*fallback_cwd*/ None).await?;
-    manager.check_thread_model_provider(&current).await?;
+    manager
+        .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
+        .await?;
 
     let changed = ConfigManager::new_for_tests(
         home.path().to_path_buf(),
@@ -41,7 +43,7 @@ async fn provider_requirements_resolve_bedrock_overrides(provider_id: &str) -> R
     );
     assert_eq!(
         changed
-            .check_thread_model_provider(&current)
+            .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
             .await
             .unwrap_err()
             .kind(),
@@ -86,7 +88,9 @@ async fn provider_requirements_do_not_reload_thread_config() -> Result<()> {
             .await
             .is_err()
     );
-    manager.check_thread_model_provider(&current).await?;
+    manager
+        .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
+        .await?;
     manager.cloud_config_bundle = Arc::new(RwLock::new(
         CloudConfigBundleFixture::loader_with_enterprise_requirement("model_provider = 'retained'"),
     ));
@@ -102,7 +106,7 @@ async fn provider_requirements_do_not_reload_thread_config() -> Result<()> {
     ));
     assert_eq!(
         manager
-            .check_thread_model_provider(&current)
+            .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
             .await
             .unwrap_err()
             .kind(),
@@ -131,12 +135,14 @@ async fn provider_requirements_ignore_system_defaults_but_reject_requirement_cha
     let current = manager.load_latest_config(/*fallback_cwd*/ None).await?;
 
     std::fs::write(&system_config_path, "invalid toml !!!")?;
-    manager.check_thread_model_provider(&current).await?;
+    manager
+        .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
+        .await?;
 
     std::fs::write(&requirements_path, "model_provider = 'other'")?;
     assert_eq!(
         manager
-            .check_thread_model_provider(&current)
+            .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
             .await
             .unwrap_err()
             .kind(),
@@ -146,7 +152,7 @@ async fn provider_requirements_ignore_system_defaults_but_reject_requirement_cha
     std::fs::write(&requirements_path, "invalid toml !!!")?;
     assert_eq!(
         manager
-            .check_thread_model_provider(&current)
+            .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
             .await
             .unwrap_err()
             .kind(),
@@ -159,7 +165,7 @@ async fn provider_requirements_ignore_system_defaults_but_reject_requirement_cha
     )?;
     assert_eq!(
         manager
-            .check_thread_model_provider(&current)
+            .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
             .await
             .unwrap_err()
             .kind(),
@@ -170,7 +176,7 @@ async fn provider_requirements_ignore_system_defaults_but_reject_requirement_cha
     std::fs::write(managed_config_path, "invalid toml !!!")?;
     assert_eq!(
         manager
-            .check_thread_model_provider(&current)
+            .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
             .await
             .unwrap_err()
             .kind(),
@@ -203,9 +209,130 @@ async fn provider_requirement_load_errors_reject_input() -> Result<()> {
         );
         assert!(
             manager
-                .check_thread_model_provider(&previous)
+                .check_thread_model_provider(&previous, ProviderPolicyCheck::Current)
                 .await
                 .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn selected_admission_defers_global_cloud_but_preserves_local_requirements() -> Result<()> {
+    let home = tempdir()?;
+    let requirements_path = home.path().join("requirements.toml");
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.system_requirements_path = Some(requirements_path.clone());
+    let manager = ConfigManager::new_for_tests(
+        home.path().to_path_buf(),
+        Vec::new(),
+        overrides,
+        CloudConfigBundleLoader::default(),
+    );
+    let current = manager.load_latest_config(/*fallback_cwd*/ None).await?;
+    let auth = AuthManager::from_auth_for_testing(
+        codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
+    for loader in [
+        CloudConfigBundleFixture::loader_with_enterprise_requirement("model_provider = 'other'"),
+        CloudConfigBundleLoader::new(async {
+            Err(CloudConfigBundleLoadError::new(
+                CloudConfigBundleLoadErrorCode::RequestFailed,
+                /*status_code*/ None,
+                "default account policy unavailable",
+            ))
+        }),
+    ] {
+        let global = manager.with_cloud_config_bundle(loader);
+        assert!(
+            global
+                .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
+                .await
+                .is_err()
+        );
+        global
+            .check_thread_model_provider(&current, ProviderPolicyCheck::RequestScoped(&auth))
+            .await?;
+        // Scoping the selected loader must not mutate the default account's loader.
+        let selected = global.with_cloud_config_bundle(CloudConfigBundleLoader::default());
+        selected
+            .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
+            .await?;
+        assert!(
+            global
+                .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
+                .await
+                .is_err()
+        );
+        std::fs::write(&requirements_path, "model_provider = 'other'")?;
+        assert_eq!(
+            global
+                .check_thread_model_provider(&current, ProviderPolicyCheck::RequestScoped(&auth))
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+        std::fs::remove_file(&requirements_path)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn nonmanaged_and_independent_admission_keeps_global_cloud_policy() -> Result<()> {
+    let home = tempdir()?;
+    let manager = ConfigManager::without_managed_config_for_tests(home.path().to_path_buf());
+    let current = manager.load_latest_config(/*fallback_cwd*/ None).await?;
+    let manager = manager.with_cloud_config_bundle(
+        CloudConfigBundleFixture::loader_with_enterprise_requirement("model_provider = 'other'"),
+    );
+    for auth in [
+        codex_login::CodexAuth::from_api_key("synthetic-api-key"),
+        codex_login::CodexAuth::from_external_chatgpt_tokens(
+            "header.e30.external",
+            "external-workspace",
+            /*chatgpt_plan_type*/ None,
+        )?,
+    ] {
+        let auth = AuthManager::from_auth_for_testing(auth);
+        assert_eq!(
+            manager
+                .check_thread_model_provider(&current, ProviderPolicyCheck::RequestScoped(&auth))
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
+        );
+    }
+    let auth = AuthManager::from_auth_for_testing(
+        codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
+    for provider in [
+        ModelProviderInfo {
+            requires_openai_auth: false,
+            ..current.model_provider.clone()
+        },
+        ModelProviderInfo {
+            env_key: Some("INDEPENDENT_KEY".into()),
+            ..current.model_provider.clone()
+        },
+        ModelProviderInfo {
+            base_url: Some("https://independent.example/v1".into()),
+            ..current.model_provider.clone()
+        },
+    ] {
+        let mut independent = current.clone();
+        independent.model_provider = provider;
+        assert_eq!(
+            manager
+                .check_thread_model_provider(
+                    &independent,
+                    ProviderPolicyCheck::RequestScoped(&auth)
+                )
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::PermissionDenied,
         );
     }
     Ok(())

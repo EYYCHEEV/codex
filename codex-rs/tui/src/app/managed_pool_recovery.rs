@@ -1,4 +1,4 @@
-//! Periodic recovery observes owner-reported quota blocks; eligibility remains with the server.
+//! Periodic recovery observes quota blocks and eligible uncertain refreshes without refreshing tokens.
 
 use super::*;
 use crate::status::ManagedAccountsState;
@@ -8,6 +8,24 @@ use std::time::Instant;
 impl App {
     fn managed_pool_needs_recovery(&self) -> bool {
         self.chat_widget.managed_accounts().is_some_and(|pool| {
+            // An uncertain refresh exchange can leave the existing access token eligible.
+            // Observe its usage without replaying that exchange or changing healthy polling.
+            let has_eligible_uncertain_refresh = pool.accounts().any(|account| {
+                account.eligible
+                    && matches!(
+                        &account.refresh_status,
+                        ManagedChatgptAccountRefreshStatus::ReloginRequired { reason_code, .. }
+                            if matches!(
+                                reason_code.as_str(),
+                                "token_refresh_timeout"
+                                    | "token_refresh_cancelled"
+                                    | "token_refresh_commit_failed"
+                            )
+                    )
+            });
+            if has_eligible_uncertain_refresh {
+                return true;
+            }
             !pool.accounts().any(|account| account.eligible)
                 && pool.accounts().any(|account| {
                     account.eligibility_reason.as_deref() == Some("blocked")

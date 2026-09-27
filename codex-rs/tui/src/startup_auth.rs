@@ -26,14 +26,14 @@ pub(super) async fn get_login_status(
             match inventory {
                 Ok(inventory) => {
                     let has_saved_login = inventory.accounts.iter().any(|account| {
-                        !matches!(
-                            account.refresh_status,
-                            ManagedChatgptAccountRefreshStatus::ReloginRequired { .. }
-                        ) && (account.eligible
-                            || (account.eligibility_reason.as_deref() == Some("blocked")
+                        account.eligible
+                            || (!matches!(
+                                account.refresh_status,
+                                ManagedChatgptAccountRefreshStatus::ReloginRequired { .. }
+                            ) && account.eligibility_reason.as_deref() == Some("blocked")
                                 && account.block.as_ref().is_some_and(|block| {
                                     matches!(block.reason.as_str(), "quota" | "workspace")
-                                })))
+                                }))
                     });
                     if has_saved_login {
                         LoginStatus::AuthMode(AuthMode::Chatgpt)

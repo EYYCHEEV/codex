@@ -3,6 +3,7 @@ use crate::auth::storage::AuthDotJson;
 use crate::auth::storage::ManagedChatgptLimitKind;
 use crate::token_data::IdTokenInfo;
 use crate::token_data::TokenData;
+use base64::Engine as _;
 use chrono::Duration;
 use chrono::Utc;
 use pretty_assertions::assert_eq;
@@ -106,6 +107,60 @@ fn authoritative_usage_recovers_quota_without_changing_credentials() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn legacy_credential_revision_keeps_new_failure_blocks_active() {
+    let now = Utc::now();
+    let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        br#"{"email":"quota@example.test","https://api.openai.com/auth":{"chatgpt_account_id":"workspace"}}"#,
+    );
+    for (label, failure) in [
+        ("invalid credentials", ManagedChatgptFailure::AuthInvalid),
+        (
+            "account quota",
+            ManagedChatgptFailure::Quota { reset_at: None },
+        ),
+        (
+            "workspace quota",
+            ManagedChatgptFailure::WorkspaceQuota { reset_at: None },
+        ),
+    ] {
+        let mut legacy = serde_json::to_value(blocked_pool(failure, now)).unwrap();
+        let account = &mut legacy["managed_chatgpt"]["accounts"][0];
+        account
+            .as_object_mut()
+            .unwrap()
+            .remove("credential_revision");
+        account["block"] = serde_json::Value::Null;
+        account["tokens"]["id_token"] = serde_json::Value::String(format!("e30.{claims}.c2ln"));
+        let mut document: AuthDotJson = serde_json::from_value(legacy).unwrap();
+        let account = &document.managed_chatgpt.as_ref().unwrap().accounts[0];
+        let identity = account.identity_key.clone();
+        let revision = credential_revision(account);
+        assert_eq!(account.credential_revision, 0);
+        assert!(apply_failure(
+            &mut document,
+            &identity,
+            revision,
+            failure,
+            now
+        ));
+
+        let reloaded: AuthDotJson =
+            serde_json::from_slice(&serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(
+            select(
+                &reloaded,
+                &ManagedChatgptSelectionScope::default(),
+                &SelectionPins::default(),
+                /*forced_workspace_ids*/ None,
+                now,
+            )
+            .is_none(),
+            "{label}: a legacy account must remain blocked after the failure revision advances"
+        );
+    }
 }
 
 #[test]

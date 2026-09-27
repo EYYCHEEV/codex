@@ -1,0 +1,31 @@
+---
+source: cli/src/login/managed_accounts_tests.rs
+expression: "rendered.join(\"\\n\")"
+---
+Usage - unavailable
+
+OpenAI Codex - 1 account
+● account@example.test - plan: plus
+  warning: account blocked - quota - resets in 1h35m
+  warning: usage unknown
+
+Usage - unavailable
+
+OpenAI Codex - 1 account
+● account@example.test - plan: plus
+  warning: account blocked - workspace quota - resets in 1d2h
+  warning: usage unknown
+
+Usage - unavailable
+
+OpenAI Codex - 1 account
+● account@example.test - plan: plus
+  warning: account blocked - invalid credentials
+  warning: usage unknown
+
+Usage - unavailable
+
+OpenAI Codex - 1 account
+● account@example.test - plan: plus
+  warning: account blocked - unknown reason
+  warning: usage unknown

@@ -538,7 +538,12 @@ impl TurnRequestProcessor {
         self.ensure_direct_input_allowed(&request_id, thread.as_ref())
             .await?;
         self.config_manager
-            .check_thread_model_provider(thread.config().await.as_ref())
+            .check_thread_model_provider(
+                thread.config().await.as_ref(),
+                crate::config_manager::ProviderPolicyCheck::RequestScoped(
+                    &self.thread_manager.auth_manager(),
+                ),
+            )
             .await
             .map_err(|error| config_load_error(&error))?;
         if let Some(tool_output) = &params.tool_output {
@@ -1038,7 +1043,12 @@ impl TurnRequestProcessor {
         self.ensure_direct_input_allowed(request_id, thread.as_ref())
             .await?;
         self.config_manager
-            .check_thread_model_provider(thread.config().await.as_ref())
+            .check_thread_model_provider(
+                thread.config().await.as_ref(),
+                crate::config_manager::ProviderPolicyCheck::RequestScoped(
+                    &self.thread_manager.auth_manager(),
+                ),
+            )
             .await
             .map_err(|error| config_load_error(&error))?;
 
@@ -1563,7 +1573,12 @@ impl TurnRequestProcessor {
         self.ensure_direct_input_allowed(request_id, parent_thread.as_ref())
             .await?;
         self.config_manager
-            .check_thread_model_provider(parent_thread.config().await.as_ref())
+            .check_thread_model_provider(
+                parent_thread.config().await.as_ref(),
+                crate::config_manager::ProviderPolicyCheck::RequestScoped(
+                    &self.thread_manager.auth_manager(),
+                ),
+            )
             .await
             .map_err(|error| config_load_error(&error))?;
         let (review_request, display_text, target_prompt) =

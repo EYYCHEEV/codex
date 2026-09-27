@@ -156,6 +156,41 @@ async fn startup_keeps_quota_blocked_pool_out_of_login() -> Result<()> {
 }
 
 #[tokio::test]
+async fn startup_keeps_eligible_timeout_uncertain_pool_out_of_login() -> Result<()> {
+    let accounts = ["first@example.test", "second@example.test"]
+        .into_iter()
+        .map(|id| {
+            let mut account = quota_account(id);
+            account["eligible"] = json!(true);
+            account["eligibilityReason"] = Value::Null;
+            account["block"] = Value::Null;
+            account["refreshStatus"] = json!({
+                "type": "reloginRequired", "reasonCode": "token_refresh_timeout", "observedAt": 1
+            });
+            account
+        })
+        .collect();
+    let read = json!({"account": null, "requiresOpenaiAuth": true, "workspaceRouting": null});
+    let (mut session, server) =
+        auth_server(read.clone(), json!({"result": inventory(accounts)})).await?;
+    let (status, account) = get_login_status(&mut session).await?;
+    session.shutdown().await?;
+    assert_eq!(server.await??, ["account/read", "account/list"]);
+    assert!(
+        !crate::should_show_login_screen(status, account.requires_openai_auth),
+        "an uncertain refresh exchange does not invalidate the owner's eligible access token"
+    );
+    assert_eq!(
+        (status, account),
+        (
+            LoginStatus::AuthMode(AuthMode::Chatgpt),
+            serde_json::from_value::<GetAccountResponse>(read)?
+        )
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn startup_distinguishes_cooldowns_from_required_reauthentication() -> Result<()> {
     let healthy = quota_account("saved@example.test");
     let mut workspace = healthy.clone();
@@ -171,6 +206,9 @@ async fn startup_distinguishes_cooldowns_from_required_reauthentication() -> Res
     restricted["eligibilityReason"] = json!("forced_workspace_disallowed");
     let mut removed = healthy.clone();
     removed["eligibilityReason"] = json!("pending_removal");
+    let mut restricted_timeout = restricted.clone();
+    restricted_timeout["refreshStatus"] =
+        json!({"type": "reloginRequired", "reasonCode": "token_refresh_timeout", "observedAt": 1});
     let mut unknown = healthy.clone();
     unknown["block"]["reason"] = json!("future_block_reason");
     let mut available = healthy.clone();
@@ -183,6 +221,11 @@ async fn startup_distinguishes_cooldowns_from_required_reauthentication() -> Res
         ("invalid credentials", vec![invalid.clone()], true),
         ("permanent refresh failure", vec![relogin], true),
         ("workspace restriction", vec![restricted], true),
+        (
+            "restricted uncertain refresh",
+            vec![restricted_timeout],
+            true,
+        ),
         ("pending removal", vec![removed], true),
         ("unknown block", vec![unknown], true),
         ("empty pool", vec![], true),

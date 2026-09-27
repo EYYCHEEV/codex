@@ -47,7 +47,15 @@ pub(crate) fn cloud_config_bundle_loader_for_service<C>(
 where
     C: BundleClient + 'static,
 {
-    let service = Arc::new(service);
+    cloud_config_bundle_loader_for_shared_service(Arc::new(service))
+}
+
+pub(crate) fn cloud_config_bundle_loader_for_shared_service<C>(
+    service: Arc<CloudConfigBundleService<C>>,
+) -> (CloudConfigBundleLoader, AbortHandle)
+where
+    C: BundleClient + 'static,
+{
     let background_service = Arc::clone(&service);
     let refresh_task = tokio::spawn(async move {
         let _ = background_service.get_latest().await;

@@ -239,6 +239,51 @@ async fn managed_pool_recovery_periodic_tick_uses_scoped_usage_only_list_and_coa
 }
 
 #[tokio::test]
+async fn managed_pool_recovery_eligible_timeout_uncertain_row_gets_usage_only_probe() -> Result<()>
+{
+    let mut uncertain = quota_account("uncertain@example.test");
+    uncertain["eligible"] = json!(true);
+    uncertain["eligibilityReason"] = Value::Null;
+    uncertain["block"] = Value::Null;
+    uncertain["refreshStatus"] = json!({
+        "type": "reloginRequired", "reasonCode": "token_refresh_timeout", "observedAt": 1
+    });
+    let mut healthy = uncertain.clone();
+    healthy["managedAccountId"] = json!("healthy@example.test");
+    healthy["email"] = json!("healthy@example.test");
+    healthy["refreshStatus"] = json!({"type": "healthy"});
+    for accounts in [vec![uncertain.clone()], vec![uncertain, healthy]] {
+        let (requests, expected_params) = periodic_requests(json!({
+            "accounts": accounts, "selectedAccountId": "uncertain@example.test",
+            "selectionRevision": 1, "poolRevision": 3
+        }))
+        .await?;
+        assert_eq!(
+            requests,
+            vec![json!({
+                "method": "account/list",
+                "params": serde_json::to_value(expected_params)?
+            })],
+            "eligible uncertain credentials need one coalesced usage-only pool probe, even with a healthy sibling"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn managed_pool_recovery_healthy_pool_keeps_single_normal_periodic_read() -> Result<()> {
+    let (requests, _) = periodic_requests(serde_json::to_value(recovered_inventory())?).await?;
+    assert_eq!(
+        requests,
+        vec![json!({
+            "method": "account/rateLimits/read",
+            "params": {"supportsLunaReserve": true, "excludeResetCreditDetails": true}
+        })]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn managed_pool_recovery_eligible_sibling_keeps_single_healthy_periodic_read() -> Result<()> {
     let mut eligible = quota_account("eligible@example.test");
     eligible["eligible"] = json!(true);
@@ -563,6 +608,9 @@ async fn managed_pool_recovery_does_not_probe_permanently_ineligible_or_empty_po
         json!({"type": "reloginRequired", "reasonCode": "refresh_token_reused", "observedAt": 1});
     let mut restricted = blocked.clone();
     restricted["eligibilityReason"] = json!("forced_workspace_disallowed");
+    let mut restricted_timeout = restricted.clone();
+    restricted_timeout["refreshStatus"] =
+        json!({"type": "reloginRequired", "reasonCode": "token_refresh_timeout", "observedAt": 1});
     let mut removed = blocked.clone();
     removed["eligibilityReason"] = json!("pending_removal");
     let mut invalid = blocked.clone();
@@ -574,6 +622,7 @@ async fn managed_pool_recovery_does_not_probe_permanently_ineligible_or_empty_po
         vec![],
         vec![relogin],
         vec![restricted],
+        vec![restricted_timeout],
         vec![removed],
         vec![invalid],
         vec![workspace],

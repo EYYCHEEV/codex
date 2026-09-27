@@ -2,6 +2,7 @@ use codex_arg0::Arg0DispatchPaths;
 use codex_cloud_config::cloud_config_bundle_loader;
 use codex_config::CloudConfigBundleLoader;
 use codex_config::ConfigLayerStack;
+use codex_config::ConfigRequirementsToml;
 use codex_config::LoaderOverrides;
 use codex_config::ThreadConfigLoader;
 use codex_config::loader::load_config_layers_state;
@@ -15,6 +16,7 @@ use codex_login::AuthManager;
 use codex_login::default_client::set_default_client_residency_requirement;
 use codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID;
 use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -33,11 +35,16 @@ use tracing::warn;
 #[path = "application_network.rs"]
 pub(crate) mod application_network;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 #[error(
     "Your organization's required model provider settings changed. Restart Codex to apply them; this request was not sent"
 )]
 pub(crate) struct ModelProviderRequirementsChanged;
+
+pub(crate) enum ProviderPolicyCheck<'a> {
+    Current,
+    RequestScoped(&'a AuthManager),
+}
 
 /// Shared app-server entry point for loading effective Codex configuration.
 #[derive(Clone)]
@@ -125,6 +132,17 @@ impl ConfigManager {
             .read()
             .map(|guard| guard.clone())
             .unwrap_or_default()
+    }
+
+    pub(crate) fn with_cloud_config_bundle(&self, loader: CloudConfigBundleLoader) -> Self {
+        Self {
+            // Account-scoped cloud requirements must not replace the global effective policy.
+            // Local requirements and their reload serialization remain shared.
+            cloud_config_bundle: Arc::new(RwLock::new(loader)),
+            network_policy: Default::default(),
+            network_policy_snapshot: Arc::default(),
+            ..self.clone()
+        }
     }
 
     pub(crate) fn extend_runtime_feature_enablement<I>(&self, enablement: I) -> Result<(), ()>
@@ -262,51 +280,91 @@ impl ConfigManager {
     pub(crate) async fn check_thread_model_provider(
         &self,
         current: &Config,
+        context: ProviderPolicyCheck<'_>,
     ) -> std::io::Result<()> {
-        let policy_load = self.refresh_application_network_policy().await?;
         // Existing threads retain their session route; only managed
         // requirements can invalidate it.
+        let policy_load = match context {
+            ProviderPolicyCheck::RequestScoped(manager)
+                if current.model_provider.supports_codex_backend_routes()
+                    && codex_model_provider::provider_uses_managed_chatgpt_auth(
+                        &current.model_provider,
+                        Some(manager),
+                        match manager.auth_cached() {
+                            Some(auth) => Some(auth),
+                            None => manager.auth().await,
+                        }
+                        .as_ref(),
+                    )? =>
+            {
+                // Selected-account policy is loaded at request admission. A default-account
+                // cloud failure must not prevent reaching that selected policy.
+                self.refresh_local_network_policy().await?;
+                None
+            }
+            ProviderPolicyCheck::Current | ProviderPolicyCheck::RequestScoped(_) => {
+                Some(self.refresh_application_network_policy().await?)
+            }
+        };
+        let cloud_config_bundle = policy_load
+            .as_ref()
+            .map(|load| load.cloud_config.clone())
+            .unwrap_or_default();
         let requirements = load_managed_requirements_state(
             LOCAL_FS.as_ref(),
             &self.codex_home,
             codex_config::ConfigLoadOptions {
                 loader_overrides: self.loader_overrides.clone(),
                 strict_config: self.strict_config,
-                cloud_config_bundle: policy_load.cloud_config.clone(),
+                cloud_config_bundle,
             },
         )
         .await?;
-        self.check_application_policy_load(&policy_load)?;
+        if let Some(policy_load) = policy_load {
+            self.check_application_policy_load(&policy_load)?;
+        }
+        Self::check_model_provider_requirements(
+            &requirements,
+            &current.model_provider_id,
+            &current.model_provider,
+        )
+    }
+
+    pub(crate) fn check_model_provider_requirements(
+        requirements: &ConfigRequirementsToml,
+        provider_id: &str,
+        provider: &ModelProviderInfo,
+    ) -> std::io::Result<()> {
         let selection_changed = requirements
             .model_provider
             .as_ref()
-            .is_some_and(|provider_id| provider_id != &current.model_provider_id);
+            .is_some_and(|required_id| required_id != provider_id);
         let required_provider = requirements
             .model_providers
             .as_ref()
-            .and_then(|providers| providers.get(&current.model_provider_id))
+            .and_then(|providers| providers.get(provider_id))
             .cloned();
         let required_provider = match required_provider {
             Some(provider)
                 if matches!(
-                    current.model_provider_id.as_str(),
+                    provider_id,
                     AMAZON_BEDROCK_PROVIDER_ID | AMAZON_BEDROCK_RUNTIME_PROVIDER_ID
                 ) =>
             {
                 // Bedrock requirements contain overrides of the built-in provider.
                 merge_configured_model_providers(
                     built_in_model_providers(/*openai_base_url*/ None),
-                    HashMap::from([(current.model_provider_id.clone(), provider)]),
+                    HashMap::from([(provider_id.to_owned(), provider)]),
                 )
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?
-                .remove(&current.model_provider_id)
+                .remove(provider_id)
             }
             Some(provider) => Some(provider),
             None => None,
         };
         let definition_changed = required_provider
             .as_ref()
-            .is_some_and(|provider| provider != &current.model_provider);
+            .is_some_and(|required| required != provider);
         if selection_changed || definition_changed {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,

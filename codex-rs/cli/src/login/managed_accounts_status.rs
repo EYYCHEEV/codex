@@ -1,4 +1,5 @@
 use codex_login::ManagedChatgptAccountView;
+use codex_login::ManagedChatgptBlockKindView;
 use codex_login::ManagedChatgptEligibility;
 use codex_login::ManagedChatgptLimitKind;
 use codex_login::ManagedChatgptRateWindowView;
@@ -164,7 +165,19 @@ pub(super) fn format_managed_login_status_at(
 
         match account.eligibility {
             ManagedChatgptEligibility::Eligible => {}
-            ManagedChatgptEligibility::Blocked => output.push_str("  warning: account blocked\n"),
+            ManagedChatgptEligibility::Blocked => {
+                let reason = match account.block_kind {
+                    Some(ManagedChatgptBlockKindView::Quota) => "quota",
+                    Some(ManagedChatgptBlockKindView::Workspace) => "workspace quota",
+                    Some(ManagedChatgptBlockKindView::AuthInvalid) => "invalid credentials",
+                    None => "unknown reason",
+                };
+                output.push_str(&format!("  warning: account blocked - {reason}"));
+                if let Some(reset_at) = account.block_reset_at {
+                    output.push_str(&format!(" - resets in {}", relative_time(now, reset_at)));
+                }
+                output.push('\n');
+            }
             ManagedChatgptEligibility::ForcedWorkspaceDisallowed => {
                 output.push_str("  warning: workspace not allowed\n");
             }

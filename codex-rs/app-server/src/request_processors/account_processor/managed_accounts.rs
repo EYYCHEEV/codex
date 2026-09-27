@@ -7,6 +7,18 @@ pub(super) type RefreshStatusByIdentity =
     HashMap<String, (DateTime<Utc>, ManagedChatgptAccountRefreshStatus)>;
 
 impl AccountRequestProcessor {
+    pub(super) fn unavailable_usage_auth_error(&self, usage: &str) -> JSONRPCErrorError {
+        match self.auth_manager.stored_managed_chatgpt_accounts() {
+            Ok(accounts) if !accounts.is_empty() => invalid_request(
+                "saved ChatGPT accounts are currently unavailable; use account/list to inspect quota, workspace policy, or sign-in status",
+            ),
+            Ok(_) => invalid_request(format!(
+                "codex account authentication required to read {usage}"
+            )),
+            Err(err) => internal_error(format!("failed to read managed accounts: {err}")),
+        }
+    }
+
     async fn logout_common(
         &self,
         params: Option<LogoutAccountParams>,
@@ -41,6 +53,8 @@ impl AccountRequestProcessor {
             self.cancel_active_login().await;
         }
 
+        let auth_changes = self.auth_manager.auth_change_state_receiver();
+        let owner_generation = auth_changes.borrow().owner_generation;
         let listed_accounts = match params.as_ref() {
             Some(LogoutAccountParams {
                 account_id: Some(_),
@@ -109,7 +123,7 @@ impl AccountRequestProcessor {
             }) => {
                 removed_account_ids = self
                     .auth_manager
-                    .logout_all_managed_chatgpt()
+                    .logout_all()
                     .await
                     .map_err(|err| internal_error(format!("logout failed: {err}")))?;
             }
@@ -158,16 +172,37 @@ impl AccountRequestProcessor {
                 all: true,
             }) => unreachable!("validated above"),
         }
+        if let Err(err) = self.selected_cloud_config.prune_removed_accounts().await {
+            tracing::warn!(error = %err, "Failed to prune removed selected-policy accounts");
+        }
 
         if config.model_provider.is_amazon_bedrock() {
             clear_user_model_provider_if_bedrock(&self.config_manager, &config).await?;
         }
-        self.config_manager.clear_cloud_config_bundle_loader();
+        let remaining_auth = self.auth_manager.auth_cached();
+        if auth_changes.borrow().owner_generation != owner_generation {
+            if remaining_auth
+                .as_ref()
+                .is_some_and(CodexAuth::is_chatgpt_auth)
+            {
+                self.config_manager.replace_cloud_config_bundle_loader(
+                    self.auth_manager.clone(),
+                    self.config.chatgpt_base_url.clone(),
+                    self.config.http_client_factory(),
+                );
+            } else {
+                self.config_manager.clear_cloud_config_bundle_loader();
+            }
+        } else if remaining_auth.is_none() && !removed_account_ids.is_empty() {
+            // Removing an entirely unavailable pool need not change cached auth,
+            // but its former owner's requirements must no longer apply.
+            self.config_manager.clear_cloud_config_bundle_loader();
+        }
 
         Self::maybe_refresh_plugin_caches_for_current_config(
             &self.config_manager,
             &self.thread_manager,
-            self.auth_manager.auth_cached(),
+            remaining_auth,
         )
         .await;
         let list = if self.auth_manager.is_external_chatgpt_auth_active() {

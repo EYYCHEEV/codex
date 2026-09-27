@@ -195,6 +195,25 @@ pub struct ManagedChatgptRefreshFailure {
     pub operation_id: Option<String>,
 }
 
+pub(super) const REFRESH_FAILURE_CANCELLED_REASON: &str = "token_refresh_cancelled";
+pub(super) const REFRESH_FAILURE_TIMEOUT_REASON: &str = "token_refresh_timeout";
+pub(super) const REFRESH_FAILURE_COMMIT_REASON: &str = "token_refresh_commit_failed";
+
+impl ManagedChatgptRefreshFailure {
+    /// Permanent rejections and uncertain exchanges cannot safely reuse the refresh token.
+    pub(super) fn requires_relogin(&self) -> bool {
+        self.permanent
+            || matches!(
+                self.reason_code.as_deref(),
+                Some(
+                    REFRESH_FAILURE_CANCELLED_REASON
+                        | REFRESH_FAILURE_TIMEOUT_REASON
+                        | REFRESH_FAILURE_COMMIT_REASON
+                )
+            )
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct ManagedChatgptTokenUsageSummary {
     pub lifetime_tokens: Option<i64>,

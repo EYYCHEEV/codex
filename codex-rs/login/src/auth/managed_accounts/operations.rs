@@ -13,6 +13,15 @@ impl AuthManager {
         self.auth_change_tx.send_modify(|revision| *revision += 1);
     }
 
+    /// Adopts managed OAuth credentials persisted by another login manager.
+    ///
+    /// Inventory observers must be notified even when reloading keeps the same
+    /// effective account. Reloading preserves external-auth precedence.
+    pub async fn adopt_managed_chatgpt_login(&self) {
+        self.reload().await;
+        self.notify_managed_chatgpt_change();
+    }
+
     pub(in crate::auth::manager) fn load_managed_chatgpt_document(
         &self,
     ) -> std::io::Result<Option<AuthDotJson>> {
@@ -380,6 +389,23 @@ impl AuthManager {
             .find(|account| account.identity_key == identity))
     }
 
+    /// Logs out all Codex-owned stored authentication and returns removed managed identities.
+    ///
+    /// Removing an external overlay can reveal a stored API key or managed
+    /// account pool, so each layer is recomputed before the next removal.
+    pub async fn logout_all(&self) -> std::io::Result<Vec<String>> {
+        self.ensure_logout_allowed()?;
+        if self.has_external_auth() || self.is_external_chatgpt_auth_active() {
+            self.logout_with_revoke().await?;
+        }
+        let removed = self.logout_all_managed_chatgpt().await?;
+        self.reload().await;
+        if self.auth_cached().is_some() {
+            self.logout_with_revoke().await?;
+        }
+        Ok(removed)
+    }
+
     pub async fn logout_all_managed_chatgpt(&self) -> std::io::Result<Vec<String>> {
         self.ensure_logout_allowed()?;
         if let Some(overlay) = load_external_chatgpt_auth(&self.codex_home)? {
@@ -389,7 +415,7 @@ impl AuthManager {
             self.clear_external_auth();
             self.reload().await;
         }
-        self.resume_managed_chatgpt_tombstones().await?;
+        self.wait_for_managed_chatgpt_tombstones().await?;
         let identities: Vec<_> = self
             .managed_chatgpt_accounts()?
             .into_iter()

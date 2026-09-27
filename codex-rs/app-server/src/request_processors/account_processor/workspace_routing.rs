@@ -4,8 +4,11 @@
 //! Model sessions retain their original bootstrap scope across configuration changes.
 
 use super::*;
+use crate::config_manager::ModelProviderRequirementsChanged;
 use codex_app_server_protocol::AccountRoutingOverride;
 use codex_backend_client::AccountEntry;
+use codex_config::CloudConfigBundleLoadErrorCode;
+use codex_config::CloudConfigBundleLoader;
 use codex_login::WorkspaceRouting;
 use codex_login::WorkspaceRoutingRequest;
 use codex_login::WorkspaceRoutingResolver;
@@ -60,6 +63,12 @@ pub(super) enum AccountReadError {
 pub(super) enum WorkspaceRoutingError {
     #[error("failed to load workspace requirements")]
     RequirementsLoad,
+    #[error(
+        "failed to load workspace requirements because the policy service is temporarily unavailable. Codex retries automatically in the background; wait and try again later."
+    )]
+    RequirementsTemporarilyUnavailable,
+    #[error(transparent)]
+    ModelProviderRequirementsChanged(#[from] ModelProviderRequirementsChanged),
     #[error("workspace routing requires a ChatGPT account id")]
     MissingAccountId,
     #[error("workspace routing discovery cancelled")]
@@ -196,37 +205,97 @@ impl AccountRequestProcessor {
         let auth_state = *auth_changes.borrow_and_update();
         let current_auth_changes = auth_changes.clone();
         let read = Box::pin(async {
-            let load_config = async || {
+            let managed_snapshot = request.and_then(|request| request.managed_snapshot);
+            let auth = || {
+                managed_snapshot
+                    .map(|snapshot| snapshot.auth.clone())
+                    .or_else(|| self.auth_manager.auth_cached())
+            };
+            let load_config = async |manager: &ConfigManager| {
                 match request.and_then(|request| request.session.as_deref()) {
                     Some(session) => {
-                        self.config_manager
+                        manager
                             .load_retained_session_config(&session.config_layer_stack, &session.cwd)
                             .await
                     }
                     None => {
-                        self.config_manager
-                            .load_latest_config(/*fallback_cwd*/ None)
-                            .await
+                        manager.load_latest_config(/*fallback_cwd*/ None).await
                     }
                 }
             };
-            let config = match load_config().await {
+            let selected_loader = if let Some(snapshot) = managed_snapshot {
+                let bootstrap_manager = self
+                    .config_manager
+                    .with_cloud_config_bundle(CloudConfigBundleLoader::default());
+                let bootstrap = load_config(&bootstrap_manager)
+                    .await
+                    .map_err(|_| WorkspaceRoutingError::RequirementsLoad)?;
+                let loader = self
+                    .selected_cloud_config
+                    .loader_for(
+                        snapshot,
+                        bootstrap.chatgpt_base_url.clone(),
+                        bootstrap.http_client_factory(),
+                    )
+                    .await;
+                Some(loader)
+            } else {
+                None
+            };
+            let selected_manager = selected_loader
+                .as_ref()
+                .map(|loader| self.config_manager.with_cloud_config_bundle(loader.clone()));
+            let manager = selected_manager.as_ref().unwrap_or(&self.config_manager);
+            let config = match load_config(manager).await {
                 Ok(config) => config,
-                Err(_)
-                    if !self
-                        .auth_manager
-                        .auth_cached()
-                        .as_ref()
-                        .is_some_and(CodexAuth::is_chatgpt_auth) =>
-                {
+                Err(_) if !auth().as_ref().is_some_and(CodexAuth::is_chatgpt_auth) => {
                     self.config.as_ref().clone()
                 }
-                Err(_) => return Err(WorkspaceRoutingError::RequirementsLoad.into()),
+                Err(_) => {
+                    if let Some(loader) = &selected_loader
+                        && let Err(error) = loader.get().await
+                    {
+                        let transient = match error.code() {
+                            CloudConfigBundleLoadErrorCode::Timeout => true,
+                            CloudConfigBundleLoadErrorCode::RequestFailed => error
+                                .status_code()
+                                .is_none_or(|status| matches!(status, 408 | 429 | 500..=599)),
+                            CloudConfigBundleLoadErrorCode::Auth
+                            | CloudConfigBundleLoadErrorCode::InvalidBundle
+                            | CloudConfigBundleLoadErrorCode::Internal => false,
+                        };
+                        if transient {
+                            return Err(
+                                WorkspaceRoutingError::RequirementsTemporarilyUnavailable.into()
+                            );
+                        }
+                    }
+                    return Err(WorkspaceRoutingError::RequirementsLoad.into());
+                }
             };
-            let managed_snapshot = request.and_then(|request| request.managed_snapshot);
-            let auth = managed_snapshot
-                .map(|snapshot| snapshot.auth.clone())
-                .or_else(|| self.auth_manager.auth_cached());
+            // Global credentials can refresh while requirements load; selected credentials stay pinned.
+            let auth = auth();
+            if managed_snapshot.is_some()
+                && let Some(session) = request.and_then(|request| request.session.as_deref())
+            {
+                ConfigManager::check_model_provider_requirements(
+                    config.config_layer_stack.requirements_toml(),
+                    &session.model_provider_id,
+                    &session.model_provider,
+                )
+                .map_err(|error| {
+                    if error
+                        .get_ref()
+                        .is_some_and(<dyn std::error::Error + std::marker::Send + std::marker::Sync + 'static>::is::<ModelProviderRequirementsChanged>)
+                    {
+                        WorkspaceRoutingError::ModelProviderRequirementsChanged(
+                            ModelProviderRequirementsChanged,
+                        )
+                    } else {
+                        WorkspaceRoutingError::RequirementsLoad
+                    }
+                })?;
+            }
             let provider = create_model_provider(
                 config.model_provider.clone(),
                 Some(self.auth_manager.clone()),
@@ -368,10 +437,11 @@ impl AccountRequestProcessor {
                     if accounts.next().is_some() {
                         return Err(WorkspaceRoutingError::DuplicateWorkspace.into());
                     }
-                    let latest_config = load_config()
+                    let latest_config = load_config(manager)
                         .await
                         .map_err(|_| WorkspaceRoutingError::RequirementsReload)?;
                     if latest_config.chatgpt_base_url != config.chatgpt_base_url
+                        || latest_config.model_provider_id != config.model_provider_id
                         || latest_config.model_provider != config.model_provider
                         || latest_config
                             .config_layer_stack

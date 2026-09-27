@@ -426,6 +426,26 @@ pub(crate) fn provider_uses_first_party_auth_path(provider: &ModelProviderInfo) 
         && provider.aws.is_none()
 }
 
+/// Whether request setup selects a managed pool identity for this auth path.
+pub fn provider_uses_managed_chatgpt_auth(
+    provider: &ModelProviderInfo,
+    manager: Option<&AuthManager>,
+    effective_auth: Option<&CodexAuth>,
+) -> std::io::Result<bool> {
+    if !provider_uses_first_party_auth_path(provider) {
+        return Ok(false);
+    }
+    match manager {
+        Some(manager) if manager.has_external_auth() => Ok(false),
+        Some(manager) => match effective_auth {
+            Some(auth) => Ok(auth.auth_mode() == codex_protocol::auth::AuthMode::Chatgpt
+                && !auth.is_external_chatgpt_tokens()),
+            None => Ok(!manager.stored_managed_chatgpt_accounts()?.is_empty()),
+        },
+        None => Ok(false),
+    }
+}
+
 pub(crate) async fn resolve_provider_request_setup(
     auth_manager: Option<Arc<AuthManager>>,
     provider: &ModelProviderInfo,
@@ -460,24 +480,12 @@ pub(crate) async fn resolve_provider_request_setup(
     } else {
         None
     };
-    let managed_chatgpt_mode = if first_party_auth {
-        match auth_manager.as_ref() {
-            Some(manager) if manager.has_external_auth() => false,
-            Some(manager) => match effective_manager_auth.as_ref() {
-                Some(auth) => {
-                    auth.auth_mode() == codex_protocol::auth::AuthMode::Chatgpt
-                        && !auth.is_external_chatgpt_tokens()
-                }
-                None => !manager
-                    .stored_managed_chatgpt_accounts()
-                    .map_err(CodexErr::Io)?
-                    .is_empty(),
-            },
-            None => false,
-        }
-    } else {
-        false
-    };
+    let managed_chatgpt_mode = provider_uses_managed_chatgpt_auth(
+        provider,
+        auth_manager.as_deref(),
+        effective_manager_auth.as_ref(),
+    )
+    .map_err(CodexErr::Io)?;
     let selection_scope = ManagedChatgptSelectionScope {
         thread_id: scope.thread_id.clone(),
         session_id: scope.session_id.clone(),
