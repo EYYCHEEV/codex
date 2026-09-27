@@ -109,6 +109,9 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
                 agent_identity_policy: AgentIdentityAuthPolicy::JwtOnly,
                 session_source: SessionSource::Cli,
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
+                thread_id: None,
+                session_id: None,
+                model: None,
             })
             .await
             .unwrap();

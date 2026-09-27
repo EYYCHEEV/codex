@@ -47,7 +47,9 @@ use crate::combined_auth::compose_auth;
 use crate::provider::provider_uses_first_party_auth_path;
 use crate::provider::resolve_provider_request_setup;
 
-const MODELS_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+const MODELS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+// Cold system proxy discovery can exceed the HTTP request budget; keep the whole fetch bounded.
+const MODELS_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
 const MODELS_ENDPOINT: &str = "/models";
 // Bound downloads from explicitly configured catalogs before decoding or caching them.
 const MAX_MODEL_CATALOG_BYTES: usize = 1024 * 1024;
@@ -185,7 +187,7 @@ impl OpenAiModelsEndpoint {
                 |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
             )
         });
-        let (models, etag, identity) = timeout(MODELS_REFRESH_TIMEOUT, async {
+        let (models, etag, identity) = timeout(MODELS_FETCH_TIMEOUT, async {
             loop {
                 let identity = crate::models_identity::identity(
                     &self.provider_info,
@@ -246,10 +248,13 @@ impl OpenAiModelsEndpoint {
                     .model_catalog_url
                     .as_ref()
                     .map(|_| MAX_MODEL_CATALOG_BYTES);
-                match client
-                    .list_models(request_url, HeaderMap::new(), response_body_limit_bytes)
-                    .await
-                {
+                let result = timeout(
+                    MODELS_REQUEST_TIMEOUT,
+                    client.list_models(request_url, HeaderMap::new(), response_body_limit_bytes),
+                )
+                .await
+                .map_err(|_| CodexErr::RequestTimeout)?;
+                match result {
                     Err(ApiError::Transport(
                         unauthorized @ TransportError::Http { status, .. },
                     )) if status == StatusCode::UNAUTHORIZED && auth_recovery.is_some() => {
@@ -640,6 +645,7 @@ mod tests {
                 auth_manager: auth_manager.clone(),
                 gateway_auth_manager: None,
                 transport_builder: capture.clone(),
+                managed_identity: Mutex::default(),
             });
             let manager = OpenAiModelsManager::new_without_cache(endpoint, auth_manager);
             manager.set_api_key_model_discovery_enabled(/*enabled*/ true);
@@ -702,7 +708,11 @@ mod tests {
     async fn static_provider_token_authorizes_models_refresh_without_auth_manager() {
         let mut provider_info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
         provider_info.experimental_bearer_token = Some("provider-token".to_string().into());
-        let endpoint = OpenAiModelsEndpoint::new(provider_info, /*auth_manager*/ None);
+        let endpoint = OpenAiModelsEndpoint::new(
+            provider_info,
+            /*auth_manager*/ None,
+            /*gateway_auth_manager*/ None,
+        );
 
         assert!(endpoint.uses_codex_backend().await);
     }
@@ -905,6 +915,61 @@ mod tests {
                 .map(|request| request.headers["authorization"].to_str().unwrap())
                 .collect::<Vec<_>>(),
             vec!["Bearer token-2", "Bearer token-5", "Bearer token-9"]
+        );
+    }
+
+    #[tokio::test]
+    async fn command_auth_resolution_failure_does_not_send_unauthenticated_catalog_request() {
+        struct FailsAfterInstall(std::sync::atomic::AtomicBool);
+
+        impl codex_login::ExternalAuth for FailsAfterInstall {
+            fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+                Box::pin(async move {
+                    if self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        Err(std::io::Error::other("test resolver failure"))
+                    } else {
+                        Ok(CodexAuth::from_api_key("test-key"))
+                    }
+                })
+            }
+
+            fn refresh(
+                &self,
+                _context: codex_login::ExternalAuthRefreshContext,
+            ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+                self.resolve()
+            }
+        }
+
+        let server = MockServer::start().await;
+        let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("initial"));
+        auth.set_external_auth(Arc::new(FailsAfterInstall(
+            std::sync::atomic::AtomicBool::new(false),
+        )))
+        .await
+        .expect("initial command auth should resolve");
+        let mut provider = provider_info_with_command_auth();
+        provider.base_url = Some(server.uri());
+        let endpoint =
+            OpenAiModelsEndpoint::new(provider, Some(auth), /*gateway_auth_manager*/ None);
+
+        let error = endpoint
+            .list_models(
+                "0.0.0",
+                HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+            )
+            .await
+            .expect_err("failed command auth must not send a catalog request");
+        assert!(
+            matches!(error.details(), CodexErrorDetails::Io(_)),
+            "{error}"
+        );
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("mock requests")
+                .is_empty()
         );
     }
 

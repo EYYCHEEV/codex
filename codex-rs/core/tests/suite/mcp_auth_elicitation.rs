@@ -138,12 +138,6 @@ impl ToolLifecycleContributor for RemoveAuthMetadata {
     }
 }
 
-#[test_case(Scenario::DefaultAuth; "auth requests elicitation by default")]
-#[test_case(Scenario::ModernAuth; "modern accepted auth")]
-#[test_case(Scenario::AuthMetadataRemoved; "auth metadata removed by callback")]
-#[test_case(Scenario::LegacySuccess; "legacy accepted ordinary")]
-#[test_case(Scenario::LegacyCancelled; "legacy cancelled")]
-#[test_case(Scenario::ModernDeclined; "modern declined")]
 async fn tools_list_request_count(server: &MockServer) -> usize {
     server
         .received_requests()
@@ -161,6 +155,12 @@ async fn tools_list_request_count(server: &MockServer) -> usize {
         .count()
 }
 
+#[test_case(Scenario::DefaultAuth; "auth requests elicitation by default")]
+#[test_case(Scenario::ModernAuth; "modern accepted auth")]
+#[test_case(Scenario::AuthMetadataRemoved; "auth metadata removed by callback")]
+#[test_case(Scenario::LegacySuccess; "legacy accepted ordinary")]
+#[test_case(Scenario::LegacyCancelled; "legacy cancelled")]
+#[test_case(Scenario::ModernDeclined; "modern declined")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actual_turn_elicitation_analytics(scenario: Scenario) -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -768,7 +768,7 @@ approvals_reviewer = "user"
 async fn codex_apps_auth_failure_requests_elicitation_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let server = start_mock_server().await;
+    let server = responses::start_mock_server().await;
     let apps_server = AppsTestServer::mount_searchable(&server).await?;
     Mock::given(method("POST"))
         .and(path_regex("^/api/codex/ps/mcp/?$"))
@@ -787,12 +787,12 @@ async fn codex_apps_auth_failure_requests_elicitation_by_default() -> Result<()>
         .await;
 
     let call_id = "calendar-auth-call";
-    let responses = mount_sse_sequence(
+    let responses = responses::mount_sse_sequence(
         &server,
         vec![
-            sse(vec![
-                ev_response_created("resp-1"),
-                ev_function_call_with_namespace(
+            responses::sse(vec![
+                responses::ev_response_created("resp-1"),
+                responses::ev_function_call_with_namespace(
                     call_id,
                     SEARCH_CALENDAR_NAMESPACE,
                     SEARCH_CALENDAR_CREATE_TOOL,
@@ -802,12 +802,12 @@ async fn codex_apps_auth_failure_requests_elicitation_by_default() -> Result<()>
                     })
                     .to_string(),
                 ),
-                ev_completed("resp-1"),
+                responses::ev_completed("resp-1"),
             ]),
-            sse(vec![
-                ev_response_created("resp-2"),
-                ev_assistant_message("msg-1", "done"),
-                ev_completed("resp-2"),
+            responses::sse(vec![
+                responses::ev_response_created("resp-2"),
+                responses::ev_assistant_message("msg-1", "done"),
+                responses::ev_completed("resp-2"),
             ]),
         ],
     )

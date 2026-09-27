@@ -363,7 +363,7 @@ async fn wait_for_listed_agent(
 }
 
 async fn wait_for_mcp_startup_snapshot(
-    agent_control: &crate::agent::control::AgentControl,
+    agent_control: &crate::agent::control::LocalAgentControl,
     agent_id: ThreadId,
     predicate: impl Fn(&codex_protocol::protocol::McpStartupSnapshot) -> bool,
 ) -> codex_protocol::protocol::McpStartupSnapshot {
@@ -382,7 +382,7 @@ async fn wait_for_mcp_startup_snapshot(
 }
 
 async fn wait_for_agent_status(
-    agent_control: &crate::agent::control::AgentControl,
+    agent_control: &crate::agent::control::LocalAgentControl,
     agent_id: ThreadId,
     predicate: impl Fn(&AgentStatus) -> bool,
 ) -> AgentStatus {
@@ -1215,10 +1215,13 @@ async fn provider_reserved_v2_rejects_hidden_raw_route_fields_for_every_spawn_sh
     let (session, turn) = make_session_and_context().await;
     let session = Arc::new(session);
     let turn = Arc::new(turn);
-    let handler = SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-        hide_agent_type_model_reasoning: true,
-        ..Default::default()
-    });
+    let handler = SpawnAgentHandlerV2::new(
+        SpawnAgentToolOptions {
+            hide_agent_type_model_reasoning: true,
+            ..Default::default()
+        },
+        /*description_override*/ None,
+    );
     let expected_error = || {
         FunctionCallError::RespondToModel(
             "Provider-reserved spawn_agent callers must omit model, reasoning_effort, and service_tier"
@@ -1277,10 +1280,13 @@ model_reasoning_effort = "medium"
     session.thread_id = root.thread_id;
     let parent_provider_id = turn.config.model_provider_id.clone();
 
-    let output = SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-        hide_agent_type_model_reasoning: true,
-        ..Default::default()
-    })
+    let output = SpawnAgentHandlerV2::new(
+        SpawnAgentToolOptions {
+            hide_agent_type_model_reasoning: true,
+            ..Default::default()
+        },
+        /*description_override*/ None,
+    )
     .handle(invocation(
         Arc::new(session),
         Arc::new(turn),
@@ -1561,10 +1567,13 @@ model_reasoning_effort = "unsupported"
     session_mut.thread_id = root.thread_id;
     let turn = Arc::new(turn);
 
-    let output = SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-        hide_agent_type_model_reasoning: true,
-        ..Default::default()
-    })
+    let output = SpawnAgentHandlerV2::new(
+        SpawnAgentToolOptions {
+            hide_agent_type_model_reasoning: true,
+            ..Default::default()
+        },
+        /*description_override*/ None,
+    )
     .handle(invocation(
         Arc::clone(&session),
         Arc::clone(&turn),

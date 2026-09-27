@@ -2349,9 +2349,7 @@ mod tests {
                 self.outgoing.clone(),
                 self.thread_state.clone(),
                 self.thread_watch_manager.clone(),
-                Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
                 None,
-                "test-provider".to_string(),
             )
             .await;
         }
@@ -3203,9 +3201,7 @@ mod tests {
             outgoing.clone(),
             Arc::clone(&thread_state),
             thread_watch_manager.clone(),
-            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             None,
-            "test-provider".to_string(),
         )
         .await;
 
@@ -3246,9 +3242,7 @@ mod tests {
                 outgoing.clone(),
                 Arc::clone(&thread_state),
                 thread_watch_manager.clone(),
-                Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
                 None,
-                "test-provider".to_string(),
             )
             .await;
 
@@ -3322,9 +3316,7 @@ mod tests {
             scoped_outgoing,
             new_thread_state(),
             ThreadWatchManager::new(),
-            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             Some(account_selection_event_route),
-            "test-provider".to_string(),
         )
         .await;
 
@@ -3416,9 +3408,7 @@ mod tests {
             outgoing,
             new_thread_state(),
             thread_watch_manager.clone(),
-            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             None,
-            "test-provider".to_string(),
         )
         .await;
 
@@ -3509,9 +3499,7 @@ mod tests {
             outgoing,
             new_thread_state(),
             ThreadWatchManager::new(),
-            Arc::new(tokio::sync::Semaphore::new(/*permits*/ 1)),
             None,
-            "test-provider".to_string(),
         )
         .await;
 

@@ -32,6 +32,7 @@ async fn queued_notifications_follow_auth_owner_changes(owner_generation: u64) {
             success: true,
             error: None,
             onboarding_entrypoint: None,
+            managed_account_id: None,
         };
         let notification = if login {
             AccountNotification::LoginCompleted(payload.clone())

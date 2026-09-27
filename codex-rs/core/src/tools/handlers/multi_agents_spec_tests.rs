@@ -499,7 +499,8 @@ fn wait_agent_tool_v1_advertises_latest_status_and_bounded_waits() {
     );
     let output_schema = output_schema
         .as_ref()
-        .expect("wait_agent should have an output schema");
+        .expect("wait_agent should have an output schema")
+        .to_value();
     assert_eq!(
         output_schema["required"],
         json!(["status", "latest_status", "timed_out"])

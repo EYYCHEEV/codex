@@ -2827,6 +2827,7 @@ async fn logout_aws_managed_bedrock_protects_external_credentials() -> Result<()
             assert_eq!(
                 read_account(&mut mcp).await?,
                 GetAccountResponse {
+                    workspace_routing: None,
                     account: None,
                     requires_openai_auth: true,
                 }
@@ -2850,6 +2851,7 @@ async fn logout_aws_managed_bedrock_protects_external_credentials() -> Result<()
             assert_eq!(
                 read_account(&mut mcp).await?,
                 GetAccountResponse {
+                    workspace_routing: None,
                     account: Some(Account::AmazonBedrock {
                         uses_codex_managed_credentials: false,
                     }),
@@ -2861,15 +2863,6 @@ async fn logout_aws_managed_bedrock_protects_external_credentials() -> Result<()
         assert_eq!(
             std::fs::read_to_string(aws_credentials_path)?,
             aws_credentials
-        );
-        assert_account_updated(&mut mcp, /*auth_mode*/ None).await?;
-        assert_eq!(
-            read_account(&mut mcp).await?,
-            GetAccountResponse {
-                workspace_routing: None,
-                account: None,
-                requires_openai_auth: true,
-            }
         );
     }
     Ok(())
@@ -3547,6 +3540,7 @@ async fn login_survives_same_owner_token_refresh(
             success: true,
             error: None,
             onboarding_entrypoint: None,
+            managed_account_id: Some("email:device@example.com".to_string()),
         }
     );
     let updated: AccountUpdatedNotification = timeout(

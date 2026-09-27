@@ -29,6 +29,7 @@ const CHILD_CASE: &str = "CODEX_TOKEN_PROXY_FALLBACK_TEST_CASE";
 const CHILD_PROXY: &str = "CODEX_TOKEN_PROXY_FALLBACK_TEST_PROXY";
 const CHILD_ISSUER: &str = "CODEX_TOKEN_PROXY_FALLBACK_TEST_ISSUER";
 const BLOCKED_ORIGIN: &str = "http://127.0.0.1:0";
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(45);
 const PROXY_ENV_KEYS: [&str; 8] = [
     "HTTP_PROXY",
     "http_proxy",
@@ -94,7 +95,7 @@ async fn exercise_callback(expected: CallbackOutcome) -> Result<()> {
             "http://127.0.0.1:{}/auth/callback?code=abc&state=proxy-fallback",
             server.actual_port
         ))
-        .timeout(Duration::from_secs(20))
+        .timeout(CALLBACK_TIMEOUT)
         .send()
         .await?;
 
@@ -108,14 +109,17 @@ async fn exercise_callback(expected: CallbackOutcome) -> Result<()> {
                 .send()
                 .await?
                 .error_for_status()?;
-            tokio::time::timeout(Duration::from_secs(20), server.block_until_done()).await??;
+            tokio::time::timeout(CALLBACK_TIMEOUT, server.block_until_done()).await??;
             let auth: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(tmp.path().join("auth.json"))?)?;
-            assert_eq!(auth["tokens"]["access_token"], "redirect-access");
+            assert_eq!(
+                auth["managed_chatgpt"]["accounts"][0]["tokens"]["access_token"],
+                "redirect-access"
+            );
         }
         CallbackOutcome::Failed => {
             assert!(callback.text().await?.contains("Token exchange failed"));
-            let error = tokio::time::timeout(Duration::from_secs(20), server.block_until_done())
+            let error = tokio::time::timeout(CALLBACK_TIMEOUT, server.block_until_done())
                 .await?
                 .expect_err("the callback should fail after the token exchange fails");
             assert!(error.to_string().contains("Token exchange failed"));

@@ -1060,7 +1060,6 @@ mod tests {
     use crate::auth::load_auth_dot_json;
     use codex_config::types::AuthCredentialsStoreMode;
 
-    use super::TokenEndpointErrorDetail;
     use super::html_escape;
     use super::is_missing_codex_entitlement_error;
     use super::render_login_error_page;
@@ -1155,88 +1154,28 @@ mod tests {
     }
 
     #[test]
-    fn parse_token_endpoint_error_prefers_error_description() {
-        let detail = parse_token_endpoint_error(
-            r#"{"error":"invalid_grant","error_description":"refresh token expired"}"#,
-        );
-
+    fn sanitize_url_for_logging_only_scrubs_known_query_keys() {
         assert_eq!(
-            detail,
-            TokenEndpointErrorDetail {
-                error_code: Some("invalid_grant".to_string()),
-                error_message: Some("refresh token expired".to_string()),
-                display_message: "refresh token expired".to_string(),
-            }
+            sanitize_url_for_logging("https://example.com/?code=abc123"),
+            "https://example.com/?code=%3Credacted%3E".to_string()
+        );
+        assert_eq!(
+            sanitize_url_for_logging(
+                "https://example.com/?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
+            ),
+            "https://example.com/?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
+                .to_string()
         );
     }
 
     #[test]
-    fn parse_token_endpoint_error_reads_nested_error_message_and_code() {
-        let detail = parse_token_endpoint_error(
-            r#"{"error":{"code":"proxy_auth_required","message":"proxy authentication required"}}"#,
-        );
-
-        assert_eq!(
-            detail,
-            TokenEndpointErrorDetail {
-                error_code: Some("proxy_auth_required".to_string()),
-                error_message: Some("proxy authentication required".to_string()),
-                display_message: "proxy authentication required".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_token_endpoint_error_falls_back_to_error_code() {
-        let detail = parse_token_endpoint_error(r#"{"error":"temporarily_unavailable"}"#);
-
-        assert_eq!(
-            detail,
-            TokenEndpointErrorDetail {
-                error_code: Some("temporarily_unavailable".to_string()),
-                error_message: None,
-                display_message: "temporarily_unavailable".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_token_endpoint_error_preserves_plain_text_for_display() {
-        let detail = parse_token_endpoint_error("service unavailable");
-
-        assert_eq!(
-            detail,
-            TokenEndpointErrorDetail {
-                error_code: None,
-                error_message: None,
-                display_message: "service unavailable".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn redact_sensitive_query_value_only_scrubs_known_keys() {
-        assert_eq!(
-            redact_sensitive_query_value("code", "abc123"),
-            "<redacted>".to_string()
-        );
-        assert_eq!(
-            redact_sensitive_query_value("redirect_uri", "http://localhost:1455/auth/callback"),
-            "http://localhost:1455/auth/callback".to_string()
-        );
-    }
-
-    #[test]
-    fn redact_sensitive_url_parts_preserves_safe_url_shape() {
-        let mut url = url::Url::parse(
+    fn sanitize_url_for_logging_preserves_safe_url_shape() {
+        let redacted = sanitize_url_for_logging(
             "https://user:pass@auth.openai.com/oauth/token?code=abc123&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback#frag",
-        )
-        .expect("valid url");
-
-        redact_sensitive_url_parts(&mut url);
+        );
 
         assert_eq!(
-            url.as_str(),
+            redacted,
             "https://auth.openai.com/oauth/token?code=%3Credacted%3E&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
         );
     }

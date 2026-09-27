@@ -2506,7 +2506,9 @@ fn record_items_preserves_large_inline_media_using_model_visible_estimate() {
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {
-            image_url: format!("data:image/png;base64,{}", "a".repeat(80_000)),
+            image: ImageReference::Inline {
+                image_url: format!("data:image/png;base64,{}", "a".repeat(80_000)),
+            },
             detail: None,
         }],
         phase: None,
@@ -2541,7 +2543,10 @@ fn oversized_server_tool_search_output_removes_call_from_legacy_review_history()
     };
     let mut history = ContextManager::new();
     history.record_items([&call], TruncationPolicy::Tokens(10_000));
-    history.replace_compacted(vec![ResponseItemEnvelope::new(call)]);
+    history.replace_compacted(
+        vec![ResponseItemEnvelope::new(call)],
+        /*reviewer_compaction_hash*/ None,
+    );
     let generation_before = history
         .review_history
         .as_ref()
@@ -2586,7 +2591,9 @@ fn original_detail_image_outputs_over_token_cap_omit_function_and_custom_pairs()
         namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
-                image_url: image_url.clone(),
+                image: ImageReference::Inline {
+                    image_url: image_url.clone(),
+                },
                 detail: Some(ImageDetail::Original),
             },
         ]),
@@ -2607,7 +2614,7 @@ fn original_detail_image_outputs_over_token_cap_omit_function_and_custom_pairs()
         name: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
-                image_url,
+                image: ImageReference::Inline { image_url },
                 detail: Some(ImageDetail::Original),
             },
         ]),
@@ -2653,7 +2660,9 @@ fn image_outputs_over_raw_byte_cap_preserve_function_and_custom_pairs() {
         namespace: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
-                image_url: image_url.clone(),
+                image: ImageReference::Inline {
+                    image_url: image_url.clone(),
+                },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
         ]),
@@ -2674,7 +2683,7 @@ fn image_outputs_over_raw_byte_cap_preserve_function_and_custom_pairs() {
         name: None,
         output: FunctionCallOutputPayload::from_content_items(vec![
             FunctionCallOutputContentItem::InputImage {
-                image_url,
+                image: ImageReference::Inline { image_url },
                 detail: Some(DEFAULT_IMAGE_DETAIL),
             },
         ]),
