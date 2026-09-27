@@ -442,6 +442,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                             thread_id: Some(conversation_id.to_string()),
                             session_id: event.session_id,
                             model: event.model,
+                            ..Default::default()
                         },
                         event.selected_account_id,
                         event.selection_revision,

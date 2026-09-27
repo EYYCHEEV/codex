@@ -688,6 +688,7 @@ impl AccountRequestProcessor {
                     thread_id: Some(thread.startup_metadata().thread_id.to_string()),
                     session_id: Some(thread.startup_metadata().session_id.to_string()),
                     model: Some(thread.config_snapshot().await.model),
+                    ..Default::default()
                 }),
                 Err(_) => None,
             },
@@ -714,6 +715,7 @@ impl AccountRequestProcessor {
                 .clone()
                 .or_else(|| observed.and_then(|observed| observed.scope.model.clone()))
                 .or_else(|| configured.and_then(|configured| configured.model.clone())),
+            ..Default::default()
         }
     }
 }

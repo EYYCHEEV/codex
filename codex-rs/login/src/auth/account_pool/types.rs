@@ -5,6 +5,7 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -20,6 +21,9 @@ pub struct ManagedChatgptSelectionScope {
     pub thread_id: Option<String>,
     pub session_id: Option<String>,
     pub model: Option<String>,
+    /// Request-local exclusions; never part of persisted account or selection state.
+    #[serde(skip)]
+    pub excluded_identities: Option<Arc<Vec<String>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

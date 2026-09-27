@@ -359,6 +359,7 @@ impl MemoryStartupContext {
             /*sandbox*/ None,
         )
         .await;
+        client_session.begin_request();
         loop {
             let request_setup = client_session
                 .current_client_setup(

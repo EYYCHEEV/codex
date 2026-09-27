@@ -13,6 +13,7 @@ use crate::app_event::WindowsSandboxEnableMode;
 use crate::app_info::app_info_from_api;
 use crate::app_server_session::AppServerSession;
 use crate::app_server_session::status_account_display_from_auth_mode;
+use crate::status::ManagedAccountsState;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AuthMode;
@@ -312,7 +313,7 @@ impl App {
                 let previous_binding = self
                     .chat_widget
                     .managed_accounts()
-                    .and_then(|accounts| accounts.selected_account_binding_key());
+                    .and_then(ManagedAccountsState::selected_account_binding_key);
                 self.chat_widget.apply_account_pool_update(
                     notification.accounts.clone(),
                     notification.pool_revision,
@@ -320,11 +321,9 @@ impl App {
                 let current_binding = self
                     .chat_widget
                     .managed_accounts()
-                    .and_then(|accounts| accounts.selected_account_binding_key());
+                    .and_then(ManagedAccountsState::selected_account_binding_key);
                 if previous_binding != current_binding {
-                    self.invalidate_managed_account_requests();
-                    self.on_managed_account_binding_changed(app_server_client);
-                    self.refresh_managed_accounts_usage_cache(app_server_client);
+                    self.on_managed_observation_binding_changed(app_server_client);
                 }
                 return;
             }
@@ -332,7 +331,7 @@ impl App {
                 let previous_binding = self
                     .chat_widget
                     .managed_accounts()
-                    .and_then(|accounts| accounts.selected_account_binding_key());
+                    .and_then(ManagedAccountsState::selected_account_binding_key);
                 self.chat_widget.apply_account_selection_update(
                     notification.thread_id.as_str(),
                     notification.selected_account_id.clone(),
@@ -341,11 +340,9 @@ impl App {
                 let current_binding = self
                     .chat_widget
                     .managed_accounts()
-                    .and_then(|accounts| accounts.selected_account_binding_key());
+                    .and_then(ManagedAccountsState::selected_account_binding_key);
                 if previous_binding != current_binding {
-                    self.invalidate_managed_account_requests();
-                    self.on_managed_account_binding_changed(app_server_client);
-                    self.refresh_managed_accounts_usage_cache(app_server_client);
+                    self.on_managed_observation_binding_changed(app_server_client);
                 }
                 return;
             }

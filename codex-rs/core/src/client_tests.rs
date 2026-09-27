@@ -1,3 +1,15 @@
+#[path = "client_managed_rotation_tests.rs"]
+mod managed_rotation_tests;
+
+#[path = "client_model_quota_tests.rs"]
+mod model_quota_tests;
+
+#[path = "client_model_quota_controls_tests.rs"]
+mod model_quota_controls_tests;
+
+#[path = "client_workspace_cap_tests.rs"]
+mod workspace_cap_tests;
+
 use super::AuthRequestTelemetryContext;
 use super::MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES;
 use super::ModelClient;
@@ -114,6 +126,9 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+#[path = "client_managed_setup_tests.rs"]
+mod managed_setup_tests;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 

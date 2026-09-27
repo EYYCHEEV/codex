@@ -242,6 +242,10 @@ pub(in crate::auth) fn select<'a>(
         .iter()
         .filter(|row| {
             eligibility(row, forced_workspace_ids, now) == ManagedChatgptEligibility::Eligible
+                && scope
+                    .excluded_identities
+                    .as_ref()
+                    .is_none_or(|excluded| !excluded.contains(&row.identity_key))
         })
         .collect();
     candidates.sort_by(|left, right| left.identity_key.cmp(&right.identity_key));

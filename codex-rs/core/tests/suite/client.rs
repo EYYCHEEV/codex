@@ -112,6 +112,9 @@ use wiremock::matchers::method;
 use wiremock::matchers::path;
 use wiremock::matchers::query_param;
 
+#[path = "client_managed_recovery_tests.rs"]
+mod managed_recovery_tests;
+
 const INSTALLATION_ID_FILENAME: &str = "installation_id";
 const TEST_WINDOW_ID: &str = "test-thread:0";
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
@@ -2067,6 +2070,8 @@ async fn send_responses_request(
                     Err(error) => panic!("responses prewarm failed: {error}"),
                 }
             }
+            // Startup prewarm and the turn's sampling request have separate recovery budgets.
+            client_session.begin_request();
 
             loop {
                 let request_setup = client_session

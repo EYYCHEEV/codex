@@ -36,6 +36,8 @@ pub struct ProviderAuthScope {
     pub thread_id: Option<String>,
     pub session_id: Option<String>,
     pub model: Option<String>,
+    /// Managed identities excluded only for the current logical request.
+    pub excluded_identities: Option<Arc<Vec<String>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -293,6 +295,7 @@ pub(crate) async fn resolve_provider_auth_for_scope(
         thread_id: _,
         session_id: _,
         model: _,
+        excluded_identities: _,
     } = scope;
     if let Some(bearer_auth) = bearer_auth_for_provider(provider)? {
         return Ok(ResolvedProviderAuth::new(Arc::new(bearer_auth), None));
@@ -503,6 +506,7 @@ mod tests {
             thread_id: None,
             session_id: None,
             model: None,
+            excluded_identities: None,
         }
     }
 

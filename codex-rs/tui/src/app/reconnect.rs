@@ -175,6 +175,7 @@ impl App {
     }
 
     pub(super) fn begin_reconnect(&mut self) -> bool {
+        self.invalidate_managed_account_requests();
         if matches!(self.app_server_target, AppServerTarget::Embedded) {
             return false;
         }

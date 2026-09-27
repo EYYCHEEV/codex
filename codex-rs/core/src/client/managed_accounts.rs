@@ -14,16 +14,17 @@ pub(super) fn managed_chatgpt_failure(error: &CodexErr) -> Option<ManagedChatgpt
             Some(ManagedChatgptFailure::AuthInvalid)
         }
         CodexErrorDetails::UsageLimitReached(error) => match error.rate_limit_reached_type {
-            None | Some(RateLimitReachedType::RateLimitReached) => {
-                Some(ManagedChatgptFailure::Quota {
-                    reset_at: error.resets_at,
-                })
-            }
-            Some(
-                RateLimitReachedType::WorkspaceOwnerCreditsDepleted
-                | RateLimitReachedType::WorkspaceMemberCreditsDepleted
+            None
+            | Some(
+                RateLimitReachedType::RateLimitReached
                 | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
                 | RateLimitReachedType::WorkspaceMemberUsageLimitReached,
+            ) => Some(ManagedChatgptFailure::Quota {
+                reset_at: error.resets_at,
+            }),
+            Some(
+                RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+                | RateLimitReachedType::WorkspaceMemberCreditsDepleted,
             ) => Some(ManagedChatgptFailure::WorkspaceQuota {
                 reset_at: error.resets_at,
             }),
@@ -221,38 +222,9 @@ impl ModelClient {
                 thread_id: Some(self.state.thread_id.to_string()),
                 session_id: session_id.map(str::to_owned),
                 model: model.map(str::to_owned),
+                ..Default::default()
             },
         })
-    }
-
-    pub(super) async fn recover_managed_attempt(
-        &self,
-        attempt: &ManagedChatgptAttemptContext,
-        error: &CodexErr,
-        committed: bool,
-    ) -> bool {
-        let Some(failure) = managed_chatgpt_failure(error) else {
-            return false;
-        };
-        let Some(auth_manager) = self.state.provider.auth_manager() else {
-            return false;
-        };
-        match auth_manager
-            .recover_failed_attempt(&attempt.snapshot, failure, committed, &attempt.scope)
-            .await
-        {
-            Ok(ManagedChatgptRecoveryDecision::Rotate(_)) => true,
-            Ok(ManagedChatgptRecoveryDecision::Keep(_) | ManagedChatgptRecoveryDecision::Stop) => {
-                false
-            }
-            Err(err) => {
-                warn!(
-                    managed_account = %attempt.snapshot.diagnostic_account_fingerprint(),
-                    "failed to persist managed account recovery decision: {err}"
-                );
-                false
-            }
-        }
     }
 }
 
@@ -326,13 +298,12 @@ impl ModelClientSession {
             self.reset_account_bound_state();
             return true;
         }
-        self.request_scope_auth_recovery = None;
         let Some(attempt) = self.managed_attempt.clone() else {
             return false;
         };
         if !self
-            .client
-            .recover_managed_attempt(&attempt, error, committed)
+            .request_recovery
+            .recover_managed_attempt(&self.client, &attempt, error, committed)
             .await
         {
             return false;
@@ -345,38 +316,25 @@ impl ModelClientSession {
     pub(super) async fn refresh_request_scope_after_unauthorized(
         &mut self,
         transport: TransportError,
-        recovery_key: UnauthorizedRecoveryKey,
-        fresh_recovery: Option<UnauthorizedRecovery>,
+        allowance: usize,
         session_telemetry: &SessionTelemetry,
     ) -> CodexErr {
-        let mut recovery_state = match self.request_scope_auth_recovery.take() {
-            Some(state) if state.key == recovery_key => state,
-            _ => RequestScopeUnauthorizedRecovery {
-                key: recovery_key,
-                recovery: fresh_recovery,
-                provider_auth_recovery_attempted: false,
-            },
-        };
-        match handle_unauthorized(
-            transport,
-            &mut recovery_state.recovery,
-            &mut recovery_state.provider_auth_recovery_attempted,
-            session_telemetry,
-            &self.client.state.provider,
-            self.client.event_sender.as_ref(),
-            /*turn_id*/ None,
-        )
-        .await
+        match self
+            .request_recovery
+            .recover_unauthorized(
+                transport,
+                allowance,
+                session_telemetry,
+                &self.client,
+                /*turn_id*/ None,
+            )
+            .await
         {
-            Ok(_) => {
-                self.request_scope_auth_recovery = Some(recovery_state);
+            Ok(()) => {
                 self.request_scope_refresh_pending = true;
                 CodexErr::Stream("request authentication refreshed".to_string())
             }
-            Err(error) => {
-                self.request_scope_auth_recovery = None;
-                error
-            }
+            Err(error) => error,
         }
     }
 
@@ -410,21 +368,17 @@ impl ModelClientSession {
         mut request_setup: Option<CurrentClientSetup>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
-        let mut provider_auth_recovery_attempted = false;
-        let mut auth_recovery = None;
-        let mut auth_recovery_key = None;
-        let mut pending_retry = PendingUnauthorizedRetry::default();
+
         let explicit_setup = request_setup.is_some();
         loop {
             let client_setup = match request_setup.take() {
                 Some(setup) => setup,
                 None => {
-                    self.client
-                        .current_client_setup(
-                            Some(model_info.slug.as_str()),
-                            Some(responses_metadata.session_id.as_str()),
-                        )
-                        .await?
+                    self.current_client_setup(
+                        Some(model_info.slug.as_str()),
+                        Some(responses_metadata.session_id.as_str()),
+                    )
+                    .await?
                 }
             };
             self.observe_managed_selection(
@@ -439,13 +393,9 @@ impl ModelClientSession {
                 Some(model_info.slug.as_str()),
                 Some(responses_metadata.session_id.as_str()),
             );
-            let recovery_key = UnauthorizedRecoveryKey::for_setup(&client_setup);
-            if !explicit_setup && auth_recovery_key.as_ref() != Some(&recovery_key) {
-                auth_recovery =
-                    unauthorized_recovery_for_setup(auth_manager.as_ref(), &client_setup);
-                auth_recovery_key = Some(recovery_key.clone());
-                pending_retry = PendingUnauthorizedRetry::default();
-            }
+            let allowance = self
+                .request_recovery
+                .prepare(auth_manager.as_ref(), &client_setup);
             let include_internal = self
                 .client
                 .state
@@ -458,11 +408,6 @@ impl ModelClientSession {
                 .client
                 .responses_headers(client_setup.effective_auth.as_ref(), &model_info.slug);
             tracing::Span::current().record("api.path", endpoint.path());
-            let fresh_request_scope_recovery = if explicit_setup {
-                unauthorized_recovery_for_setup(auth_manager.as_ref(), &client_setup)
-            } else {
-                None
-            };
             let transport = self
                 .client
                 .build_api_transport(
@@ -478,7 +423,7 @@ impl ModelClientSession {
                     .map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
                 client_setup.agent_identity_telemetry.clone(),
-                pending_retry,
+                self.request_recovery.pending_retry,
             );
             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                 session_telemetry,
@@ -571,9 +516,6 @@ impl ModelClientSession {
     
             match stream_result {
                 Ok(stream) => {
-                    if explicit_setup {
-                        self.request_scope_auth_recovery = None;
-                    }
                     let (stream, _) = map_response_stream(
                         stream,
                         request_session_telemetry,
@@ -602,24 +544,20 @@ impl ModelClientSession {
                         return Err(self
                             .refresh_request_scope_after_unauthorized(
                                 unauthorized_transport,
-                                recovery_key,
-                                fresh_request_scope_recovery,
+                                allowance,
                                 session_telemetry,
                             )
                             .await);
                     }
-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
-                        handle_unauthorized(
+                    self.request_recovery
+                        .recover_unauthorized(
                             unauthorized_transport,
-                            &mut auth_recovery,
-                            &mut provider_auth_recovery_attempted,
+                            allowance,
                             session_telemetry,
-                            &self.client.state.provider,
-                            self.client.event_sender.as_ref(),
+                            &self.client,
                             responses_metadata.turn_id.as_deref(),
                         )
-                        .await?,
-                    );
+                        .await?;
                     continue;
                 }
                 Err(err) => {

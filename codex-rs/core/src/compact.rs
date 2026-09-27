@@ -279,13 +279,12 @@ async fn run_compact_task_inner_impl(
     // Reuse one client session so turn-scoped state (sticky routing and websocket incremental
     // request tracking) survives retries within this compact turn.
     let mut client_session = sess.services.model_client.new_session();
+    client_session.begin_request();
     let compaction_response = loop {
         let responses_metadata = sess
             .compaction_responses_metadata(turn_context.as_ref(), compaction_metadata)
             .await;
-        let request_setup = sess
-            .services
-            .model_client
+        let request_setup = client_session
             .current_client_setup(
                 Some(&turn_context.model_info().slug),
                 Some(responses_metadata.session_id.as_str()),

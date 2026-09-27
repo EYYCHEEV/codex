@@ -715,19 +715,26 @@ pub struct UsageLimitReachedError {
     pub rate_limit_reached_type: Option<RateLimitReachedType>,
 }
 
+impl UsageLimitReachedError {
+    /// Returns the explicit named limit for which switching models is suggested.
+    pub fn model_limit_name(&self) -> Option<&str> {
+        self.rate_limits
+            .as_ref()
+            .and_then(|snapshot| snapshot.limit_name.as_deref())
+            .map(str::trim)
+            .filter(|name| {
+                !name.is_empty()
+                    && !name.eq_ignore_ascii_case("codex")
+                    && !name.eq_ignore_ascii_case("gpt-reserve")
+            })
+    }
+}
+
 impl std::fmt::Display for UsageLimitReachedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Reserve is a fallback for exhausted ordinary usage, so keep the standard
         // promo/plan recovery copy below instead of suggesting another model.
-        if let Some(limit_name) = self
-            .rate_limits
-            .as_ref()
-            .and_then(|snapshot| snapshot.limit_name.as_deref())
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            && !limit_name.eq_ignore_ascii_case("codex")
-            && !limit_name.eq_ignore_ascii_case("gpt-reserve")
-        {
+        if let Some(limit_name) = self.model_limit_name() {
             return write!(
                 f,
                 "You’ve hit your usage limit for {limit_name}. Switch to another model now,{}",

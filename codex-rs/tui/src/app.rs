@@ -236,6 +236,7 @@ mod new_session;
 mod turn_tips;
 pub(crate) use new_session::has_launch_setting;
 mod clipboard;
+mod managed_pool_recovery;
 mod native_history;
 mod owned_transcript;
 mod pending_interactive_replay;
