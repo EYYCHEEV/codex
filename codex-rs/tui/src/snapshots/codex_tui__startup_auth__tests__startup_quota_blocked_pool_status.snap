@@ -1,0 +1,20 @@
+---
+source: tui/src/startup_auth_tests.rs
+expression: pool_lines
+---
+│   first@example.test · Plus                                   │
+│     Credential: healthy                                       │
+│     Eligibility: ineligible (blocked)                         │
+│     Cooldown: quota (no known reset time)                     │
+│     Quota: unknown; no quota observation                      │
+│     Usage: unknown · summary not reported                     │
+│     Observed: unknown                                         │
+│                                                               │
+│   second@example.test · Plus                                  │
+│     Credential: healthy                                       │
+│     Eligibility: ineligible (blocked)                         │
+│     Cooldown: quota (no known reset time)                     │
+│     Quota: unknown; no quota observation                      │
+│     Usage: unknown · summary not reported                     │
+│     Observed: unknown                                         │
+╰───────────────────────────────────────────────────────────────╯

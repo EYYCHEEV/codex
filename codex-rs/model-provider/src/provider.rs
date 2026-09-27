@@ -298,6 +298,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
                     .workspace_routing(
                         &auth,
                         WorkspaceRoutingRequest {
+                            managed_snapshot: None,
                             provider_base_url: provider.base_url.clone(),
                             chatgpt_base_url: routing_context.chatgpt_base_url.clone(),
                             previously_routed: *previously_routed,
@@ -769,6 +770,7 @@ impl ModelProvider for ConfiguredModelProvider {
                     .workspace_routing(
                         auth,
                         WorkspaceRoutingRequest {
+                            managed_snapshot: setup.managed_snapshot.as_ref(),
                             provider_base_url: setup.api_provider.base_url.clone(),
                             chatgpt_base_url: routing_context.chatgpt_base_url.clone(),
                             previously_routed: *previously_routed,

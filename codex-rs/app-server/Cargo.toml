@@ -149,6 +149,7 @@ rmcp = { workspace = true, default-features = false, features = [
     "server",
     "transport-streamable-http-server",
 ] }
+rustls = { workspace = true }
 serial_test = { workspace = true }
 shlex = { workspace = true }
 sqlx = { workspace = true }

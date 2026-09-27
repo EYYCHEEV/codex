@@ -379,7 +379,16 @@ impl AccountRequestProcessor {
                 ),
             );
             let rate = match rate_result {
-                Ok(Ok(response)) => managed_rate_observation(response.rate_limits),
+                Ok(Ok(response)) => {
+                    let recovery_allowed = response
+                        .quota_recovery_allowed_for(snapshot.transport.raw_account_id.as_deref());
+                    match managed_rate_observation(response.rate_limits) {
+                        ManagedChatgptRateObservation::Available(windows) if recovery_allowed => {
+                            ManagedChatgptRateObservation::AuthoritativeAvailable(windows)
+                        }
+                        observation => observation,
+                    }
+                }
                 Ok(Err(err)) => {
                     warn!("failed to fetch managed account rate limits: {err}");
                     ManagedChatgptRateObservation::Unavailable {

@@ -303,9 +303,37 @@ pub(in crate::auth) fn record_status_observation(
     }
     let previous_usage = row.observed_usage.clone();
     let previous_token_unavailable = row.token_unavailable.clone();
+    // A fresh failure outranks a potentially lagging usage report for one freshness window.
+    let quota_recovered = matches!(&observation.rate, ManagedChatgptRateObservation::AuthoritativeAvailable(windows)
+    if windows.iter().any(|window| window.limit_id == "codex"
+        && matches!(window.kind, ManagedChatgptLimitKind::Primary | ManagedChatgptLimitKind::Secondary))
+        && windows.iter().all(|window| window.remaining_percent.is_some_and(|remaining| {
+            remaining.is_finite() && remaining > 0.0 && remaining <= 100.0
+        })))
+        && row.tombstone.is_none()
+        && row.mutation_lease.is_none()
+        && !row
+            .refresh_failure
+            .as_ref()
+            .is_some_and(|failure| failure.permanent)
+        && row.block.as_ref().is_some_and(|block| {
+            block.kind == ManagedChatgptBlockKind::Quota
+                && block.credential_revision == credential_revision(row)
+                && observation.observed_at - block.blocked_at >= USAGE_FRESHNESS
+        })
+        && {
+            let now = Utc::now();
+            observation.observed_at <= now && now - observation.observed_at <= USAGE_FRESHNESS
+        };
+    if quota_recovered {
+        row.block = None;
+    }
     match observation.rate {
         ManagedChatgptRateObservation::NotObserved => {}
-        ManagedChatgptRateObservation::Available(rate_windows) if rate_windows.is_empty() => {
+        ManagedChatgptRateObservation::Available(rate_windows)
+        | ManagedChatgptRateObservation::AuthoritativeAvailable(rate_windows)
+            if rate_windows.is_empty() =>
+        {
             let unavailable = ManagedChatgptUnavailableObservation {
                 observed_at: observation.observed_at,
                 reason: "rate limit usage was absent from the response".to_string(),
@@ -322,7 +350,8 @@ pub(in crate::auth) fn record_status_observation(
                 }
             }
         }
-        ManagedChatgptRateObservation::Available(rate_windows) => {
+        ManagedChatgptRateObservation::Available(rate_windows)
+        | ManagedChatgptRateObservation::AuthoritativeAvailable(rate_windows) => {
             let token_usage = row
                 .observed_usage
                 .as_ref()
@@ -390,7 +419,9 @@ pub(in crate::auth) fn record_status_observation(
             });
         }
     }
-    previous_usage != row.observed_usage || previous_token_unavailable != row.token_unavailable
+    quota_recovered
+        || previous_usage != row.observed_usage
+        || previous_token_unavailable != row.token_unavailable
 }
 
 pub(in crate::auth) fn apply_failure(

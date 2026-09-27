@@ -4,6 +4,7 @@ use super::Client;
 use super::PathStyle;
 use crate::types::ConsumeRateLimitResetCreditResponse;
 use crate::types::RateLimitResetCreditsDetails;
+use crate::types::RateLimitStatusDetails;
 use crate::types::RateLimitStatusWithResetCredits;
 use crate::types::RateLimitsWithResetCredits;
 use anyhow::Result;
@@ -11,6 +12,26 @@ use http::Method;
 use http::header::CONTENT_TYPE;
 use http::header::HeaderValue;
 use serde::Serialize;
+
+fn quota_meter_allows_recovery(limit: &RateLimitStatusDetails) -> bool {
+    let primary = limit
+        .primary_window
+        .as_ref()
+        .and_then(|value| value.as_deref());
+    let secondary = limit
+        .secondary_window
+        .as_ref()
+        .and_then(|value| value.as_deref());
+    limit.allowed
+        && !limit.limit_reached
+        && (primary.is_some() || secondary.is_some())
+        && [primary, secondary].into_iter().flatten().all(|window| {
+            (0..100).contains(&window.used_percent)
+                && window.limit_window_seconds > 0
+                && window.reset_after_seconds >= 0
+                && window.reset_at > 0
+        })
+}
 
 #[derive(Serialize)]
 struct ConsumeRateLimitResetCreditRequest<'a> {
@@ -42,6 +63,46 @@ impl Client {
             .as_ref()
             .and_then(|limit| limit.as_deref())
             .map(|limit| limit.allowed);
+        let quota_recovery_allowed = payload
+            .rate_limits
+            .rate_limit
+            .as_ref()
+            .and_then(|limit| limit.as_deref())
+            .is_some_and(quota_meter_allows_recovery)
+            && payload
+                .additional_rate_limits
+                .iter()
+                .flatten()
+                .all(|limit| {
+                    limit
+                        .details
+                        .rate_limit
+                        .as_ref()
+                        .and_then(|limit| limit.as_deref())
+                        .is_some_and(quota_meter_allows_recovery)
+                })
+            && payload
+                .rate_limits
+                .spend_control
+                .as_ref()
+                .and_then(|control| control.as_deref())
+                .is_none_or(|control| {
+                    !control.reached
+                        && control
+                            .individual_limit
+                            .as_ref()
+                            .and_then(|limit| limit.as_deref())
+                            .is_none_or(|limit| {
+                                (0..100).contains(&limit.used_percent)
+                                    && (1..=100).contains(&limit.remaining_percent)
+                            })
+                })
+            && payload
+                .rate_limits
+                .rate_limit_reached_type
+                .as_ref()
+                .and_then(Option::as_ref)
+                .is_none();
         let mut rate_limits = Self::rate_limit_snapshots_from_payload(payload.rate_limits);
         let plan_type = rate_limits.first().and_then(|snapshot| snapshot.plan_type);
         rate_limits.extend(
@@ -59,6 +120,7 @@ impl Client {
         Ok(RateLimitsWithResetCredits {
             rate_limits,
             ordinary_usage_allowed,
+            quota_recovery_allowed,
             rate_limit_reset_credits: payload.rate_limit_reset_credits,
             account_id: payload.account_id,
             user_id: payload.user_id,

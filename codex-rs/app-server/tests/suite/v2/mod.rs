@@ -1,4 +1,6 @@
 mod account;
+#[path = "account_quota_recovery_tests.rs"]
+mod account_quota_recovery;
 #[path = "account_system_proxy_tests.rs"]
 mod account_system_proxy;
 mod account_thread_usage;
@@ -158,6 +160,8 @@ mod view_image;
 mod web_search;
 mod windows_sandbox_setup;
 mod workspace_routing;
+#[path = "workspace_routing_pool_tests.rs"]
+mod workspace_routing_pool;
 
 mod user_verification;
 mod user_verification_mcp;
