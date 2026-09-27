@@ -625,6 +625,7 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
         setup.api_provider.base_url = origin.uri();
         let transport = client
             .build_api_transport(&setup.api_provider, "/responses", setup.redirect_policy)
+            .await
             .unwrap();
         let request = setup
             .api_provider
@@ -653,6 +654,21 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
     }
 }
 
+struct SetupExternalAuth(CodexAuth);
+
+impl codex_login::ExternalAuth for SetupExternalAuth {
+    fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.0.clone()) })
+    }
+
+    fn refresh(
+        &self,
+        _context: codex_login::ExternalAuthRefreshContext,
+    ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+        Box::pin(async { Ok(self.0.clone()) })
+    }
+}
+
 #[derive(Debug)]
 enum SetupRefresh {
     Command(PathBuf),
@@ -661,6 +677,7 @@ enum SetupRefresh {
         token: String,
         workspace: String,
     },
+    ExternalChatGpt(CodexAuth),
 }
 
 #[derive(Debug)]
@@ -687,9 +704,11 @@ impl ModelProvider for SetupRefreshProvider {
         self.inner.account_state()
     }
 
-    fn api_provider(
-        &self,
-    ) -> ModelProviderFuture<'_, codex_protocol::error::Result<codex_api::Provider>> {
+    fn route_request_setup<'a>(
+        &'a self,
+        routing_context: &'a codex_model_provider::WorkspaceRoutingContext,
+        setup: &'a mut codex_model_provider::ProviderRequestSetup,
+    ) -> ModelProviderFuture<'a, codex_protocol::error::Result<()>> {
         Box::pin(async move {
             self.setup_calls.fetch_add(1, Ordering::SeqCst);
             let manager = self.inner.auth_manager().expect("auth manager");
@@ -711,8 +730,14 @@ impl ModelProvider for SetupRefreshProvider {
                     )?;
                     manager.reload().await;
                 }
+                SetupRefresh::ExternalChatGpt(auth) => {
+                    manager
+                        .set_external_auth(Arc::new(SetupExternalAuth(auth.clone())))
+                        .await
+                        .expect("switch external account during routing");
+                }
             }
-            self.inner.api_provider().await
+            self.inner.route_request_setup(routing_context, setup).await
         })
     }
 
@@ -727,60 +752,49 @@ impl ModelProvider for SetupRefreshProvider {
 
 #[tokio::test]
 async fn client_setup_accepts_command_credential_refresh() {
-    for routing in [
-        super::ClientRouting::Workspace,
-        super::ClientRouting::ConfiguredProvider,
-    ] {
-        let tempdir = TempDir::new().unwrap();
-        let token_path = tempdir.path().join("token.txt");
-        std::fs::write(&token_path, "initial-token").unwrap();
-        let mut info = test_model_provider().info().clone();
-        info.auth = Some(codex_protocol::config_types::ModelProviderAuthInfo {
-            command: if cfg!(windows) { "cmd.exe" } else { "cat" }.into(),
-            args: if cfg!(windows) {
-                vec!["/D", "/C", "type", "token.txt"]
-            } else {
-                vec!["token.txt"]
-            }
-            .into_iter()
-            .map(Into::into)
-            .collect(),
-            timeout_ms: std::num::NonZeroU64::new(/*n*/ 5_000).unwrap(),
-            refresh_interval_ms: 60_000,
-            cwd: tempdir.path().try_into().unwrap(),
-        });
-        let provider = Arc::new(SetupRefreshProvider {
-            inner: create_model_provider(info, /*auth_manager*/ None),
-            refresh: SetupRefresh::Command(token_path),
-            setup_calls: AtomicUsize::new(/*v*/ 0),
-        });
-        let manager = provider.auth_manager().unwrap();
-        let mut client = test_model_client(SessionSource::Exec);
-        Arc::get_mut(&mut client.state).unwrap().provider = provider;
+    let tempdir = TempDir::new().unwrap();
+    let token_path = tempdir.path().join("token.txt");
+    std::fs::write(&token_path, "initial-token").unwrap();
+    let mut info = test_model_provider().info().clone();
+    info.auth = Some(codex_protocol::config_types::ModelProviderAuthInfo {
+        command: if cfg!(windows) { "cmd.exe" } else { "cat" }.into(),
+        args: if cfg!(windows) {
+            vec!["/D", "/C", "type", "token.txt"]
+        } else {
+            vec!["token.txt"]
+        }
+        .into_iter()
+        .map(Into::into)
+        .collect(),
+        timeout_ms: std::num::NonZeroU64::new(/*n*/ 5_000).unwrap(),
+        refresh_interval_ms: 60_000,
+        cwd: tempdir.path().try_into().unwrap(),
+    });
+    let provider = Arc::new(SetupRefreshProvider {
+        inner: create_model_provider(info, /*auth_manager*/ None),
+        refresh: SetupRefresh::Command(token_path),
+        setup_calls: AtomicUsize::new(/*v*/ 0),
+    });
+    let manager = provider.auth_manager().unwrap();
+    let mut client = test_model_client(SessionSource::Exec);
+    Arc::get_mut(&mut client.state).unwrap().provider = provider;
 
-        let setup = client
-            .current_client_setup_for_routing(routing, /*model*/ None, /*session_id*/ None)
-            .await
-            .unwrap();
-        let mut headers = http::HeaderMap::new();
-        setup.api_auth.add_auth_headers(&mut headers);
-        assert_eq!(
-            headers.get(http::header::AUTHORIZATION).unwrap(),
-            "Bearer refreshed-token"
-        );
-        let refreshed_revision = Some(*manager.auth_change_receiver().borrow());
-        assert_ne!(
-            codex_model_provider::ResponsesConnectionKey::new(
-                &setup.api_provider,
-                setup.auth_revision
-            ),
-            codex_model_provider::ResponsesConnectionKey::new(
-                &setup.api_provider,
-                refreshed_revision
-            ),
-        );
-        assert_ne!(setup.auth_owner_generation, client.auth_owner_generation());
-    }
+    let setup = client
+        .current_client_setup(/*model*/ None, /*session_id*/ None)
+        .await
+        .unwrap();
+    let mut headers = http::HeaderMap::new();
+    setup.api_auth.add_auth_headers(&mut headers);
+    assert_eq!(
+        headers.get(http::header::AUTHORIZATION).unwrap(),
+        "Bearer refreshed-token"
+    );
+    let refreshed_revision = Some(*manager.auth_change_receiver().borrow());
+    assert_ne!(
+        codex_model_provider::ResponsesConnectionKey::new(&setup.api_provider, setup.auth_revision),
+        codex_model_provider::ResponsesConnectionKey::new(&setup.api_provider, refreshed_revision),
+    );
+    assert_ne!(setup.auth_owner_generation, client.auth_owner_generation());
 }
 
 #[tokio::test]
@@ -798,8 +812,16 @@ async fn client_setup_rebuilds_chatgpt_refresh_but_rejects_account_switches() {
             format!("header.{payload}.signature")
         };
         let home = TempDir::new().unwrap();
+        let initial_token = token("user-a", "initial");
+        codex_login::auth::login_with_chatgpt_auth_tokens(
+            home.path(),
+            &initial_token,
+            "workspace-a",
+            /*chatgpt_plan_type*/ None,
+        )
+        .unwrap();
         let initial = CodexAuth::from_external_chatgpt_tokens(
-            &token("user-a", "initial"),
+            &initial_token,
             "workspace-a",
             /*chatgpt_plan_type*/ None,
         )
@@ -835,7 +857,10 @@ async fn client_setup_rebuilds_chatgpt_refresh_but_rejects_account_switches() {
                 headers.get(http::header::AUTHORIZATION).unwrap(),
                 &format!("Bearer {refreshed_token}")
             );
-            assert_eq!(setup.auth.unwrap().get_token().unwrap(), refreshed_token);
+            assert_eq!(
+                setup.effective_auth.unwrap().get_token().unwrap(),
+                refreshed_token
+            );
             assert_eq!(
                 (setup.auth_revision, setup.auth_owner_generation),
                 (Some(*manager.auth_change_receiver().borrow()), Some(0))
@@ -848,6 +873,50 @@ async fn client_setup_rebuilds_chatgpt_refresh_but_rejects_account_switches() {
         }
         assert_eq!(provider.setup_calls.load(Ordering::SeqCst), expected_calls);
     }
+}
+
+#[tokio::test]
+async fn client_setup_rejects_external_auth_account_switch_during_route() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let initial_token = managed_id_token("a@example.com", "workspace-a");
+    let initial = CodexAuth::from_external_chatgpt_tokens(
+        &initial_token,
+        "workspace-a",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    let manager =
+        AuthManager::from_auth_for_testing_with_home(initial.clone(), home.path().to_path_buf());
+    manager
+        .set_external_auth(Arc::new(SetupExternalAuth(initial)))
+        .await?;
+
+    let switched_token = managed_id_token("b@example.com", "workspace-b");
+    let switched = CodexAuth::from_external_chatgpt_tokens(
+        &switched_token,
+        "workspace-b",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    let mut info = test_model_provider().info().clone();
+    info.requires_openai_auth = true;
+    let provider = Arc::new(SetupRefreshProvider {
+        inner: create_model_provider(info, Some(manager)),
+        refresh: SetupRefresh::ExternalChatGpt(switched),
+        setup_calls: AtomicUsize::new(/*v*/ 0),
+    });
+    let mut client = test_model_client(SessionSource::Exec);
+    Arc::get_mut(&mut client.state).unwrap().provider = provider.clone();
+
+    let error = client
+        .current_client_setup(/*model*/ None, /*session_id*/ None)
+        .await
+        .err()
+        .expect("external account switch must fail");
+    assert_eq!(
+        error.to_string(),
+        "account changed while preparing model request"
+    );
+    assert_eq!(provider.setup_calls.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 
 fn test_responses_metadata_for_client(

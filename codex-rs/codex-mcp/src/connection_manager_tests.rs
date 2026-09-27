@@ -4407,6 +4407,7 @@ async fn cancel_active_startups_preserves_deferred_lazy_and_completed_clients() 
             AsyncManagedClient {
                 client,
                 is_codex_apps_mcp_server: lazy_startup,
+                server_capabilities: Arc::new(std::sync::Mutex::new(None)),
                 cached_server_info: None,
                 codex_apps_tools_cache_context: None,
                 tool_catalog_cache_context: None,
@@ -4703,6 +4704,7 @@ async fn cached_binding_stays_immutable_when_demanded_lazy_codex_apps_startup_fa
         AsyncManagedClient {
             client,
             is_codex_apps_mcp_server: true,
+            server_capabilities: Arc::new(std::sync::Mutex::new(None)),
             cached_server_info: Some(create_test_server_info("Codex Apps")),
             codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,

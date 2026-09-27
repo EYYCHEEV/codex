@@ -179,16 +179,18 @@ fn capability_mentions_include_only_user_and_trusted_goal_inputs() {
         TurnInput::ResponseItem(codex_history::ResponseItemEnvelope::new(
             assistant_output_text("Do not resolve $assistant-output."),
         )),
-        TurnInput::FunctionCallOutput(ResponseItem::FunctionCallOutput {
-            id: None,
-            call_id: Some("call-id".to_string()),
-            name: None,
-            namespace: None,
-            output: codex_protocol::models::FunctionCallOutputPayload::from_text(
-                "Do not resolve $function-output.".to_string(),
-            ),
-            internal_chat_message_metadata_passthrough: None,
-        }),
+        TurnInput::FunctionCallOutput(codex_history::ResponseItemEnvelope::new(
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: Some("call-id".to_string()),
+                name: None,
+                namespace: None,
+                output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                    "Do not resolve $function-output.".to_string(),
+                ),
+                internal_chat_message_metadata_passthrough: None,
+            },
+        )),
         TurnInput::InterAgentCommunication(inter_agent_context),
     ]);
 

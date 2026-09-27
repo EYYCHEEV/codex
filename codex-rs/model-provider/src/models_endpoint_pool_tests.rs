@@ -118,6 +118,7 @@ async fn managed_pool_catalog_follows_selected_account_and_invalidates_on_pool_c
         Arc::new(OpenAiModelsEndpoint::new(
             ModelProviderInfo::create_openai_provider(Some(server.uri())),
             Some(Arc::clone(&auth)),
+            /*gateway_auth_manager*/ None,
         )),
         Some(Arc::clone(&auth)),
     );

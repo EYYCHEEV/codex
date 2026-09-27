@@ -26,40 +26,109 @@ async fn catalog_deadline_returns_request_timeout() {
         /*gateway_auth_manager*/ None,
     );
 
-    tokio::time::pause();
-    let request = tokio::time::timeout(
-        MODELS_REFRESH_TIMEOUT * 2,
-        endpoint.list_models(
-            "0.0.0",
-            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-        ),
+    let request = endpoint.list_models(
+        "0.0.0",
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     );
     tokio::pin!(request);
     let received = mock.wait_until_satisfied();
     tokio::pin!(received);
-    let deadline = std::time::Instant::now() + Duration::from_secs(/*secs*/ 30);
-    // Keep the paused runtime runnable until the request reaches the server.
-    // Otherwise auto-advance can expire the catalog deadline during dispatch.
-    loop {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "server did not receive the catalog request"
-        );
+    tokio::time::timeout(MODELS_FETCH_TIMEOUT, async {
         tokio::select! {
-            () = &mut received => break,
+            () = &mut received => {}
             result = &mut request => {
                 panic!("catalog request finished before reaching the server: {result:?}");
             }
-            () = tokio::task::yield_now() => {}
         }
-    }
-    tokio::time::advance(MODELS_REFRESH_TIMEOUT + Duration::from_millis(/*millis*/ 1)).await;
+    })
+    .await
+    .expect("server did not receive the catalog request");
+    tokio::time::pause();
+    tokio::time::advance(MODELS_REQUEST_TIMEOUT + Duration::from_millis(/*millis*/ 1)).await;
     let error = request
         .await
-        .expect("catalog deadline should expire")
         .expect_err("delayed catalog request should time out");
     tokio::time::resume();
 
+    assert!(
+        matches!(error.details(), CodexErrorDetails::RequestTimeout),
+        "{error}"
+    );
+}
+
+#[derive(Debug)]
+struct DelayedTransportBuilder {
+    client: codex_http_client::HttpClient,
+    delay: Duration,
+}
+
+impl ModelsTransportBuilder for DelayedTransportBuilder {
+    fn build(
+        &self,
+        _http_client_factory: HttpClientFactory,
+        _request_url: String,
+    ) -> ModelsTransportFuture<'_> {
+        Box::pin(async move {
+            tokio::time::sleep(self.delay).await;
+            Ok(ReqwestTransport::from_http_client(self.client.clone()))
+        })
+    }
+}
+
+#[tokio::test]
+async fn slow_transport_setup_does_not_consume_request_deadline() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": []
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut endpoint = OpenAiModelsEndpoint::new(
+        ModelProviderInfo::create_openai_provider(Some(server.uri())),
+        /*auth_manager*/ None,
+        /*gateway_auth_manager*/ None,
+    );
+    endpoint.transport_builder = Arc::new(DelayedTransportBuilder {
+        client: codex_http_client::HttpClientBuilder::new()
+            .build_direct()
+            .expect("local test client should build"),
+        delay: MODELS_REQUEST_TIMEOUT + Duration::from_millis(/*millis*/ 100),
+    });
+
+    let response = endpoint
+        .list_models(
+            "0.0.0",
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        )
+        .await
+        .expect("catalog request should succeed after slow client setup");
+    assert_eq!(response.models, Vec::new());
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_setup_is_bounded() {
+    let mut endpoint = OpenAiModelsEndpoint::new(
+        ModelProviderInfo::create_openai_provider(Some("http://127.0.0.1:1".to_string())),
+        /*auth_manager*/ None,
+        /*gateway_auth_manager*/ None,
+    );
+    endpoint.transport_builder = Arc::new(DelayedTransportBuilder {
+        client: codex_http_client::HttpClientBuilder::new()
+            .build_direct()
+            .expect("local test client should build"),
+        delay: MODELS_FETCH_TIMEOUT + Duration::from_secs(/*secs*/ 1),
+    });
+
+    let error = endpoint
+        .list_models(
+            "0.0.0",
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        )
+        .await
+        .expect_err("transport setup should be bounded");
     assert!(
         matches!(error.details(), CodexErrorDetails::RequestTimeout),
         "{error}"

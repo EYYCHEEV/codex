@@ -1194,25 +1194,55 @@ impl ModelClient {
         model: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<CurrentClientSetup> {
-        let mut setup = self
-            .state
-            .provider
-            .request_setup(ProviderAuthScope {
-                agent_identity_policy: self.agent_identity_policy,
-                session_source: self.state.session_source.clone(),
-                agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
-                thread_id: Some(self.state.thread_id.to_string()),
-                session_id: session_id.map(str::to_owned),
-                model: model.map(str::to_owned),
-            })
-            .await?;
-        if matches!(routing, ClientRouting::Workspace) {
-            self.state
+        // Routing may refresh credentials. Retry once for the same owner, but never
+        // send a request built for an account that changed during setup.
+        let auth_manager = self.auth_manager().filter(|manager| {
+            // A configured command's isolated bearer manager follows token refreshes.
+            // Other external auth sources can still change the account owner.
+            !(self.state.provider.info().auth.is_some() && manager.has_external_auth())
+        });
+        for attempt in 0..2 {
+            let mut setup = self
+                .state
                 .provider
-                .route_request_setup(&self.state.workspace_routing, &mut setup)
+                .request_setup(ProviderAuthScope {
+                    agent_identity_policy: self.agent_identity_policy,
+                    session_source: self.state.session_source.clone(),
+                    agent_identity_session_fallback: self
+                        .state
+                        .agent_identity_session_fallback
+                        .clone(),
+                    thread_id: Some(self.state.thread_id.to_string()),
+                    session_id: session_id.map(str::to_owned),
+                    model: model.map(str::to_owned),
+                })
                 .await?;
+            if matches!(routing, ClientRouting::Workspace) {
+                self.state
+                    .provider
+                    .route_request_setup(&self.state.workspace_routing, &mut setup)
+                    .await?;
+            }
+            let Some(manager) = auth_manager.as_ref() else {
+                return Ok(setup);
+            };
+            let auth_change = *manager.auth_change_state_receiver().borrow();
+            if setup.auth_owner_generation != Some(auth_change.owner_generation) {
+                return Err(CodexErr::Io(std::io::Error::other(
+                    "account changed while preparing model request",
+                )));
+            }
+            // Pool selection also advances the request revision, independently of auth generation.
+            if setup.auth_revision == Some(*manager.auth_change_receiver().borrow()) {
+                return Ok(setup);
+            }
+            if attempt == 1 {
+                return Err(CodexErr::Io(std::io::Error::other(
+                    "authentication changed while preparing model request",
+                )));
+            }
         }
-        Ok(setup)
+        unreachable!("request setup always returns or fails within two attempts")
     }
 
     fn responses_headers(&self, auth: Option<&CodexAuth>, model: &str) -> ApiHeaderMap {

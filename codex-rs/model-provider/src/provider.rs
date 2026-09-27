@@ -441,8 +441,15 @@ pub(crate) async fn resolve_provider_request_setup(
         .as_ref()
         .map(|manager| *manager.auth_change_receiver().borrow());
     let first_party_auth = provider_uses_first_party_auth_path(provider);
-    let effective_manager_auth = if first_party_auth {
+    let effective_manager_auth = if first_party_auth || provider.auth.is_some() {
         match auth_manager.as_ref() {
+            Some(manager) if provider.auth.is_some() && manager.has_external_auth() => {
+                Some(manager.auth().await.ok_or_else(|| {
+                    CodexErr::Io(std::io::Error::other(
+                        "command authentication is unavailable",
+                    ))
+                })?)
+            }
             Some(manager) => match manager.auth_cached() {
                 Some(auth) => Some(auth),
                 None => manager.auth().await,

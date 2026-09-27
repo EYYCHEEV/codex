@@ -131,18 +131,29 @@ impl AuthProvider for HeaderAuthProvider {
     }
 }
 
+#[derive(Clone, Copy)]
+enum HeaderAuthResolution {
+    CacheBound,
+    RefreshAtSend,
+}
+
 struct AuthManagerAuthProvider {
     auth_manager: Arc<AuthManager>,
     expected_auth: CodexAuth,
     expected_binding: TransportAuthBinding,
     expected_credential_revision: Option<u64>,
+    header_resolution: HeaderAuthResolution,
 }
 
 impl AuthManagerAuthProvider {
     fn is_expected_auth(&self, auth: &CodexAuth) -> bool {
         let binding_auth_mode_matches = self.expected_binding.auth_mode == auth.auth_mode()
             || self.expected_binding.auth_mode == auth.api_auth_mode();
-        if !(auth.uses_codex_backend()
+        let command_bearer_refresh = matches!(
+            (&self.expected_auth, auth),
+            (CodexAuth::ApiKey(_), CodexAuth::ApiKey(_))
+        ) && self.auth_manager.has_external_auth();
+        if !((auth.uses_codex_backend() || command_bearer_refresh)
             && auth.get_account_id() == self.expected_auth.get_account_id()
             && auth.get_chatgpt_user_id() == self.expected_auth.get_chatgpt_user_id()
             && auth.is_workspace_account() == self.expected_auth.is_workspace_account()
@@ -190,14 +201,17 @@ impl AuthProvider for AuthManagerAuthProvider {
 
     fn resolve_auth_headers(&self) -> AuthHeadersFuture<'_> {
         Box::pin(async move {
-            let auth = self
-                .auth_manager
-                .auth()
-                .await
-                .filter(|auth| self.is_expected_auth(auth))
-                .ok_or_else(|| {
-                    AuthError::Transient("managed authentication is unavailable".to_string())
-                })?;
+            // Command credentials were refreshed during request setup; an extra
+            // refresh here would make the outbound bearer differ from the catalog identity.
+            let auth = match self.header_resolution {
+                HeaderAuthResolution::CacheBound => self.current_auth(),
+                HeaderAuthResolution::RefreshAtSend => self
+                    .auth_manager
+                    .auth()
+                    .await
+                    .filter(|auth| self.is_expected_auth(auth)),
+            }
+            .ok_or_else(|| AuthError::Transient("managed authentication is unavailable".into()))?;
             Ok(auth_provider_from_auth(&auth).to_auth_headers())
         })
     }
@@ -283,7 +297,24 @@ pub(crate) async fn resolve_provider_auth_for_scope(
     if let Some(bearer_auth) = bearer_auth_for_provider(provider)? {
         return Ok(ResolvedProviderAuth::new(Arc::new(bearer_auth), None));
     }
-
+    // Command credentials are refreshed during request setup. Use the latest
+    // cached auth at send time without rotating it again.
+    if provider.auth.is_some()
+        && let (Some(manager), Some(auth)) = (auth_manager.as_ref(), auth)
+        && manager.has_external_auth()
+        && matches!(auth, CodexAuth::ApiKey(_))
+    {
+        return Ok(ResolvedProviderAuth::new(
+            Arc::new(AuthManagerAuthProvider {
+                auth_manager: Arc::clone(manager),
+                expected_auth: auth.clone(),
+                expected_binding: TransportAuthBinding::for_nonmanaged_auth(Some(auth)),
+                expected_credential_revision: None,
+                header_resolution: HeaderAuthResolution::CacheBound,
+            }),
+            Some(auth.clone()),
+        ));
+    }
     if let Some(CodexAuth::AgentIdentity(agent_identity_auth)) = auth {
         return Ok(ResolvedProviderAuth::for_agent_identity(
             agent_identity_auth.clone(),
@@ -405,6 +436,7 @@ pub fn auth_provider_from_auth_manager(
         expected_auth: expected_auth.clone(),
         expected_binding,
         expected_credential_revision,
+        header_resolution: HeaderAuthResolution::RefreshAtSend,
     })
 }
 
@@ -691,6 +723,51 @@ mod tests {
                 &HeaderValue::from_str(&format!("Bearer {TEST_CHATGPT_ID_TOKEN}"))
                     .expect("test token should be a valid header value")
             )
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_manager_auth_provider_refreshes_external_api_keys_at_send() {
+        struct RotatingApiKey(AtomicUsize);
+
+        impl codex_login::ExternalAuth for RotatingApiKey {
+            fn resolve(&self) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+                Box::pin(async move {
+                    let generation = self.0.fetch_add(1, Ordering::SeqCst);
+                    Ok(CodexAuth::from_api_key(&format!("token-{generation}")))
+                })
+            }
+
+            fn refresh(
+                &self,
+                _context: codex_login::ExternalAuthRefreshContext,
+            ) -> codex_login::ExternalAuthFuture<'_, CodexAuth> {
+                self.resolve()
+            }
+        }
+
+        let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("initial"));
+        auth_manager
+            .set_external_auth(Arc::new(RotatingApiKey(AtomicUsize::new(0))))
+            .await
+            .expect("external auth should install");
+        let initial = auth_manager
+            .auth_cached()
+            .expect("initial auth should be cached");
+        let provider = auth_provider_from_auth_manager(
+            Arc::clone(&auth_manager),
+            &initial,
+            TransportAuthBinding::for_nonmanaged_auth(Some(&initial)),
+            /*expected_credential_revision*/ None,
+        );
+
+        assert_eq!(
+            provider
+                .resolve_auth_headers()
+                .await
+                .unwrap()
+                .get(AUTHORIZATION),
+            Some(&HeaderValue::from_static("Bearer token-1"))
         );
     }
 

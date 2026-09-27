@@ -9516,7 +9516,7 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
     let rematerialized_old = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ None,
@@ -10096,7 +10096,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
     let initial_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
@@ -10107,7 +10107,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
     let unchanged_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
@@ -10132,7 +10132,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
     let refreshed_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
@@ -10151,7 +10151,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
     let stable_refreshed_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
@@ -10223,7 +10223,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
     let initial_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
@@ -10238,7 +10238,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
     let state_only_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
@@ -10254,7 +10254,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
     let replaced_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
@@ -10273,7 +10273,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
     let identical_clone_runtime = session
         .mcp_runtime_for_step(
             &turn_context,
-            &turn_context.environments,
+            &turn_context.initial_environments,
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup.clone()),
