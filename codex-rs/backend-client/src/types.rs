@@ -46,10 +46,23 @@ pub struct RateLimitsWithResetCredits {
     pub rate_limits: Vec<RateLimitSnapshot>,
     /// Backend decision for ordinary included usage; absence is not permission to recover.
     pub ordinary_usage_allowed: Option<bool>,
+    /// Complete, explicitly healthy usage evidence that may recover a stale quota block.
+    pub quota_recovery_allowed: bool,
     pub rate_limit_reset_credits: Option<RateLimitResetCreditsSummary>,
     pub account_id: Option<String>,
     pub user_id: Option<String>,
     pub rate_limit_upsell: Option<Value>,
+}
+
+impl RateLimitsWithResetCredits {
+    /// A response naming another workspace cannot authorize recovery of this account.
+    pub fn quota_recovery_allowed_for(&self, account_id: Option<&str>) -> bool {
+        self.quota_recovery_allowed
+            && self
+                .account_id
+                .as_deref()
+                .is_none_or(|reported| Some(reported) == account_id)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

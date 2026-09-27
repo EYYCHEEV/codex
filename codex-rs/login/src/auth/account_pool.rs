@@ -2,6 +2,10 @@ mod mutation;
 mod selection;
 mod types;
 
+#[cfg(test)]
+#[path = "account_pool/quota_recovery_tests.rs"]
+mod quota_recovery_tests;
+
 pub(super) use mutation::allocate_account_revision;
 pub(super) use mutation::credential_revision;
 pub(super) use mutation::migrate_document;

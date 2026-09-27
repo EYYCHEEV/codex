@@ -714,12 +714,13 @@ impl AppServerSession {
         self.default_model = Some(default_model.clone());
         self.available_models = available_models.clone();
         let managed_accounts = if should_list_managed_accounts(&account) {
+            // Resolve stale cooldowns before the first turn when no account can be selected.
             match self
                 .list_accounts(
                     /*thread_id*/ None,
                     Some(default_model.clone()),
                     /*refresh_tokens*/ false,
-                    /*refresh_usage*/ false,
+                    /*refresh_usage*/ account.account.is_none(),
                 )
                 .await
             {

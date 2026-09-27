@@ -22,6 +22,7 @@ use url::Url;
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct WorkspaceRoutingKey {
     auth_generation: u64,
+    managed_account: Option<(String, u64)>,
     chatgpt_account_id: String,
     effective_chatgpt_base_url: String,
     required_chatgpt_base_url: Option<String>,
@@ -104,10 +105,10 @@ pub(super) enum WorkspaceRoutingError {
 }
 
 impl WorkspaceRoutingResolver for AccountRequestProcessor {
-    fn resolve(
-        &self,
-        request: WorkspaceRoutingRequest,
-    ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceRouting>>> + Send + '_>> {
+    fn resolve<'a>(
+        &'a self,
+        request: WorkspaceRoutingRequest<'a>,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceRouting>>> + Send + 'a>> {
         Box::pin(async move {
             self.read_account(Some(&request))
                 .await
@@ -189,7 +190,7 @@ impl AccountRequestProcessor {
 
     pub(super) async fn read_account(
         &self,
-        request: Option<&WorkspaceRoutingRequest>,
+        request: Option<&WorkspaceRoutingRequest<'_>>,
     ) -> Result<AccountRead, AccountReadError> {
         let mut auth_changes = self.auth_manager.auth_change_state_receiver();
         let auth_state = *auth_changes.borrow_and_update();
@@ -222,7 +223,10 @@ impl AccountRequestProcessor {
                 }
                 Err(_) => return Err(WorkspaceRoutingError::RequirementsLoad.into()),
             };
-            let auth = self.auth_manager.auth_cached();
+            let managed_snapshot = request.and_then(|request| request.managed_snapshot);
+            let auth = managed_snapshot
+                .map(|snapshot| snapshot.auth.clone())
+                .or_else(|| self.auth_manager.auth_cached());
             let provider = create_model_provider(
                 config.model_provider.clone(),
                 Some(self.auth_manager.clone()),
@@ -250,8 +254,10 @@ impl AccountRequestProcessor {
                     .requirements_toml()
                     .chatgpt_base_url
                     .clone();
-                let key = WorkspaceRoutingKey {
+                let mut key = WorkspaceRoutingKey {
                     auth_generation: auth_state.generation,
+                    managed_account: managed_snapshot
+                        .map(|snapshot| (snapshot.identity_key.clone(), snapshot.account_revision)),
                     chatgpt_account_id: account_id.clone(),
                     effective_chatgpt_base_url: config.chatgpt_base_url.clone(),
                     required_chatgpt_base_url: required_chatgpt_base_url.clone(),
@@ -289,7 +295,12 @@ impl AccountRequestProcessor {
                 let routing = if let Some(cached) = cached {
                     cached
                 } else {
-                    let mut recovery = self.auth_manager.unauthorized_recovery();
+                    let mut recovery = match managed_snapshot {
+                        Some(snapshot) => self
+                            .auth_manager
+                            .unauthorized_recovery_for_snapshot(snapshot),
+                        None => self.auth_manager.unauthorized_recovery(),
+                    };
                     let mut discovery_auth = auth.clone();
                     let mut discovery_generation = auth_state.generation;
                     let response = loop {
@@ -311,10 +322,31 @@ impl AccountRequestProcessor {
                                         return Err(WorkspaceRoutingError::AccountChanged.into());
                                     }
                                     discovery_generation = refreshed.generation;
-                                    discovery_auth = self
-                                        .auth_manager
-                                        .auth_cached()
-                                        .ok_or(WorkspaceRoutingError::AccountChanged)?;
+                                    discovery_auth = match managed_snapshot {
+                                        Some(snapshot) => {
+                                            let current = self
+                                                .auth_manager
+                                                .managed_chatgpt_auth_snapshot_for_identity(
+                                                    &snapshot.identity_key,
+                                                )
+                                                .await
+                                                .map_err(|_| WorkspaceRoutingError::AccountChanged)?
+                                                .filter(|current| {
+                                                    current.transport.raw_account_id.as_deref()
+                                                        == Some(account_id.as_str())
+                                                })
+                                                .ok_or(WorkspaceRoutingError::AccountChanged)?;
+                                            key.managed_account = Some((
+                                                current.identity_key,
+                                                current.account_revision,
+                                            ));
+                                            current.auth
+                                        }
+                                        None => self
+                                            .auth_manager
+                                            .auth_cached()
+                                            .ok_or(WorkspaceRoutingError::AccountChanged)?,
+                                    };
                                     continue;
                                 }
                                 return Err(if unauthorized {

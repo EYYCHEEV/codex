@@ -2149,6 +2149,7 @@ dependencies = [
  "pretty_assertions",
  "rcgen",
  "rmcp",
+ "rustls",
  "serde",
  "serde_json",
  "serial_test",

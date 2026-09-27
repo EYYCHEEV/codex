@@ -35,10 +35,8 @@ use codex_app_server_client::InProcessClientStartArgs;
 use codex_app_server_client::RemoteAppServerClient;
 use codex_app_server_client::RemoteAppServerConnectArgs;
 pub use codex_app_server_client::RemoteAppServerEndpoint;
-use codex_app_server_protocol::Account as AppServerAccount;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ConfigWarningNotification;
-use codex_app_server_protocol::GetAccountResponse;
 use codex_app_server_protocol::Thread as AppServerThread;
 #[cfg(test)]
 use codex_app_server_protocol::ThreadListCwdFilter;
@@ -199,6 +197,8 @@ mod session_state;
 mod shortcut_help;
 mod skills_helpers;
 mod slash_command;
+mod startup_auth;
+use startup_auth::get_login_status;
 mod startup_draft;
 mod startup_error;
 mod startup_hooks_review;
@@ -2134,19 +2134,6 @@ fn determine_alt_screen_mode(
 pub enum LoginStatus {
     AuthMode(AuthMode),
     NotAuthenticated,
-}
-
-/// Reads the account once to determine login status and preserve the response for bootstrap.
-async fn get_login_status(
-    app_server: &mut AppServerSession,
-) -> color_eyre::Result<(LoginStatus, GetAccountResponse)> {
-    let account = app_server.read_account().await?;
-    let login_status = match &account.account {
-        Some(AppServerAccount::ApiKey {}) => LoginStatus::AuthMode(AuthMode::ApiKey),
-        Some(AppServerAccount::Chatgpt { .. }) => LoginStatus::AuthMode(AuthMode::Chatgpt),
-        Some(AppServerAccount::AmazonBedrock { .. }) | None => LoginStatus::NotAuthenticated,
-    };
-    Ok((login_status, account))
 }
 
 async fn load_config_or_exit(

@@ -173,11 +173,15 @@ async fn fetch_managed_login_status_account(
     .await
     {
         Ok(Ok(response)) => {
+            let recovery_allowed =
+                response.quota_recovery_allowed_for(snapshot.transport.raw_account_id.as_deref());
             let windows = rate_windows_from_backend(response.rate_limits);
             let rate = if windows.is_empty() {
                 ManagedChatgptRateObservation::Unavailable {
                     reason: "rate limit usage unavailable".to_string(),
                 }
+            } else if recovery_allowed {
+                ManagedChatgptRateObservation::AuthoritativeAvailable(windows)
             } else {
                 ManagedChatgptRateObservation::Available(windows)
             };

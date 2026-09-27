@@ -11,6 +11,7 @@ use std::sync::Weak;
 
 use crate::AuthManager;
 use crate::CodexAuth;
+use crate::ManagedChatgptAuthSnapshot;
 
 /// A successful discovery for one selected workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,7 +36,9 @@ impl std::fmt::Debug for WorkspaceRoutingSession {
 }
 
 /// The provider and bootstrap selected for one model session.
-pub struct WorkspaceRoutingRequest {
+pub struct WorkspaceRoutingRequest<'a> {
+    /// The model request's selected pool identity, not the default account projection.
+    pub managed_snapshot: Option<&'a ManagedChatgptAuthSnapshot>,
     pub provider_base_url: String,
     pub chatgpt_base_url: String,
     pub previously_routed: bool,
@@ -48,10 +51,10 @@ pub struct WorkspaceRoutingRequest {
 /// can be established; a cache miss is not evidence of an independent destination.
 /// Implementations must reject failed discovery and changes to the selected account.
 pub trait WorkspaceRoutingResolver: Send + Sync {
-    fn resolve(
-        &self,
-        request: WorkspaceRoutingRequest,
-    ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceRouting>>> + Send + '_>>;
+    fn resolve<'a>(
+        &'a self,
+        request: WorkspaceRoutingRequest<'a>,
+    ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceRouting>>> + Send + 'a>>;
 }
 
 impl AuthManager {
@@ -64,7 +67,7 @@ impl AuthManager {
     pub async fn workspace_routing(
         &self,
         auth: &CodexAuth,
-        request: WorkspaceRoutingRequest,
+        request: WorkspaceRoutingRequest<'_>,
     ) -> io::Result<Option<WorkspaceRouting>> {
         let Some(resolver) = self.workspace_routing_resolver.get() else {
             return Ok(None);

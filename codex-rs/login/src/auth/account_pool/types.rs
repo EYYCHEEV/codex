@@ -126,6 +126,9 @@ pub enum ManagedChatgptRateObservation {
     #[default]
     NotObserved,
     Available(Vec<ManagedChatgptRateWindowView>),
+    /// A successful full usage probe explicitly permits requests under every reported quota.
+    /// Partial response headers, cached percentages, and token-only observations lack this authority.
+    AuthoritativeAvailable(Vec<ManagedChatgptRateWindowView>),
     Unavailable {
         reason: String,
     },
