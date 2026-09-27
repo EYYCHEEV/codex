@@ -37,6 +37,9 @@ mod managed_refresh_acquisition_tests;
 #[path = "managed_removal_takeover_tests.rs"]
 mod managed_removal_takeover_tests;
 
+#[path = "managed_refresh_presentation_tests.rs"]
+mod managed_refresh_presentation_tests;
+
 const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
@@ -5125,7 +5128,8 @@ async fn bounded_refresh_timeout_revises_row_pool_and_watch() {
     assert_eq!(after.pool_revision, before.pool_revision + 2);
     assert!(matches!(
         &after.accounts[0].refresh_status,
-        ManagedChatgptRefreshStatus::TransientUnavailable { .. }
+        ManagedChatgptRefreshStatus::ReloginRequired { reason_code, .. }
+            if reason_code.as_deref() == Some("token_refresh_timeout")
     ));
     let stored = load_auth_dot_json(
         codex_home.path(),
@@ -5216,7 +5220,8 @@ async fn delayed_timeout_for_operation_a_cannot_relabel_cancellation_b() {
     assert_eq!(after.accounts[0].revision, before.accounts[0].revision);
     assert!(matches!(
         &after.accounts[0].refresh_status,
-        ManagedChatgptRefreshStatus::TransientUnavailable { .. }
+        ManagedChatgptRefreshStatus::ReloginRequired { reason_code, .. }
+            if reason_code.as_deref() == Some("token_refresh_cancelled")
     ));
     let stored = storage
         .load()

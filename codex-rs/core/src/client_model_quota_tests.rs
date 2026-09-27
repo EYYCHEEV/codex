@@ -18,6 +18,139 @@ async fn managed_named_model_quota_implicit_http_retry_preserves_exclusions() ->
     assert_named_model_quota_recovery(RetrySetup::Implicit).await
 }
 
+#[tokio::test]
+async fn consecutive_model_requests_keep_the_rotated_account_pinned() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(wiremock::matchers::header(
+            "chatgpt-account-id",
+            "account-a",
+        ))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 429)
+                .insert_header("x-codex-active-limit", "codex_bengalfox")
+                .insert_header("x-codex-bengalfox-limit-name", "modelX")
+                .insert_header("x-codex-bengalfox-primary-used-percent", "100")
+                .set_body_json(json!({
+                    "error": {
+                        "type": "usage_limit_reached",
+                        "plan_type": "pro",
+                        "resets_at": (Utc::now() + chrono::Duration::days(2)).timestamp()
+                    }
+                })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(wiremock::matchers::header(
+            "chatgpt-account-id",
+            "account-b",
+        ))
+        .respond_with(
+            ResponseTemplate::new(/*status*/ 200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!(
+                    "data: {}\n\ndata: {}\n\n",
+                    json!({"type": "response.created", "response": {"id": "model-x-complete"}}),
+                    json!({"type": "response.completed", "response": {"id": "model-x-complete"}}),
+                )),
+        )
+        .mount(&server)
+        .await;
+    let home = TempDir::new()?;
+    let (mut client, _manager) = two_account_model_client(&home, &server.uri()).await?;
+    // This fixed scope chooses A from the unrestricted two-account pool.
+    Arc::get_mut(&mut client.state).unwrap().thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000001")?;
+    let metadata = test_responses_metadata_for_client(
+        &client,
+        /*turn_id*/ None,
+        format!("{}:0", client.state.thread_id),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let mut model = test_model_info();
+    model.slug = "modelX".to_string();
+    let mut session = client.new_session();
+    for request_index in 0..2 {
+        session.begin_request();
+        let mut completed = None;
+        for attempt in 0..2 {
+            let setup = session
+                .current_client_setup(Some(&model.slug), Some(&metadata.session_id))
+                .await?;
+            if request_index == 0 && attempt == 0 {
+                assert_eq!(
+                    setup
+                        .effective_auth
+                        .as_ref()
+                        .and_then(CodexAuth::get_account_id),
+                    Some("account-a".to_string())
+                );
+            }
+            match session
+                .stream_attempt_with_setup(
+                    &Prompt::default(),
+                    &model,
+                    &test_session_telemetry(),
+                    /*effort*/ None,
+                    codex_protocol::config_types::ReasoningSummary::None,
+                    /*service_tier*/ None,
+                    &metadata,
+                    &InferenceTraceContext::disabled(),
+                    setup,
+                )
+                .await
+            {
+                Ok(mut stream) => {
+                    while let Some(event) = stream.next().await {
+                        if let ResponseEvent::Completed { response_id, .. } = event? {
+                            completed = Some(response_id);
+                        }
+                    }
+                    break;
+                }
+                Err(error) => {
+                    assert!(
+                        session
+                            .recover_last_managed_attempt(&error, /*committed*/ false)
+                            .await
+                    );
+                }
+            }
+        }
+        assert_eq!(completed.as_deref(), Some("model-x-complete"));
+    }
+    let requests = server.received_requests().await.expect("recorded requests");
+    let routes = requests
+        .iter()
+        .map(|request| {
+            (
+                request.headers["chatgpt-account-id"]
+                    .to_str()
+                    .unwrap()
+                    .to_string(),
+                request.body_json::<serde_json::Value>().unwrap()["model"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        routes,
+        vec![
+            ("account-a".to_string(), "modelX".to_string()),
+            ("account-b".to_string(), "modelX".to_string()),
+            ("account-b".to_string(), "modelX".to_string()),
+        ],
+        "only the first modelX request may probe the exhausted account"
+    );
+    Ok(())
+}
+
 async fn assert_named_model_quota_recovery(retry_setup: RetrySetup) -> anyhow::Result<()> {
     let server = MockServer::start().await;
     let attempts = Arc::new(AtomicUsize::new(/*v*/ 0));

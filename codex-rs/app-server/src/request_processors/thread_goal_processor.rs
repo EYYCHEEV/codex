@@ -154,7 +154,12 @@ impl ThreadGoalRequestProcessor {
             && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
         {
             self.config_manager
-                .check_thread_model_provider(thread.config().await.as_ref())
+                .check_thread_model_provider(
+                    thread.config().await.as_ref(),
+                    crate::config_manager::ProviderPolicyCheck::RequestScoped(
+                        &self.thread_manager.auth_manager(),
+                    ),
+                )
                 .await
                 .map_err(|error| config_load_error(&error))?;
         }

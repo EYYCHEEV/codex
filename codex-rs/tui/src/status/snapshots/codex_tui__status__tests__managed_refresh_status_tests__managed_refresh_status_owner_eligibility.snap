@@ -1,0 +1,35 @@
+---
+source: tui/src/status/managed_refresh_status_tests.rs
+expression: "rendered.join(\"\\n\")"
+---
+  eligible-cancelled@example.test · Plus
+    Credential: sign-in required (token_refresh_cancelled; observed 2024-01-02 03:04 UTC)
+    Eligibility: eligible (sign-in required for credential refresh)
+    Cooldown: none
+    Quota: unknown; no quota observation
+    Usage: unknown · summary not reported
+    Observed: unknown
+
+  eligible-commit-failed@example.test · Plus
+    Credential: sign-in required (token_refresh_commit_failed; observed 2024-01-02 03:04 UTC)
+    Eligibility: eligible (sign-in required for credential refresh)
+    Cooldown: none
+    Quota: unknown; no quota observation
+    Usage: unknown · summary not reported
+    Observed: unknown
+
+› eligible-timeout@example.test · Plus · selected
+    Credential: sign-in required (token_refresh_timeout; observed 2024-01-02 03:04 UTC)
+    Eligibility: eligible (sign-in required for credential refresh)
+    Cooldown: none
+    Quota: unknown; no quota observation
+    Usage: unknown · summary not reported
+    Observed: unknown
+
+  permanent-rejection@example.test · Plus
+    Credential: sign-in required (refresh_token_reused; observed 2024-01-02 03:04 UTC)
+    Eligibility: ineligible (sign-in required)
+    Cooldown: auth_invalid (no known reset time)
+    Quota: unknown; no quota observation
+    Usage: unknown · summary not reported
+    Observed: unknown

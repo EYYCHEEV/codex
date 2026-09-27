@@ -132,6 +132,52 @@ fn login_with_api_key_reads_stdin_and_writes_auth_json() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn login_status_reports_quota_block_reason_and_reset() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let server = MockServer::start().await;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        format!(
+            "cli_auth_credentials_store = \"file\"\nchatgpt_base_url = \"{}/backend-api\"\n",
+            server.uri()
+        ),
+    )?;
+    let manager = seed_managed_account(codex_home.path()).await?;
+    let scope = ManagedChatgptSelectionScope::default();
+    let snapshot = manager
+        .managed_chatgpt_auth_snapshot(&scope)
+        .await?
+        .context("seeded account is selectable")?;
+    manager
+        .recover_failed_attempt(
+            &snapshot,
+            codex_login::ManagedChatgptFailure::Quota {
+                reset_at: Some(chrono::Utc::now() + chrono::Duration::hours(2)),
+            },
+            /*committed*/ false,
+            &scope,
+        )
+        .await?;
+
+    let mut command = codex_command(codex_home.path())?;
+    command
+        .env_remove(OPENAI_API_KEY_ENV_VAR)
+        .env_remove(CODEX_ACCESS_TOKEN_ENV_VAR)
+        .env(
+            "CODEX_REFRESH_TOKEN_URL_OVERRIDE",
+            format!("{}/oauth/token", server.uri()),
+        )
+        .args(["login", "status"])
+        .timeout(Duration::from_secs(90))
+        .assert()
+        .success()
+        .stdout(predicates::str::is_match(
+            "warning: account blocked - quota - resets in [0-9]+h[0-9]+m",
+        )?);
+    Ok(())
+}
+
 #[tokio::test]
 async fn login_status_prefers_environment_api_key_over_managed_pool() -> Result<()> {
     let codex_home = TempDir::new()?;

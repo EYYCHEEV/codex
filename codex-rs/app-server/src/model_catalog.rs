@@ -36,7 +36,10 @@ impl ModelCatalog {
         // Check before consulting even a warm cache, just as turn admission checks
         // the retained session route before using it.
         self.config_manager
-            .check_thread_model_provider(&self.config)
+            .check_thread_model_provider(
+                &self.config,
+                crate::config_manager::ProviderPolicyCheck::Current,
+            )
             .await?;
         Ok(self
             .models_manager

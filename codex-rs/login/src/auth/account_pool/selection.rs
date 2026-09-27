@@ -95,7 +95,7 @@ pub(in crate::auth) fn views(
                         }
                     }),
                     refresh_status: match row.refresh_failure.as_ref() {
-                        Some(failure) if failure.permanent => {
+                        Some(failure) if failure.requires_relogin() => {
                             ManagedChatgptRefreshStatus::ReloginRequired {
                                 observed_at: failure.observed_at,
                                 reason_code: failure.reason_code.clone(),
@@ -242,14 +242,13 @@ pub(in crate::auth) fn select<'a>(
         .iter()
         .filter(|row| {
             eligibility(row, forced_workspace_ids, now) == ManagedChatgptEligibility::Eligible
-                && scope
-                    .excluded_identities
-                    .as_ref()
-                    .is_none_or(|excluded| !excluded.contains(&row.identity_key))
         })
         .collect();
     candidates.sort_by(|left, right| left.identity_key.cmp(&right.identity_key));
     let candidate_signature = candidate_signature(&candidates);
+    if let Some(excluded) = scope.excluded_identities.as_ref() {
+        candidates.retain(|row| !excluded.contains(&row.identity_key));
+    }
     let scoped = scope.thread_id.is_some() || scope.session_id.is_some() || scope.model.is_some();
     let pin_key = selection_key(scope);
     if scoped
@@ -476,11 +475,12 @@ pub(in crate::auth) fn apply_failure(
         if row.identity_key == identity
             || workspace_wide && row.chatgpt_account_id == raw_id && raw_id.is_some()
         {
+            row.credential_revision = credential_revision(row);
             row.block = Some(ManagedChatgptBlock {
                 kind,
                 blocked_at: now,
                 reset_at,
-                credential_revision: credential_revision(row),
+                credential_revision: row.credential_revision,
             });
             row.revision = row.revision.saturating_add(1);
         }

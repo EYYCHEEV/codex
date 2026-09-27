@@ -61,6 +61,9 @@ pub(super) fn managed_account_lines(
             } => "temporarily unavailable (credential refresh failed)".to_string(),
             codex_app_server_protocol::ManagedChatgptAccountRefreshStatus::ReloginRequired {
                 ..
+            } if account.eligible => "eligible (sign-in required for credential refresh)".to_string(),
+            codex_app_server_protocol::ManagedChatgptAccountRefreshStatus::ReloginRequired {
+                ..
             } => "ineligible (sign-in required)".to_string(),
         };
         lines.extend(wrap_managed_detail(

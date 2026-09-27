@@ -20,6 +20,8 @@ use codex_config::CloudConfigBundleLoadError;
 use codex_config::CloudConfigBundleLoadErrorCode;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::ManagedChatgptAuthSnapshot;
+use codex_login::ManagedChatgptEligibility;
 use codex_login::RefreshTokenError;
 use codex_login::UnauthorizedRecovery;
 use codex_protocol::account::PlanType;
@@ -77,6 +79,8 @@ enum UnauthorizedRecoveryAction {
 
 pub(crate) struct CloudConfigBundleService<C> {
     auth_manager: Arc<AuthManager>,
+    managed_snapshot: Option<ManagedChatgptAuthSnapshot>,
+    revalidate_immediately: bool,
     client: Arc<C>,
     cache: CloudConfigBundleCache,
     cache_enabled: bool,
@@ -98,6 +102,8 @@ where
         let codex_home = AbsolutePathBuf::resolve_path_against_base(codex_home, "/");
         Self {
             auth_manager,
+            managed_snapshot: None,
+            revalidate_immediately: false,
             client,
             cache: CloudConfigBundleCache::new(codex_home.clone()),
             cache_enabled: true,
@@ -110,6 +116,72 @@ where
     pub(crate) fn without_cache(mut self) -> Self {
         self.cache_enabled = false;
         self
+    }
+
+    pub(crate) fn for_snapshot(mut self, snapshot: ManagedChatgptAuthSnapshot) -> Self {
+        self.managed_snapshot = Some(snapshot);
+        self.without_cache()
+    }
+
+    pub(crate) async fn latest_success(&self) -> Option<Option<CloudConfigBundle>> {
+        self.latest_bundle
+            .get()?
+            .lock()
+            .await
+            .as_ref()
+            .ok()
+            .cloned()
+    }
+
+    pub(crate) fn with_latest_success(mut self, bundle: Option<CloudConfigBundle>) -> Self {
+        if self
+            .managed_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !cloud_config_eligible_auth(&snapshot.auth))
+        {
+            return self;
+        }
+        self.latest_bundle = OnceCell::new_with(Some(Mutex::new(Ok(bundle))));
+        self.revalidate_immediately = true;
+        self
+    }
+
+    async fn auth(&self) -> Option<CodexAuth> {
+        match &self.managed_snapshot {
+            Some(snapshot) => Some(snapshot.auth.clone()),
+            None => self.auth_manager.auth().await,
+        }
+    }
+
+    fn selected_identity_is_retained(&self) -> std::io::Result<bool> {
+        let Some(snapshot) = &self.managed_snapshot else {
+            return Ok(true);
+        };
+        Ok(self
+            .auth_manager
+            .stored_managed_chatgpt_accounts()?
+            .iter()
+            .any(|account| {
+                account.identity_key == snapshot.identity_key
+                    && account.eligibility != ManagedChatgptEligibility::PendingRemoval
+            }))
+    }
+
+    async fn recovered_auth(&self) -> Option<CodexAuth> {
+        match &self.managed_snapshot {
+            Some(snapshot) => self
+                .auth_manager
+                .managed_chatgpt_auth_snapshot_for_identity(&snapshot.identity_key)
+                .await
+                .ok()
+                .flatten()
+                .filter(|current| {
+                    current.identity_key == snapshot.identity_key
+                        && auth_identity(&current.auth) == auth_identity(&snapshot.auth)
+                })
+                .map(|current| current.auth),
+            None => self.auth_manager.auth().await,
+        }
     }
 
     pub(crate) async fn get_latest(
@@ -183,7 +255,7 @@ where
     async fn load_startup_bundle(
         &self,
     ) -> Result<Option<CloudConfigBundle>, CloudConfigBundleLoadError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        let Some(auth) = self.auth().await else {
             return Ok(None);
         };
         if !cloud_config_eligible_auth(&auth) {
@@ -245,9 +317,29 @@ where
     ) -> Result<Option<CloudConfigBundle>, CloudConfigBundleLoadError> {
         let mut attempt = 1;
         let mut last_status_code: Option<u16> = None;
-        let mut auth_recovery = self.auth_manager.unauthorized_recovery();
+        let mut auth_recovery = match &self.managed_snapshot {
+            Some(snapshot) => self
+                .auth_manager
+                .unauthorized_recovery_for_snapshot(snapshot),
+            None => self.auth_manager.unauthorized_recovery(),
+        };
 
         while attempt <= CLOUD_CONFIG_BUNDLE_MAX_ATTEMPTS {
+            // Captured credentials do not outlive their stored account owner.
+            // Check each attempt as removal can occur during retry backoff.
+            if !self.selected_identity_is_retained().map_err(|_| {
+                CloudConfigBundleLoadError::new(
+                    CloudConfigBundleLoadErrorCode::Internal,
+                    /*status_code*/ None,
+                    "Could not verify the selected policy account's stored ownership.",
+                )
+            })? {
+                return Err(CloudConfigBundleLoadError::new(
+                    CloudConfigBundleLoadErrorCode::Auth,
+                    /*status_code*/ None,
+                    "The selected policy account has been removed.",
+                ));
+            }
             match self.client.get_bundle(&auth).await {
                 Ok(bundle) => {
                     return self
@@ -402,7 +494,7 @@ where
             );
             match auth_recovery.next().await {
                 Ok(_) => {
-                    let Some(refreshed_auth) = self.auth_manager.auth().await else {
+                    let Some(refreshed_auth) = self.recovered_auth().await else {
                         tracing::error!(
                             "Auth recovery succeeded but no auth is available for cloud config bundle"
                         );
@@ -484,6 +576,7 @@ where
     }
 
     pub(crate) async fn refresh_cache_in_background(&self) {
+        let mut revalidate_immediately = self.revalidate_immediately;
         loop {
             let mut refresh_interval = CLOUD_CONFIG_BUNDLE_CACHE_REFRESH_INTERVAL;
             if let Some(latest_bundle) = self.latest_bundle.get()
@@ -496,7 +589,9 @@ where
                 // readers fetch concurrently or extending the startup deadline.
                 refresh_interval = CLOUD_CONFIG_BUNDLE_TIMEOUT_RETRY_INTERVAL;
             }
-            sleep(refresh_interval).await;
+            if !std::mem::take(&mut revalidate_immediately) {
+                sleep(refresh_interval).await;
+            }
             match timeout(self.timeout, self.refresh_cache_once()).await {
                 Ok(true) => {}
                 Ok(false) => break,
@@ -517,7 +612,7 @@ where
     }
 
     async fn refresh_cache_once(&self) -> bool {
-        let Some(auth) = self.auth_manager.auth().await else {
+        let Some(auth) = self.auth().await else {
             return false;
         };
         if !cloud_config_eligible_auth(&auth) {
@@ -533,6 +628,9 @@ where
                 self.publish_refresh_result(Ok(bundle)).await;
             }
             Err(err) => {
+                if matches!(self.selected_identity_is_retained(), Ok(false)) {
+                    return false;
+                }
                 tracing::error!(
                     path = %self.cache.path().display(),
                     error = %err,

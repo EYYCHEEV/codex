@@ -3,15 +3,18 @@
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::ChatGptIdTokenClaims;
+use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::encode_id_token;
 use app_test_support::write_chatgpt_auth;
+use app_test_support::write_models_cache;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::GetAccountParams;
 use codex_app_server_protocol::LoginAccountResponse;
 use codex_app_server_protocol::LogoutAccountResponse;
 use codex_app_server_protocol::RequestId;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -108,6 +111,27 @@ async fn saved_workspace_is_discovered_once_and_not_the_default_account(
         .mount(&backend).await;
     let home = TempDir::new()?;
     config(&home, &backend).await?;
+    MockResponsesConfig::new(&backend.uri())
+        .with_root_config(&std::fs::read_to_string(home.path().join("config.toml"))?)
+        .with_provider_config("requires_openai_auth = true")
+        .write(home.path())?;
+    write_models_cache(home.path()).await?;
+    let refresh_url = format!("{}/oauth/refresh", backend.uri());
+    let id_token = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("user@example.com")
+            .plan_type(plan_type)
+            .chatgpt_account_id("selected"),
+    )?;
+    Mock::given(method("POST"))
+        .and(path("/oauth/refresh"))
+        .respond_with(ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+            "id_token": id_token,
+            "access_token": "token",
+            "refresh_token": "refresh-token",
+        })))
+        .mount(&backend)
+        .await;
     if bundle_delay_secs > 0 {
         Mock::given(method("GET"))
             .and(path("/backend-api/wham/config/bundle"))
@@ -130,7 +154,15 @@ async fn saved_workspace_is_discovered_once_and_not_the_default_account(
             .plan_type(plan_type),
         AuthCredentialsStoreMode::File,
     )?;
-    let mut env_overrides = vec![("OPENAI_API_KEY", None), ("CODEX_API_KEY", None)];
+    let mut env_overrides = vec![
+        ("OPENAI_API_KEY", None),
+        ("CODEX_API_KEY", None),
+        ("CODEX_ACCESS_TOKEN", None),
+        (
+            REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+            Some(refresh_url.as_str()),
+        ),
+    ];
     env_overrides.extend(
         codex_network_proxy::PROXY_ENV_KEYS
             .iter()
@@ -482,6 +514,7 @@ async fn backend_config_changed_during_discovery_is_retried_with_fresh_config() 
             "loginId": null, "success": false,
             "error": "configuration changed during workspace routing discovery; retry account/read",
             "onboardingEntrypoint": null,
+            "managedAccountId": null,
         }))
     );
     assert_eq!(

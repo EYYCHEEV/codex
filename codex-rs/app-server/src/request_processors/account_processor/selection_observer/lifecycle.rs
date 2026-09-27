@@ -19,6 +19,7 @@ impl Drop for PoolUpdateWatcherShutdown {
 pub(in crate::request_processors::account_processor) fn start_pool_update_watcher(
     auth_manager: &Arc<AuthManager>,
     outgoing: &Arc<OutgoingMessageSender>,
+    selected_cloud_config: &Arc<codex_cloud_config::SelectedCloudConfigBundles>,
 ) -> (
     Arc<Mutex<AccountSelectionObserverState>>,
     Arc<PoolUpdateWatcherShutdown>,
@@ -28,6 +29,7 @@ pub(in crate::request_processors::account_processor) fn start_pool_update_watche
     let mut revisions = auth_manager.auth_change_receiver();
     let subscriber_auth_manager = Arc::clone(auth_manager);
     let subscriber_outgoing = Arc::clone(outgoing);
+    let selected_cloud_config = Arc::clone(selected_cloud_config);
     let subscriber_shutdown = pool_update_shutdown.clone();
     let subscriber_selection_observer = AccountSelectionObserver {
         state: Arc::clone(&selection_observer_state),
@@ -41,6 +43,9 @@ pub(in crate::request_processors::account_processor) fn start_pool_update_watche
                 changed = revisions.changed() => {
                     if changed.is_err() {
                         break;
+                    }
+                    if let Err(err) = selected_cloud_config.prune_removed_accounts().await {
+                        warn!("failed to prune removed account policies: {err}");
                     }
                     if subscriber_auth_manager.is_external_chatgpt_auth_active() {
                         continue;

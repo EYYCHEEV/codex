@@ -32,6 +32,7 @@ use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use test_case::test_case;
@@ -47,17 +48,26 @@ use wiremock::matchers::path;
 const WAIT: Duration = Duration::from_secs(/*secs*/ 30);
 const THREAD_ID: &str = "00000000-0000-4000-8000-000000000002";
 
+#[path = "workspace_routing_selected_policy_tests.rs"]
+mod selected_policy;
+
 // Routing requires HTTPS. Keep real certificate verification and trust this fixture
 // only in the child app-server; plaintext model mocks would bypass the route guard.
 struct TlsResponse {
     origin: String,
     certificate: String,
     stop: Arc<AtomicBool>,
+    requests: Arc<AtomicUsize>,
+    request_headers: Arc<std::sync::Mutex<Vec<String>>>,
     worker: Option<std::thread::JoinHandle<Result<String>>>,
 }
 
 impl TlsResponse {
     fn start(body: String) -> Result<Self> {
+        Self::start_with_request_limit(body, /*request_limit*/ 1)
+    }
+
+    fn start_with_request_limit(body: String, request_limit: usize) -> Result<Self> {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let rcgen::CertifiedKey { cert, signing_key } =
             rcgen::generate_simple_self_signed(vec!["127.0.0.1".into()])?;
@@ -72,57 +82,73 @@ impl TlsResponse {
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(/*v*/ false));
         let shutdown = Arc::clone(&stop);
+        let requests = Arc::new(AtomicUsize::new(/*v*/ 0));
+        let received = Arc::clone(&requests);
+        let request_headers = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded_headers = Arc::clone(&request_headers);
         let worker = std::thread::spawn(move || -> Result<String> {
-            let socket = loop {
-                anyhow::ensure!(!shutdown.load(Ordering::Relaxed), "TLS fixture stopped");
-                match listener.accept() {
-                    Ok((socket, _)) => break socket,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(/*millis*/ 10));
-                    }
-                    Err(error) => return Err(error.into()),
-                }
-            };
-            socket.set_nonblocking(false)?;
-            socket.set_read_timeout(Some(WAIT))?;
-            socket.set_write_timeout(Some(WAIT))?;
-            let connection = rustls::ServerConnection::new(config)?;
-            let mut stream = std::io::BufReader::new(rustls::StreamOwned::new(connection, socket));
-            let mut headers = String::new();
             loop {
-                let start = headers.len();
-                anyhow::ensure!(
-                    stream.read_line(&mut headers)? > 0,
-                    "incomplete HTTP headers"
-                );
-                anyhow::ensure!(headers.len() < 65_536, "oversized HTTP headers");
-                if &headers[start..] == "\r\n" {
-                    break;
+                let socket = loop {
+                    anyhow::ensure!(!shutdown.load(Ordering::Relaxed), "TLS fixture stopped");
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(/*millis*/ 10));
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                };
+                socket.set_nonblocking(false)?;
+                socket.set_read_timeout(Some(WAIT))?;
+                socket.set_write_timeout(Some(WAIT))?;
+                let connection = rustls::ServerConnection::new(Arc::clone(&config))?;
+                let mut stream =
+                    std::io::BufReader::new(rustls::StreamOwned::new(connection, socket));
+                let mut headers = String::new();
+                loop {
+                    let start = headers.len();
+                    anyhow::ensure!(
+                        stream.read_line(&mut headers)? > 0,
+                        "incomplete HTTP headers"
+                    );
+                    anyhow::ensure!(headers.len() < 65_536, "oversized HTTP headers");
+                    if &headers[start..] == "\r\n" {
+                        break;
+                    }
+                }
+                let request_count = received.fetch_add(1, Ordering::Relaxed) + 1;
+                let length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then_some(value.trim())
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("missing model request length"))?
+                    .parse::<usize>()?;
+                anyhow::ensure!(length < 2_000_000, "oversized model request");
+                stream.read_exact(&mut vec![0; length])?;
+                recorded_headers
+                    .lock()
+                    .expect("TLS request headers")
+                    .push(headers.clone());
+                write!(
+                    stream.get_mut(),
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )?;
+                stream.get_mut().flush()?;
+                if request_count >= request_limit {
+                    return Ok(headers);
                 }
             }
-            let length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then_some(value.trim())
-                })
-                .ok_or_else(|| anyhow::anyhow!("missing model request length"))?
-                .parse::<usize>()?;
-            anyhow::ensure!(length < 2_000_000, "oversized model request");
-            stream.read_exact(&mut vec![0; length])?;
-            write!(
-                stream.get_mut(),
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )?;
-            stream.get_mut().flush()?;
-            Ok(headers)
         });
         Ok(Self {
             origin,
             certificate,
             stop,
+            requests,
+            request_headers,
             worker: Some(worker),
         })
     }
@@ -216,6 +242,7 @@ async fn resumed_turn_preserves_managed_routing_identity(discovery: Discovery) -
             thread_id: Some(THREAD_ID.into()),
             session_id: Some(THREAD_ID.into()),
             model: Some("gpt-5.1".into()),
+            ..Default::default()
         })
         .await?
         .expect("scoped managed auth");

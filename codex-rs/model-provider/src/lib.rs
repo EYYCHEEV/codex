@@ -38,6 +38,7 @@ pub use provider::ProviderUnauthorizedRecovery;
 pub use provider::RemoteCompactionSupport;
 pub use provider::SharedModelProvider;
 pub use provider::create_model_provider;
+pub use provider::provider_uses_managed_chatgpt_auth;
 
 #[cfg(test)]
 #[path = "workspace_routing_tests.rs"]

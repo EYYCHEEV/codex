@@ -271,6 +271,59 @@ fn managed_status_renders_compact_usage_without_internal_identifiers() {
 }
 
 #[test]
+fn managed_status_explains_block_reason_and_relative_reset() {
+    use codex_login::ManagedChatgptBlockKindView;
+
+    let now = chrono::DateTime::parse_from_rfc3339("2026-07-21T12:00:00Z")
+        .expect("valid timestamp")
+        .with_timezone(&Utc);
+    let cases = [
+        (
+            Some(ManagedChatgptBlockKindView::Quota),
+            Some(now + chrono::Duration::minutes(95)),
+            "  warning: account blocked - quota - resets in 1h35m",
+        ),
+        (
+            Some(ManagedChatgptBlockKindView::Workspace),
+            Some(now + chrono::Duration::hours(26)),
+            "  warning: account blocked - workspace quota - resets in 1d2h",
+        ),
+        (
+            Some(ManagedChatgptBlockKindView::AuthInvalid),
+            None,
+            "  warning: account blocked - invalid credentials",
+        ),
+        (None, None, "  warning: account blocked - unknown reason"),
+    ];
+    let mut rendered = Vec::new();
+    let mut warnings = Vec::new();
+    let mut expected = Vec::new();
+    for (kind, reset_at, warning) in cases {
+        let mut account = account("internal-identity", "account@example.test");
+        account.eligibility = ManagedChatgptEligibility::Blocked;
+        account.block_kind = kind;
+        account.block_reset_at = reset_at;
+        let output = format_managed_login_status_at(
+            &[account],
+            /*selected_account_id*/ None,
+            &Default::default(),
+            now,
+        );
+        warnings.push(
+            output
+                .lines()
+                .find(|line| line.starts_with("  warning: account blocked"))
+                .expect("blocked warning")
+                .to_string(),
+        );
+        expected.push(warning.to_string());
+        rendered.push(output);
+    }
+    assert_eq!(warnings, expected);
+    insta::assert_snapshot!("managed_blocked_account_status", rendered.join("\n"));
+}
+
+#[test]
 fn managed_status_capacity_uses_only_clamped_reporting_account_maxima() {
     let now = chrono::DateTime::parse_from_rfc3339("2026-07-21T12:00:00Z")
         .expect("valid timestamp")

@@ -1,11 +1,18 @@
 use super::*;
+use crate::auth::storage::REFRESH_FAILURE_CANCELLED_REASON;
+use crate::auth::storage::REFRESH_FAILURE_COMMIT_REASON;
+use crate::auth::storage::REFRESH_FAILURE_TIMEOUT_REASON;
 
-const REFRESH_FAILURE_CANCELLED_REASON: &str = "token_refresh_cancelled";
-const REFRESH_FAILURE_TIMEOUT_REASON: &str = "token_refresh_timeout";
 const REFRESH_FAILURE_TRANSIENT_REASON: &str = "token_refresh_unavailable";
-const REFRESH_FAILURE_COMMIT_REASON: &str = "token_refresh_commit_failed";
 const MANAGED_REFRESH_LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 const MANAGED_REFRESH_TIMEOUT_MESSAGE: &str = "managed ChatGPT token refresh timed out";
+
+#[derive(Clone, Copy)]
+enum ManagedRemovalMode {
+    Explicit,
+    ResumeAvailable,
+    ResumeWaiting,
+}
 
 fn refresh_failure_reason_code(error: &RefreshTokenError) -> Option<&'static str> {
     Some(match error {
@@ -18,18 +25,6 @@ fn refresh_failure_reason_code(error: &RefreshTokenError) -> Option<&'static str
         RefreshTokenError::Transient(_) => REFRESH_FAILURE_TRANSIENT_REASON,
         RefreshTokenError::Policy(_) => return None,
     })
-}
-
-fn refresh_failure_prevents_retry(failure: &ManagedChatgptRefreshFailure) -> bool {
-    failure.permanent
-        || matches!(
-            failure.reason_code.as_deref(),
-            Some(
-                REFRESH_FAILURE_CANCELLED_REASON
-                    | REFRESH_FAILURE_TIMEOUT_REASON
-                    | REFRESH_FAILURE_COMMIT_REASON
-            )
-        )
 }
 
 fn persisted_refresh_failure_result(failure: &ManagedChatgptRefreshFailure) -> RefreshTokenError {
@@ -274,7 +269,7 @@ impl AuthManager {
         if let Some(failure) = initial_row
             .refresh_failure
             .as_ref()
-            .filter(|failure| refresh_failure_prevents_retry(failure))
+            .filter(|failure| failure.requires_relogin())
         {
             return Err(persisted_refresh_failure_result(failure));
         }
@@ -325,10 +320,12 @@ impl AuthManager {
                         return Ok(AuthStorageMutation::Keep(Some(auth)));
                     }
                     if let Some(failure) = account.refresh_failure.as_ref().filter(|failure| {
-                        refresh_failure_prevents_retry(failure)
-                            || waiting_for_operation_id.as_deref().is_some_and(|waited_for| {
-                                failure.operation_id.as_deref() == Some(waited_for)
-                            })
+                        failure.requires_relogin()
+                            || waiting_for_operation_id
+                                .as_deref()
+                                .is_some_and(|waited_for| {
+                                    failure.operation_id.as_deref() == Some(waited_for)
+                                })
                     }) {
                         owner_failure = Some(failure.clone());
                         return Ok(AuthStorageMutation::Keep(Some(auth)));
@@ -604,15 +601,33 @@ impl AuthManager {
     pub(in crate::auth::manager) async fn resume_managed_chatgpt_tombstones(
         &self,
     ) -> std::io::Result<()> {
+        let _permit = match self.managed_lifecycle_lock.try_acquire() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => return Ok(()),
+            Err(err @ tokio::sync::TryAcquireError::Closed) => {
+                return Err(std::io::Error::other(err));
+            }
+        };
+        self.resume_managed_chatgpt_tombstones_impl(ManagedRemovalMode::ResumeAvailable)
+            .await
+    }
+
+    pub(in crate::auth::manager) async fn wait_for_managed_chatgpt_tombstones(
+        &self,
+    ) -> std::io::Result<()> {
         let _permit = self
             .managed_lifecycle_lock
             .acquire()
             .await
             .map_err(std::io::Error::other)?;
-        self.resume_managed_chatgpt_tombstones_impl().await
+        self.resume_managed_chatgpt_tombstones_impl(ManagedRemovalMode::ResumeWaiting)
+            .await
     }
 
-    async fn resume_managed_chatgpt_tombstones_impl(&self) -> std::io::Result<()> {
+    async fn resume_managed_chatgpt_tombstones_impl(
+        &self,
+        mode: ManagedRemovalMode,
+    ) -> std::io::Result<()> {
         let identities = self
             .load_managed_chatgpt_document()?
             .and_then(|auth| auth.managed_chatgpt)
@@ -625,7 +640,8 @@ impl AuthManager {
             })
             .unwrap_or_default();
         for identity in identities {
-            self.remove_managed_chatgpt_account_impl(&identity).await?;
+            self.remove_managed_chatgpt_account_impl(&identity, mode)
+                .await?;
         }
         Ok(())
     }
@@ -637,12 +653,19 @@ impl AuthManager {
             .acquire()
             .await
             .map_err(std::io::Error::other)?;
-        let removed = self.remove_managed_chatgpt_account_impl(selector).await?;
-        self.resume_managed_chatgpt_tombstones_impl().await?;
+        let removed = self
+            .remove_managed_chatgpt_account_impl(selector, ManagedRemovalMode::Explicit)
+            .await?;
+        self.resume_managed_chatgpt_tombstones_impl(ManagedRemovalMode::ResumeWaiting)
+            .await?;
         Ok(removed)
     }
 
-    async fn remove_managed_chatgpt_account_impl(&self, selector: &str) -> std::io::Result<bool> {
+    async fn remove_managed_chatgpt_account_impl(
+        &self,
+        selector: &str,
+        mode: ManagedRemovalMode,
+    ) -> std::io::Result<bool> {
         let storage = self.managed_chatgpt_storage();
         let Some(initial) = self.load_managed_chatgpt_document()? else {
             return Ok(false);
@@ -663,9 +686,16 @@ impl AuthManager {
                 let Some(account) = row_mut(&mut auth, &identity) else {
                     return Ok(AuthStorageMutation::Keep(Some(auth)));
                 };
+                // A sweep must not remove a replacement login after its tombstone vanished.
+                if !matches!(mode, ManagedRemovalMode::Explicit) && account.tombstone.is_none() {
+                    return Ok(AuthStorageMutation::Keep(Some(auth)));
+                }
                 if account.mutation_lease.as_ref().is_some_and(|lease| {
                     lease.expires_at > Utc::now() && lease.operation_id != operation_id
                 }) {
+                    if matches!(mode, ManagedRemovalMode::ResumeAvailable) {
+                        return Ok(AuthStorageMutation::Keep(Some(auth)));
+                    }
                     return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
                 }
                 if let Some(existing) = account.tombstone.as_ref() {

@@ -1904,6 +1904,8 @@ impl Config {
             .with_session(codex_login::WorkspaceRoutingSession {
                 cwd: self.cwd.to_path_buf(),
                 config_layer_stack: self.config_layer_stack.clone(),
+                model_provider_id: self.model_provider_id.clone(),
+                model_provider: self.model_provider.clone(),
             })
     }
 

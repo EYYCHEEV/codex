@@ -122,6 +122,7 @@ pub(crate) struct AccountRequestProcessor {
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
     workspace_routing: Arc<Mutex<Option<workspace_routing::CachedWorkspaceRouting>>>,
     workspace_routing_fetches: Arc<Mutex<workspace_routing::WorkspaceRoutingFetches>>,
+    selected_cloud_config: Arc<codex_cloud_config::SelectedCloudConfigBundles>,
     workspace_routing_shutdown: CancellationToken,
     gateway_login: Arc<std::sync::Mutex<Option<gateway_oauth::ActiveGatewayLogin>>>,
     gateway_client: Arc<std::sync::Mutex<Option<Arc<codex_login::GatewayAuthManager>>>>,
@@ -144,10 +145,15 @@ impl AccountRequestProcessor {
             config_manager.clone(),
             Arc::clone(&outgoing),
         );
+        let selected_cloud_config = Arc::new(codex_cloud_config::SelectedCloudConfigBundles::new(
+            auth_manager.clone(),
+            config_manager.codex_home().to_path_buf(),
+        ));
         let (selection_observer_state, pool_update_shutdown) =
-            start_pool_update_watcher(&auth_manager, &outgoing);
+            start_pool_update_watcher(&auth_manager, &outgoing, &selected_cloud_config);
         let processor = Arc::new(Self {
             _gateway_notifications: Arc::new(gateway_notifications),
+            selected_cloud_config,
             auth_manager,
             thread_manager,
             thread_state_manager,
@@ -1010,12 +1016,56 @@ impl AccountRequestProcessor {
         mut payload: AccountLoginCompletedNotification,
     ) {
         let auth_changes = self.auth_manager.auth_change_state_receiver();
-        let owner_generation = auth_changes.borrow().owner_generation;
+        let managed_login_id = payload
+            .managed_account_id
+            .as_ref()
+            .and(payload.login_id.as_deref())
+            .and_then(|id| Uuid::parse_str(id).ok());
+        let owner_generation = if payload.success
+            && let Some(login_id) = managed_login_id
+        {
+            // OAuth persistence uses a separate AuthManager. Adopt its commit
+            // only while this attempt still owns the login slot; replacing or
+            // cancelling it must not displace a newer external-auth owner.
+            let active_login = self.active_login.lock().await;
+            if active_login.as_ref().map(ActiveLogin::login_id) != Some(login_id)
+                || self.auth_manager.is_external_chatgpt_auth_active()
+            {
+                return;
+            }
+            self.auth_manager.adopt_managed_chatgpt_login().await;
+            self.config_manager.replace_cloud_config_bundle_loader(
+                self.auth_manager.clone(),
+                self.config.chatgpt_base_url.clone(),
+                self.config.http_client_factory(),
+            );
+            // The adopted login may change owners. Fence bootstrap and delivery
+            // against that new owner, not the pre-login signed-out generation.
+            auth_changes.borrow().owner_generation
+        } else {
+            auth_changes.borrow().owner_generation
+        };
+        if payload.success && managed_login_id.is_some() {
+            self.config_manager
+                .sync_default_client_residency_requirement()
+                .await;
+        }
         if payload.success
             && let Err(error) = self.read_account(/*request*/ None).await
         {
             payload.success = false;
             payload.error = Some(error.to_string());
+        }
+        if let Some(login_id) = managed_login_id
+            && self
+                .active_login
+                .lock()
+                .await
+                .as_ref()
+                .map(ActiveLogin::login_id)
+                != Some(login_id)
+        {
+            return;
         }
         if payload.success && auth_changes.borrow().owner_generation == owner_generation {
             Self::maybe_refresh_plugin_caches_for_current_config(
@@ -1047,30 +1097,6 @@ impl AccountRequestProcessor {
                 )
                 .await;
         }
-    }
-
-    async fn send_chatgpt_login_completion_notifications(
-        &self,
-        mut payload_v2: AccountLoginCompletedNotification,
-    ) {
-        if payload_v2.success {
-            self.auth_manager.reload().await;
-            let auth_changes = self.auth_manager.auth_change_state_receiver();
-            let owner_generation = auth_changes.borrow().owner_generation;
-            self.config_manager.replace_cloud_config_bundle_loader(
-                self.auth_manager.clone(),
-                self.config.chatgpt_base_url.clone(),
-                self.config.http_client_factory(),
-            );
-            self.config_manager
-                .sync_default_client_residency_requirement()
-                .await;
-            if auth_changes.borrow().owner_generation != owner_generation {
-                payload_v2.success = false;
-                payload_v2.error = Some("account changed before sign-in completed".into());
-            }
-        }
-        self.send_account_login_notifications(payload_v2).await;
     }
 
     async fn refresh_token_if_requested(&self, do_refresh: bool) {
@@ -1179,9 +1205,7 @@ impl AccountRequestProcessor {
         let Some((auth, http_client_factory)) =
             self.auth_manager.auth_with_http_client_factory().await
         else {
-            return Err(invalid_request(
-                "codex account authentication required to read rate limits",
-            ));
+            return Err(self.unavailable_usage_auth_error("rate limits"));
         };
 
         if !auth.uses_codex_backend() {
@@ -1296,9 +1320,7 @@ impl AccountRequestProcessor {
         let Some((auth, http_client_factory)) =
             self.auth_manager.auth_with_http_client_factory().await
         else {
-            return Err(invalid_request(
-                "codex account authentication required to read token usage",
-            ));
+            return Err(self.unavailable_usage_auth_error("token usage"));
         };
 
         if !auth.uses_codex_backend() {
@@ -1807,6 +1829,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: Some("root-session-1".to_string()),
             model: Some("turn-model".to_string()),
+            ..Default::default()
         };
         let observed = ObservedSelection {
             scope: core_scope.clone(),
@@ -1828,6 +1851,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: Some("root-session-1".to_string()),
             model: Some("configured-model".to_string()),
+            ..Default::default()
         };
         let without_model_override = ListAccountsParams {
             model: None,
@@ -1859,6 +1883,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: Some("root-session-1".to_string()),
             model: Some("configured-model".to_string()),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -1927,6 +1952,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: None,
             model: None,
+            ..Default::default()
         };
 
         observer.activate_thread("thread-1").await;
@@ -2019,6 +2045,7 @@ mod tests {
                     thread_id: Some(thread_id.to_string()),
                     session_id: None,
                     model: None,
+                    ..Default::default()
                 },
                 "managed-a".to_string(),
                 8,
@@ -2084,6 +2111,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: Some("session-1".to_string()),
             model: Some("gpt-5".to_string()),
+            ..Default::default()
         };
 
         let removed_listener = observer.activate_thread("thread-1").await;
@@ -2135,6 +2163,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: None,
             model: None,
+            ..Default::default()
         };
         let listener = observer.activate_thread("thread-1").await;
         let queued_event = listener
@@ -2187,6 +2216,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: None,
             model: None,
+            ..Default::default()
         };
         let listener = observer.activate_thread("thread-1").await;
         let event_route = listener
@@ -2273,6 +2303,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: None,
             model: None,
+            ..Default::default()
         };
         let listener = observer.activate_thread("thread-1").await;
         listener
@@ -2360,6 +2391,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: None,
             model: None,
+            ..Default::default()
         };
         let event_observer = observer.activate_thread("thread-1").await;
         let registration = observer
@@ -2441,6 +2473,7 @@ mod tests {
             thread_id: Some("thread-0".to_string()),
             session_id: None,
             model: None,
+            ..Default::default()
         };
         observer.activate_thread("thread-0").await;
         let stale_registration = observer

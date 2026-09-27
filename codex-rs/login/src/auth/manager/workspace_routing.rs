@@ -26,6 +26,8 @@ pub struct WorkspaceRouting {
 pub struct WorkspaceRoutingSession {
     pub cwd: PathBuf,
     pub config_layer_stack: ConfigLayerStack,
+    pub model_provider_id: String,
+    pub model_provider: codex_model_provider_info::ModelProviderInfo,
 }
 
 impl std::fmt::Debug for WorkspaceRoutingSession {
