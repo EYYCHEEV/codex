@@ -17,6 +17,7 @@ use crate::config_update::format_config_error;
 use crate::external_agent_config_migration::flow::ExternalAgentConfigMigrationFlowOutcome;
 use crate::pager_overlay::TranscriptHistoryState;
 use crate::session_resume::cwds_differ;
+use crate::status::ManagedAccountsState;
 use codex_app_server_client::AppServerEvent;
 use codex_app_server_protocol::ThreadGoalStatus;
 #[cfg(target_os = "windows")]
@@ -1005,7 +1006,7 @@ impl App {
                         let previous_binding = self
                             .chat_widget
                             .managed_accounts()
-                            .and_then(|accounts| accounts.selected_account_binding_key());
+                            .and_then(ManagedAccountsState::selected_account_binding_key);
                         self.chat_widget.replace_managed_accounts_after_logout(
                             response.accounts,
                             selected_account_id,
@@ -1013,7 +1014,7 @@ impl App {
                         let current_binding = self
                             .chat_widget
                             .managed_accounts()
-                            .and_then(|accounts| accounts.selected_account_binding_key());
+                            .and_then(ManagedAccountsState::selected_account_binding_key);
                         let binding_changed = previous_binding != current_binding;
                         if binding_changed {
                             self.on_managed_account_binding_changed(app_server);
@@ -1679,14 +1680,16 @@ impl App {
                             let previous_binding = self
                                 .chat_widget
                                 .managed_accounts()
-                                .and_then(|accounts| accounts.selected_account_binding_key());
+                                .and_then(ManagedAccountsState::selected_account_binding_key);
                             self.chat_widget.replace_managed_accounts(response);
                             let current_binding = self
                                 .chat_widget
                                 .managed_accounts()
-                                .and_then(|accounts| accounts.selected_account_binding_key());
+                                .and_then(ManagedAccountsState::selected_account_binding_key);
                             if previous_binding != current_binding {
-                                self.invalidate_managed_account_requests();
+                                if !self.managed_usage_read_is_current() {
+                                    self.invalidate_managed_account_requests();
+                                }
                                 self.on_managed_account_binding_changed(app_server);
                             }
                             self.chat_widget.add_status_output(
@@ -1719,13 +1722,13 @@ impl App {
                         }
                     }
                 }
+                self.finish_managed_usage_read(&origin);
             }
             AppEvent::ManagedAccountsLoadedForCache { origin, result } => {
-                if self.handle_managed_accounts_loaded_for_cache(origin, result) {
-                    self.invalidate_managed_account_requests();
-                    self.on_managed_account_binding_changed(app_server);
-                    self.refresh_managed_accounts_usage_cache(app_server);
+                if self.handle_managed_accounts_loaded_for_cache(&origin, result) {
+                    self.on_managed_observation_binding_changed(app_server);
                 }
+                self.finish_managed_usage_read(&origin);
             }
             AppEvent::ApplyBackendBannerFallback { thread_id } => {
                 if self.active_thread_id == Some(thread_id)

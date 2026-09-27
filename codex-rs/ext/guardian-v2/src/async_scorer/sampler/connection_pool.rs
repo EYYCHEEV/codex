@@ -340,6 +340,7 @@ impl ConnectionPool {
                 thread_id: Some(self.config.thread_id.clone()),
                 session_id: Some(self.config.session_id.clone()),
                 model: Some(MODEL.to_owned()),
+                excluded_identities: None,
             })
             .await
             .map_err(LunaSamplerError::Provider)?;

@@ -1691,6 +1691,7 @@ async fn run_sampling_request(
     required_plugins: &HashSet<String>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>, Arc<StepContext>)> {
+    client_session.begin_request();
     let turn_context = Arc::clone(&step_context.turn);
     let base_instructions = sess.get_prompt_base_instructions().await;
     let max_retries = turn_context.provider.info().stream_max_retries();
@@ -1706,9 +1707,7 @@ async fn run_sampling_request(
         let (attempt_step_context, request_setup) = match prepared_attempt.take() {
             Some(attempt) => attempt,
             None => {
-                let setup = sess
-                    .services
-                    .model_client
+                let setup = client_session
                     .current_client_setup(
                         Some(&turn_context.model_info().slug),
                         Some(&sess.session_id().to_string()),

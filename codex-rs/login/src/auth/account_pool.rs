@@ -505,6 +505,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: None,
             model: Some("codex".to_string()),
+            ..Default::default()
         };
         let first_pins = SelectionPins::default();
         let second_pins = SelectionPins::default();
@@ -538,6 +539,7 @@ mod tests {
             thread_id: Some("stable-thread".to_string()),
             session_id: None,
             model: Some("codex".to_string()),
+            ..Default::default()
         };
         let pins = SelectionPins::default();
         select(&auth, &scope, &pins, None, now).expect("initial selection");

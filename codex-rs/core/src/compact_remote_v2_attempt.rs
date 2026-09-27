@@ -51,6 +51,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         Some(client_session) => client_session,
         None => owned_client_session.insert(sess.services.model_client.new_session()),
     };
+    client_session.begin_request();
     let max_retries = turn_context
         .provider
         .info()
@@ -59,9 +60,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let mut retry_state = crate::responses_retry::ResponsesStreamRetryState::default();
     let active_context_tokens_before = analytics_details.active_context_tokens_before;
     loop {
-        let request_setup = sess
-            .services
-            .model_client
+        let request_setup = client_session
             .current_client_setup(
                 Some(&turn_context.model_info().slug),
                 Some(responses_metadata.session_id.as_str()),

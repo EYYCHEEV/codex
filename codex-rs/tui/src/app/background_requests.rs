@@ -12,6 +12,7 @@ use crate::app_event::ManagedAccountRequestOrigin;
 use crate::app_info::app_info_from_api;
 use crate::chatwidget::ThreadUsageOutcome;
 use crate::config_update::format_config_error;
+use crate::status::ManagedAccountsState;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditParams;
@@ -84,6 +85,11 @@ impl App {
         app_server: &AppServerSession,
         origin: RateLimitRefreshOrigin,
     ) {
+        if origin == RateLimitRefreshOrigin::Periodic
+            && self.refresh_periodic_managed_pool(app_server)
+        {
+            return;
+        }
         if matches!(
             origin,
             RateLimitRefreshOrigin::Recovery | RateLimitRefreshOrigin::ResetConsume { .. }
@@ -133,6 +139,7 @@ impl App {
         let scope = (thread_id, model.clone());
         if self.managed_account_request_scope.as_ref() != Some(&scope) {
             self.cancel_managed_account_logout_refresh();
+            self.rate_limit_refresh_state.cancel_managed_usage();
             self.managed_account_request_scope = Some(scope);
             self.managed_account_scope_generation =
                 self.managed_account_scope_generation.wrapping_add(1);
@@ -149,16 +156,21 @@ impl App {
 
     pub(super) fn invalidate_managed_account_requests(&mut self) {
         self.cancel_managed_account_logout_refresh();
+        self.rate_limit_refresh_state.cancel_managed_usage();
         self.managed_account_scope_generation =
             self.managed_account_scope_generation.wrapping_add(1);
     }
 
-    pub(super) fn on_managed_account_binding_changed(&mut self, app_server: &AppServerSession) {
+    pub(super) fn invalidate_managed_account_binding(&mut self) {
         self.rate_limit_hard_stop_generation = self.rate_limit_hard_stop_generation.wrapping_add(1);
         self.rate_limit_refresh_state.invalidate_recovery();
         self.chat_widget.cyber_policy_notice = Default::default();
         self.last_thread_usage_status_cell = None;
         self.pending_thread_usage_history_refresh = false;
+    }
+
+    pub(super) fn on_managed_account_binding_changed(&mut self, app_server: &AppServerSession) {
+        self.invalidate_managed_account_binding();
         if self.chat_widget.has_chatgpt_account() {
             crate::daybreak::prefetch_notice(
                 &self.config,
@@ -208,15 +220,19 @@ impl App {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         let origin = self.managed_account_request_origin();
+        self.rate_limit_refresh_state.managed_usage = Some(origin.clone());
+        let timeout = self.managed_usage_timeout();
         tokio::spawn(async move {
-            let result = fetch_managed_accounts(
-                request_handle,
+            let params = managed_accounts_list_params(
                 origin.thread_id,
                 Some(origin.model.clone()),
                 /*refresh_usage*/ true,
-            )
-            .await
-            .map_err(|err| err.to_string());
+            );
+            let result =
+                tokio::time::timeout(timeout, fetch_managed_accounts(request_handle, params))
+                    .await
+                    .map_err(|_| "account/list timed out in TUI".to_string())
+                    .and_then(|result| result.map_err(|err| err.to_string()));
             app_event_tx.send(AppEvent::ManagedAccountsLoadedForStatus { origin, result });
         });
     }
@@ -227,38 +243,48 @@ impl App {
     }
 
     pub(super) fn refresh_managed_accounts_usage_cache(&mut self, app_server: &AppServerSession) {
+        if self.managed_usage_read_is_current() {
+            return;
+        }
         let origin = self.managed_account_request_origin();
         self.refresh_managed_accounts_cache_from(app_server, origin, /*refresh_usage*/ true);
     }
 
     pub(super) fn refresh_managed_accounts_cache_from(
-        &self,
+        &mut self,
         app_server: &AppServerSession,
         origin: ManagedAccountRequestOrigin,
         refresh_usage: bool,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
+        let timeout = self.managed_usage_timeout();
+        if refresh_usage {
+            self.rate_limit_refresh_state.managed_usage = Some(origin.clone());
+        }
         tokio::spawn(async move {
-            let result = fetch_managed_accounts(
-                request_handle,
-                origin.thread_id,
-                Some(origin.model.clone()),
+            let params = ListAccountsParams {
+                thread_id: origin.thread_id.map(|id| id.to_string()),
+                model: Some(origin.model.clone()),
+                refresh_tokens: false,
                 refresh_usage,
-            )
-            .await
-            .map_err(|err| err.to_string());
+            };
+            let result =
+                tokio::time::timeout(timeout, fetch_managed_accounts(request_handle, params))
+                    .await
+                    .map_err(|_| "account/list timed out in TUI".to_string())
+                    .and_then(|result| result.map_err(|err| err.to_string()));
             app_event_tx.send(AppEvent::ManagedAccountsLoadedForCache { origin, result });
         });
     }
 
     pub(super) fn handle_managed_accounts_loaded_for_cache(
         &mut self,
-        origin: ManagedAccountRequestOrigin,
+        origin: &ManagedAccountRequestOrigin,
         result: std::result::Result<ListAccountsResponse, String>,
     ) -> bool {
-        self.finish_managed_account_logout_refresh(&origin);
-        if !self.is_current_managed_account_request(&origin) {
+        self.finish_managed_account_logout_refresh(origin);
+        if !self.is_current_managed_account_request(origin) {
             tracing::debug!(
                 thread_id = ?origin.thread_id,
                 model = origin.model,
@@ -270,7 +296,7 @@ impl App {
         let previous_binding = self
             .chat_widget
             .managed_accounts()
-            .and_then(|accounts| accounts.selected_account_binding_key());
+            .and_then(ManagedAccountsState::selected_account_binding_key);
         match result {
             Ok(response)
                 if self.chat_widget.managed_accounts().is_some()
@@ -288,7 +314,7 @@ impl App {
         let current_binding = self
             .chat_widget
             .managed_accounts()
-            .and_then(|accounts| accounts.selected_account_binding_key());
+            .and_then(ManagedAccountsState::selected_account_binding_key);
         previous_binding != current_binding
     }
 
@@ -954,16 +980,11 @@ pub(super) async fn fetch_all_mcp_server_statuses(
 
 pub(super) async fn fetch_managed_accounts(
     request_handle: AppServerRequestHandle,
-    thread_id: Option<ThreadId>,
-    model: Option<String>,
-    refresh_usage: bool,
+    params: ListAccountsParams,
 ) -> Result<ListAccountsResponse> {
     let request_id = RequestId::String(format!("account-list-{}", Uuid::new_v4()));
     request_handle
-        .request_typed(ClientRequest::ListAccounts {
-            request_id,
-            params: managed_accounts_list_params(thread_id, model, refresh_usage),
-        })
+        .request_typed(ClientRequest::ListAccounts { request_id, params })
         .await
         .wrap_err("account/list failed in TUI")
 }

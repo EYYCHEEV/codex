@@ -31,6 +31,12 @@ use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
+#[path = "managed_refresh_acquisition_tests.rs"]
+mod managed_refresh_acquisition_tests;
+
+#[path = "managed_removal_takeover_tests.rs"]
+mod managed_removal_takeover_tests;
+
 const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
@@ -3843,6 +3849,7 @@ async fn uncommitted_auth_failure_rotates_but_committed_failure_does_not() {
         thread_id: Some("thread-a".to_string()),
         session_id: Some("session-a".to_string()),
         model: Some("gpt-test".to_string()),
+        ..Default::default()
     };
     let selected = manager
         .managed_chatgpt_auth_snapshot(&scope)
@@ -3914,6 +3921,7 @@ async fn status_observation_state_advance_still_recovers_and_rotates() {
         thread_id: Some("status-before-failure".to_string()),
         session_id: Some("session-a".to_string()),
         model: Some("gpt-test".to_string()),
+        ..Default::default()
     };
     let selected = manager
         .managed_chatgpt_auth_snapshot(&scope)
@@ -4237,6 +4245,7 @@ async fn targeted_logout_persists_tombstone_until_revocation_finishes() {
         thread_id: Some("thread-a".to_string()),
         session_id: Some("session-a".to_string()),
         model: Some("gpt-test".to_string()),
+        ..Default::default()
     };
     let selected_before = manager
         .list_managed_chatgpt_accounts(&scope)

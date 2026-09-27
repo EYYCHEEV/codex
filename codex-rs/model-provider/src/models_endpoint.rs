@@ -106,6 +106,7 @@ impl OpenAiModelsEndpoint {
                 thread_id: None,
                 session_id: None,
                 model: None,
+                excluded_identities: None,
             },
         )
         .await?;

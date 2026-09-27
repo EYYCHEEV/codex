@@ -26,12 +26,14 @@
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
 mod managed_accounts;
+mod request_recovery;
 mod websocket;
 
 use managed_accounts::ManagedChatgptAttemptContext;
 use managed_accounts::ManagedRateLimitRecorder;
 #[cfg(test)]
 use managed_accounts::managed_chatgpt_failure;
+use request_recovery::RequestRecovery;
 #[cfg(test)]
 use websocket::MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES;
 pub(crate) use websocket::WebsocketCloseDiagnosticContext;
@@ -261,6 +263,12 @@ struct ModelClientState {
 pub type CurrentClientSetup = ProviderRequestSetup;
 
 #[derive(Clone, Copy)]
+enum ClientRouting {
+    Workspace,
+    ConfiguredProvider,
+}
+
+#[derive(Clone, Copy)]
 struct RequestRouteTelemetry {
     endpoint: &'static str,
 }
@@ -333,8 +341,8 @@ pub struct ModelClientSession {
     managed_rate_limit_binding: Option<ManagedRateLimitBinding>,
     /// An inner transport refresh completed; the outer owner must rebuild request-scoped state.
     request_scope_refresh_pending: bool,
-    /// Unauthorized recovery state that must survive bound outer request retries.
-    request_scope_auth_recovery: Option<RequestScopeUnauthorizedRecovery>,
+    /// Recovery allowance shared by every attempt and transport of the logical request.
+    request_recovery: RequestRecovery,
     /// Last managed selection resolved by this turn and any update not yet emitted to clients.
     last_managed_selection: Option<ManagedAccountSelectedEvent>,
     pending_managed_selections: VecDeque<ManagedAccountSelectedEvent>,
@@ -366,39 +374,6 @@ struct WebsocketSession {
     last_response_from_untraced_warmup: bool,
     connection_reused: StdMutex<bool>,
     continuation_reset_reason: Option<&'static str>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct UnauthorizedRecoveryKey {
-    transport_binding: TransportAuthBinding,
-    credential_revision: Option<u64>,
-}
-
-struct RequestScopeUnauthorizedRecovery {
-    key: UnauthorizedRecoveryKey,
-    recovery: Option<UnauthorizedRecovery>,
-    provider_auth_recovery_attempted: bool,
-}
-
-impl UnauthorizedRecoveryKey {
-    fn for_setup(setup: &ProviderRequestSetup) -> Self {
-        Self {
-            transport_binding: setup.transport_auth_binding.clone(),
-            credential_revision: setup.credential_revision,
-        }
-    }
-}
-
-fn unauthorized_recovery_for_setup(
-    auth_manager: Option<&Arc<AuthManager>>,
-    setup: &ProviderRequestSetup,
-) -> Option<UnauthorizedRecovery> {
-    auth_manager.map(|manager| {
-        setup.managed_snapshot.as_ref().map_or_else(
-            || manager.unauthorized_recovery(),
-            |snapshot| manager.unauthorized_recovery_for_snapshot(snapshot),
-        )
-    })
 }
 
 // This is intentionally not a `PartialEq` implementation: request equality includes `input` and
@@ -678,7 +653,7 @@ impl ModelClient {
             managed_attempt: None,
             managed_rate_limit_binding: None,
             request_scope_refresh_pending: false,
-            request_scope_auth_recovery: None,
+            request_recovery: RequestRecovery::default(),
             last_managed_selection: None,
             pending_managed_selections: VecDeque::new(),
         }
@@ -827,23 +802,19 @@ impl ModelClient {
         };
 
         let auth_manager = self.state.provider.auth_manager();
-        let mut auth_recovery = None;
-        let mut auth_recovery_key = None;
-        let mut provider_auth_recovery_attempted = false;
-        let mut pending_retry = PendingUnauthorizedRetry::default();
+        let mut request_recovery = RequestRecovery::default();
         loop {
             let client_setup = self
-                .current_client_setup(Some(model_info.slug.as_str()), None)
+                .current_client_setup_with_exclusions(
+                    ClientRouting::Workspace,
+                    Some(model_info.slug.as_str()),
+                    /*session_id*/ None,
+                    request_recovery.excluded_identities.clone(),
+                )
                 .await?;
             let managed_attempt =
                 self.managed_attempt_context(&client_setup, Some(model_info.slug.as_str()), None);
-            let recovery_key = UnauthorizedRecoveryKey::for_setup(&client_setup);
-            if auth_recovery_key.as_ref() != Some(&recovery_key) {
-                auth_recovery =
-                    unauthorized_recovery_for_setup(auth_manager.as_ref(), &client_setup);
-                auth_recovery_key = Some(recovery_key);
-                pending_retry = PendingUnauthorizedRetry::default();
-            }
+            let allowance = request_recovery.prepare(auth_manager.as_ref(), &client_setup);
             let request_telemetry = Self::build_request_telemetry(
                 session_telemetry,
                 AuthRequestTelemetryContext::new(
@@ -853,7 +824,7 @@ impl ModelClient {
                         .map(CodexAuth::auth_mode),
                     client_setup.api_auth.as_ref(),
                     client_setup.agent_identity_telemetry.clone(),
-                    pending_retry,
+                    request_recovery.pending_retry,
                 ),
                 RequestRouteTelemetry::for_endpoint(MEMORIES_SUMMARIZE_ENDPOINT),
                 self.state.auth_env_telemetry.clone(),
@@ -877,18 +848,15 @@ impl ModelClient {
                 Err(ApiError::Transport(
                     unauthorized_transport @ TransportError::Http { status, .. },
                 )) if status == StatusCode::UNAUTHORIZED => {
-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
-                        handle_unauthorized(
+                    request_recovery
+                        .recover_unauthorized(
                             unauthorized_transport,
-                            &mut auth_recovery,
-                            &mut provider_auth_recovery_attempted,
+                            allowance,
                             session_telemetry,
-                            &self.state.provider,
-                            self.event_sender.as_ref(),
+                            self,
                             /*turn_id*/ None,
                         )
-                        .await?,
-                    );
+                        .await?;
                     continue;
                 }
                 result => result.map_err(|error| self.state.provider.map_api_error(error)),
@@ -913,8 +881,8 @@ impl ModelClient {
                 }
             };
             if let (Err(error), Some(attempt)) = (&result, managed_attempt.as_ref())
-                && self
-                    .recover_managed_attempt(attempt, error, /*committed*/ false)
+                && request_recovery
+                    .recover_managed_attempt(self, attempt, error, /*committed*/ false)
                     .await
             {
                 continue;
@@ -1194,6 +1162,22 @@ impl ModelClient {
         model: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<CurrentClientSetup> {
+        self.current_client_setup_with_exclusions(
+            routing,
+            model,
+            session_id,
+            /*excluded_identities*/ None,
+        )
+        .await
+    }
+
+    async fn current_client_setup_with_exclusions(
+        &self,
+        routing: ClientRouting,
+        model: Option<&str>,
+        session_id: Option<&str>,
+        excluded_identities: Option<Arc<Vec<String>>>,
+    ) -> Result<CurrentClientSetup> {
         // Routing may refresh credentials. Retry once for the same owner, but never
         // send a request built for an account that changed during setup.
         let auth_manager = self.auth_manager().filter(|manager| {
@@ -1215,6 +1199,7 @@ impl ModelClient {
                     thread_id: Some(self.state.thread_id.to_string()),
                     session_id: session_id.map(str::to_owned),
                     model: model.map(str::to_owned),
+                    excluded_identities: excluded_identities.clone(),
                 })
                 .await?;
             if matches!(routing, ClientRouting::Workspace) {
@@ -1232,8 +1217,22 @@ impl ModelClient {
                     "account changed while preparing model request",
                 )));
             }
-            // Pool selection also advances the request revision, independently of auth generation.
+            // Inventory notifications include usage observations. Revalidate the selected
+            // managed credentials and eligibility rather than rebuilding for every observation.
             if setup.auth_revision == Some(*manager.auth_change_receiver().borrow()) {
+                return Ok(setup);
+            }
+            if let Some(snapshot) = setup.managed_snapshot.as_ref()
+                && manager.managed_chatgpt_auth_snapshot_is_current(
+                    snapshot,
+                    &ManagedChatgptSelectionScope {
+                        thread_id: Some(self.state.thread_id.to_string()),
+                        session_id: session_id.map(str::to_owned),
+                        model: model.map(str::to_owned),
+                        excluded_identities: excluded_identities.clone(),
+                    },
+                )?
+            {
                 return Ok(setup);
             }
             if attempt == 1 {
@@ -1514,7 +1513,14 @@ impl ModelClientSession {
         model: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<CurrentClientSetup> {
-        self.client.current_client_setup(model, session_id).await
+        self.client
+            .current_client_setup_with_exclusions(
+                ClientRouting::Workspace,
+                model,
+                session_id,
+                self.request_recovery.excluded_identities.clone(),
+            )
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1662,6 +1668,8 @@ impl ModelClientSession {
     }
 
     /// Preconnects using the snapshot held by the outer request-attempt owner.
+    /// The caller begins the logical request and owns retries, including recapturing tools
+    /// after authentication refresh. This method never resets the shared recovery allowance.
     pub(crate) async fn preconnect_websocket_with_setup(
         &mut self,
         model_info: &ModelInfo,
@@ -1687,13 +1695,14 @@ impl ModelClientSession {
             Some(model_info.slug.as_str()),
             Some(responses_metadata.session_id.as_str()),
         );
-        let recovery_key = UnauthorizedRecoveryKey::for_setup(client_setup);
-        let fresh_recovery = unauthorized_recovery_for_setup(auth_manager.as_ref(), client_setup);
+        let allowance = self
+            .request_recovery
+            .prepare(auth_manager.as_ref(), client_setup);
         let auth_context = AuthRequestTelemetryContext::new(
             client_setup.effective_auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
             client_setup.agent_identity_telemetry.clone(),
-            PendingUnauthorizedRetry::default(),
+            self.request_recovery.pending_retry,
         );
         let endpoint = self
             .client
@@ -1714,7 +1723,9 @@ impl ModelClientSession {
             .websocket_connection(WebsocketConnectParams {
                 session_telemetry,
                 api_provider: client_setup.api_provider.clone(),
-                auth_revision: client_setup.auth_revision,
+                auth_revision: client_setup
+                    .credential_revision
+                    .or(client_setup.auth_revision),
                 api_auth: Arc::clone(&client_setup.api_auth),
                 auth_owner_generation: client_setup.auth_owner_generation,
                 binding: client_setup.transport_auth_binding.clone(),
@@ -1739,8 +1750,7 @@ impl ModelClientSession {
                 Err(self
                     .refresh_request_scope_after_unauthorized(
                         unauthorized_transport,
-                        recovery_key,
-                        fresh_recovery,
+                        allowance,
                         session_telemetry,
                     )
                     .await)
@@ -1926,11 +1936,9 @@ impl ModelClientSession {
         request_setup: CurrentClientSetup,
     ) -> Result<()> {
         if !self.client.responses_websocket_enabled() {
-            self.request_scope_auth_recovery = None;
             return Ok(());
         }
         if self.is_websocket_prewarmed().await {
-            self.request_scope_auth_recovery = None;
             return Ok(());
         }
 
@@ -1975,7 +1983,6 @@ impl ModelClientSession {
                 if self.websocket_http_fallback_allowed() =>
             {
                 self.try_switch_fallback_transport(session_telemetry, model_info);
-                self.request_scope_auth_recovery = None;
                 Ok(())
             }
             Ok(WebsocketStreamOutcome::FallbackToHttp) => Err(CodexErr::Stream(

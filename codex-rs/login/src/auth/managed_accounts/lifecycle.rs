@@ -20,6 +20,18 @@ fn refresh_failure_reason_code(error: &RefreshTokenError) -> Option<&'static str
     })
 }
 
+fn refresh_failure_prevents_retry(failure: &ManagedChatgptRefreshFailure) -> bool {
+    failure.permanent
+        || matches!(
+            failure.reason_code.as_deref(),
+            Some(
+                REFRESH_FAILURE_CANCELLED_REASON
+                    | REFRESH_FAILURE_TIMEOUT_REASON
+                    | REFRESH_FAILURE_COMMIT_REASON
+            )
+        )
+}
+
 fn persisted_refresh_failure_result(failure: &ManagedChatgptRefreshFailure) -> RefreshTokenError {
     if !failure.permanent {
         let kind = if failure.reason_code.as_deref() == Some(REFRESH_FAILURE_TIMEOUT_REASON) {
@@ -259,17 +271,11 @@ impl AuthManager {
                 "no eligible managed ChatGPT account is available: account is disallowed by forced workspace policy",
             )));
         }
-        if let Some(failure) = initial_row.refresh_failure.as_ref().filter(|failure| {
-            failure.permanent
-                || matches!(
-                    failure.reason_code.as_deref(),
-                    Some(
-                        REFRESH_FAILURE_CANCELLED_REASON
-                            | REFRESH_FAILURE_TIMEOUT_REASON
-                            | REFRESH_FAILURE_COMMIT_REASON
-                    )
-                )
-        }) {
+        if let Some(failure) = initial_row
+            .refresh_failure
+            .as_ref()
+            .filter(|failure| refresh_failure_prevents_retry(failure))
+        {
             return Err(persisted_refresh_failure_result(failure));
         }
         let expected_revision = credential_revision(initial_row);
@@ -318,12 +324,12 @@ impl AuthManager {
                     {
                         return Ok(AuthStorageMutation::Keep(Some(auth)));
                     }
-                    if let Some(waited_for) = waiting_for_operation_id.as_deref()
-                        && let Some(failure) = account
-                            .refresh_failure
-                            .as_ref()
-                            .filter(|failure| failure.operation_id.as_deref() == Some(waited_for))
-                    {
+                    if let Some(failure) = account.refresh_failure.as_ref().filter(|failure| {
+                        refresh_failure_prevents_retry(failure)
+                            || waiting_for_operation_id.as_deref().is_some_and(|waited_for| {
+                                failure.operation_id.as_deref() == Some(waited_for)
+                            })
+                    }) {
                         owner_failure = Some(failure.clone());
                         return Ok(AuthStorageMutation::Keep(Some(auth)));
                     }
@@ -548,13 +554,8 @@ impl AuthManager {
     ) -> std::io::Result<ManagedChatgptRecoveryDecision> {
         self.resume_managed_chatgpt_tombstones().await?;
         let Some(current) = self
-            .managed_chatgpt_auth_snapshot_for_identity(&snapshot.identity_key)
+            .managed_chatgpt_auth_snapshot_for_attempt(snapshot)
             .await?
-            .filter(|current| {
-                current.account_revision == snapshot.account_revision
-                    && current.account_state_revision >= snapshot.account_state_revision
-                    && current.transport == snapshot.transport
-            })
         else {
             return Ok(ManagedChatgptRecoveryDecision::Stop);
         };
@@ -649,17 +650,9 @@ impl AuthManager {
         let Some(identity) = resolve_identity(&initial, selector)? else {
             return Ok(false);
         };
-        let operation_id = initial
-            .managed_chatgpt
-            .as_ref()
-            .and_then(|pool| {
-                pool.accounts
-                    .iter()
-                    .find(|account| account.identity_key == identity)
-            })
-            .and_then(|account| account.tombstone.as_ref())
-            .map(|tombstone| tombstone.operation_id.clone())
-            .unwrap_or_else(|| format!("remove:{:032x}", rand::rng().random::<u128>()));
+        // A persisted tombstone does not make this caller the live lease owner.
+        // Adopt its operation only after the locked foreign-lease check below.
+        let mut operation_id = format!("remove:{:032x}", rand::rng().random::<u128>());
         let tombstoned = loop {
             let mut selected = None;
             let result = storage.mutate(&mut |current| {
@@ -676,9 +669,7 @@ impl AuthManager {
                     return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
                 }
                 if let Some(existing) = account.tombstone.as_ref() {
-                    if existing.operation_id != operation_id {
-                        return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
-                    }
+                    operation_id.clone_from(&existing.operation_id);
                 } else {
                     account.tombstone = Some(ManagedChatgptTombstone {
                         operation_id: operation_id.clone(),

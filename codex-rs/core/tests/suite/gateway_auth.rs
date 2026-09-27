@@ -210,6 +210,7 @@ delivery = { kind = "header", name = "x-gateway-auth" }
             thread_id: None,
             session_id: None,
             model: None,
+            excluded_identities: None,
         })
         .await
         .err()

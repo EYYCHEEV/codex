@@ -45,6 +45,8 @@ mod key_chords;
 mod local_command_scroll_tests;
 #[path = "tests/luna_reserve_recovery_tests.rs"]
 mod luna_reserve_recovery_tests;
+#[path = "tests/managed_pool_recovery_tests.rs"]
+mod managed_pool_recovery_tests;
 #[path = "tests/mcp_startup.rs"]
 mod mcp_startup;
 #[path = "tests/misalignment_policy_tests.rs"]
@@ -10300,7 +10302,7 @@ async fn superseded_same_scope_managed_response_cannot_replace_current_thread_se
     let current = app.managed_account_request_origin();
     assert!(app.is_current_managed_account_request(&current));
     app.handle_managed_accounts_loaded_for_cache(
-        superseded,
+        &superseded,
         Ok(codex_app_server_protocol::ListAccountsResponse {
             accounts: vec![
                 managed_account_for_logout_refresh_test("a", 99),
@@ -10380,7 +10382,7 @@ async fn logout_refresh_stale_cache_response_reopens_managed_notification_gate()
 
     let unrelated_origin = app.managed_account_request_origin();
     app.handle_managed_accounts_loaded_for_cache(
-        unrelated_origin,
+        &unrelated_origin,
         Err("unrelated refresh failed".to_string()),
     );
     assert!(!app.chat_widget.apply_account_pool_update(
@@ -10390,7 +10392,7 @@ async fn logout_refresh_stale_cache_response_reopens_managed_notification_gate()
 
     app.chat_widget.set_model("different-scope");
     app.handle_managed_accounts_loaded_for_cache(
-        origin,
+        &origin,
         Ok(codex_app_server_protocol::ListAccountsResponse {
             accounts: vec![managed_account_for_logout_refresh_test("logged-out", 1)],
             selected_account_id: Some("logged-out".to_string()),
@@ -10419,7 +10421,7 @@ async fn logout_refresh_error_reopens_managed_notification_gate() {
     );
 
     app.handle_managed_accounts_loaded_for_cache(
-        origin,
+        &origin,
         Err("account/list refresh failed".to_string()),
     );
 

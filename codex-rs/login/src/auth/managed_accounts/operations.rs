@@ -149,6 +149,7 @@ impl AuthManager {
                 Ok(auth) => break (auth, committed),
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
+                    self.resume_managed_chatgpt_tombstones().await?;
                 }
                 Err(err) => return Err(err),
             }
@@ -163,6 +164,33 @@ impl AuthManager {
         self.notify_managed_chatgpt_change();
         self.reload().await;
         Ok(identity)
+    }
+
+    /// Checks credentials and scoped eligibility without treating usage revisions as auth changes.
+    pub fn managed_chatgpt_auth_snapshot_is_current(
+        &self,
+        snapshot: &ManagedChatgptAuthSnapshot,
+        scope: &ManagedChatgptSelectionScope,
+    ) -> std::io::Result<bool> {
+        if self.has_external_auth() || load_external_chatgpt_auth(&self.codex_home)?.is_some() {
+            return Ok(false);
+        }
+        let Some(document) = self.load_managed_chatgpt_document()? else {
+            return Ok(false);
+        };
+        let forced = self.forced_chatgpt_workspace_id();
+        Ok(select(
+            &document,
+            scope,
+            &self.selection_pins,
+            forced.as_deref(),
+            Utc::now(),
+        )
+        .is_some_and(|account| {
+            account.identity_key == snapshot.identity_key
+                && credential_revision(account) == snapshot.account_revision
+                && account.chatgpt_account_id == snapshot.transport.raw_account_id
+        }))
     }
 
     pub async fn managed_chatgpt_auth_snapshot(
@@ -216,6 +244,21 @@ impl AuthManager {
             },
             auth,
         }))
+    }
+
+    /// Returns the current credentials only if the failed attempt still names their generation.
+    pub async fn managed_chatgpt_auth_snapshot_for_attempt(
+        &self,
+        snapshot: &ManagedChatgptAuthSnapshot,
+    ) -> std::io::Result<Option<ManagedChatgptAuthSnapshot>> {
+        Ok(self
+            .managed_chatgpt_auth_snapshot_for_identity(&snapshot.identity_key)
+            .await?
+            .filter(|current| {
+                current.account_revision == snapshot.account_revision
+                    && current.account_state_revision >= snapshot.account_state_revision
+                    && current.transport == snapshot.transport
+            }))
     }
 
     pub async fn managed_chatgpt_auth_snapshot_for_identity(
@@ -312,6 +355,7 @@ impl AuthManager {
             if !record_status_observation(account, observation.clone()) {
                 return Ok(AuthStorageMutation::Keep(Some(auth)));
             }
+            account.credential_revision = expected_credential_revision;
             account.revision = account.revision.saturating_add(1);
             changed_identity = Some(identity_key.to_string());
             Ok(AuthStorageMutation::Save(auth))

@@ -482,6 +482,7 @@ pub(crate) async fn resolve_provider_request_setup(
         thread_id: scope.thread_id.clone(),
         session_id: scope.session_id.clone(),
         model: scope.model.clone(),
+        excluded_identities: scope.excluded_identities.clone(),
     };
     let managed_snapshot = if managed_chatgpt_mode {
         match auth_manager.as_ref() {
@@ -963,6 +964,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: Some("session-1".to_string()),
             model: Some("gpt-test".to_string()),
+            excluded_identities: None,
         }
     }
 
@@ -1291,6 +1293,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: Some("session-1".to_string()),
             model: Some("gpt-test".to_string()),
+            ..Default::default()
         };
         let selected_snapshot = pool_manager
             .managed_chatgpt_auth_snapshot(&selection_scope)
@@ -1558,6 +1561,7 @@ mod tests {
             thread_id: Some("thread-1".to_string()),
             session_id: Some("session-1".to_string()),
             model: Some("gpt-test".to_string()),
+            ..Default::default()
         };
         let snapshot = auth_manager
             .managed_chatgpt_auth_snapshot(&selection_scope)
@@ -1705,6 +1709,7 @@ mod tests {
                 thread_id: None,
                 session_id: None,
                 model: None,
+                excluded_identities: None,
             })
             .await
             .expect("auth should resolve");

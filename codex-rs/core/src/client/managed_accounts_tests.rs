@@ -79,6 +79,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
             thread_id: Some("thread-rate-observation".to_string()),
             session_id: Some("session-rate-observation".to_string()),
             model: Some("gpt-test".to_string()),
+            excluded_identities: None,
         })
         .await
         .expect("selected setup");
@@ -227,6 +228,7 @@ async fn rate_limit_recorder_distinguishes_absent_and_empty_snapshots() {
             thread_id: Some("thread-rate-observation".to_string()),
             session_id: Some("session-rate-observation".to_string()),
             model: Some("gpt-test".to_string()),
+            excluded_identities: None,
         })
         .await
         .expect("selected setup after unavailable observation");
@@ -307,6 +309,7 @@ async fn rate_limit_recorder_publishes_exact_revision_and_ignores_stale_discard(
         thread_id: Some("thread-revision-observation".to_string()),
         session_id: Some("session-revision-observation".to_string()),
         model: Some("gpt-test".to_string()),
+        excluded_identities: None,
     };
     let setup = provider
         .request_setup(scope())

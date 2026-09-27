@@ -373,10 +373,9 @@ async fn schedule_startup_prewarm_inner(
         window_number,
         context_window_id,
     );
+    client_session.begin_request();
     loop {
-        let request_setup = session
-            .services
-            .model_client
+        let request_setup = client_session
             .current_client_setup(
                 Some(&startup_turn_context.model_info().slug),
                 Some(handshake_metadata.session_id.as_str()),

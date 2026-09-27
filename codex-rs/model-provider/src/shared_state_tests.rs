@@ -112,6 +112,7 @@ async fn gateway_credentials_accompany_primary_auth_in_models_and_responses() {
                 thread_id: None,
                 session_id: None,
                 model: None,
+                excluded_identities: None,
             })
             .await
             .unwrap();
