@@ -11,6 +11,7 @@ use super::app_server_event_targets::server_request_thread_id;
 use super::*;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
+use crate::bottom_pane::SelectionDescriptionLayout;
 use crate::chatwidget::ThreadInputStateRestoreMode;
 use std::collections::HashSet;
 
@@ -189,6 +190,7 @@ impl App {
             footer_hint: Some(standard_popup_hint_line()),
             items,
             initial_selected_idx,
+            description_layout: SelectionDescriptionLayout::Columns,
             ..SelectionViewParams::picker()
         }
     }

@@ -3,21 +3,19 @@ source: tui/src/app/tests/managed_pool_recovery_tests.rs
 expression: "format!(\"Before:\\n{before}\\n\\nAfter:\\n{after}\")"
 ---
 Before:
-│   saved@example.test · Plus                                        │
-│     Credential: healthy                                            │
-│     Eligibility: ineligible (blocked)                              │
-│     Cooldown: quota (no known reset time)                          │
-│     Quota: unknown; no quota observation                           │
-│     Usage: unknown · summary not reported                          │
-│     Observed: unknown                                              │
-╰────────────────────────────────────────────────────────────────────╯
+  saved@example.test · Plus
+    Credential: healthy
+    Eligibility: ineligible (blocked)
+    Cooldown: quota (no known reset time)
+    Quota: unknown; no quota observation
+    Usage: unknown · summary not reported
+    Observed: unknown
 
 After:
-│ › saved@example.test · Plus · selected                                               │
-│     Credential: healthy                                                              │
-│     Eligibility: eligible                                                            │
-│     Cooldown: none                                                                   │
-│     Quota: codex (fresh) — primary 5h: 5% left, reset unknown; secondary unavailable │
-│     Usage: fresh · summary not reported                                              │
-│     Observed: unknown                                                                │
-╰──────────────────────────────────────────────────────────────────────────────────────╯
+› saved@example.test · Plus · selected
+    Credential: healthy
+    Eligibility: eligible
+    Cooldown: none
+    Quota: codex (fresh) — primary 5h: 5% left, reset unknown; secondary unavailable
+    Usage: fresh · summary not reported
+    Observed: unknown

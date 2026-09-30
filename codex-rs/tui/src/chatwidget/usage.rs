@@ -68,7 +68,7 @@ impl ChatWidget {
             subtitle: Some(if managed {
                 "View account usage.".to_string()
             } else {
-                "View account usage or redeem an earned reset.".to_string()
+                "Account usage and resets.".to_string()
             }),
             footer_hint: Some(usage_hint_line(&self.bottom_pane.list_keymap(), "open")),
             items,

@@ -4390,7 +4390,8 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                         .replace(&child_thread_id.to_string(), "[child]"),
                     @r###"
                       Agents
-                      Select an agent to watch. ⌥ + ← previous, ⌥ + → next.
+                      Select an agent to watch. ⌥+← previous, ⌥+→ next.
+
 
                     › 1. • Main [default] (current)  idle
                       2. • /root/worker              [worker]  idle

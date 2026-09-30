@@ -24,7 +24,6 @@ expression: commands
 /init - create an AGENTS.md file with instructions for Codex
 /compact - summarize conversation to prevent hitting the context limit
 /recap - summarize the current conversation now
-/agents - open the agent command center
 /agent - switch the active agent thread
 /side - start a side conversation in an ephemeral fork
 /copy - copy the last response or part of it
