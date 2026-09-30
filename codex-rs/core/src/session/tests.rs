@@ -4237,7 +4237,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
 }
 
 #[tokio::test]
-async fn set_rate_limits_retains_previous_credits() {
+async fn set_rate_limits_keeps_canonical_projection_when_additional_arrives() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let config = build_test_config(codex_home.path()).await;
     let config = Arc::new(config);
