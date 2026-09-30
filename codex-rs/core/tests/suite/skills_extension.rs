@@ -11,6 +11,7 @@ use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
+use codex_core::TurnInputSubmission;
 use codex_core::WaitForEnvironmentToolConfig;
 use codex_core::config::Config;
 use codex_exec_server::CreateDirectoryOptions;
@@ -95,6 +96,8 @@ use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_remote;
 use core_test_support::skip_if_target_windows;
 use core_test_support::skip_if_wine_exec;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::environment_config_for_selection;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::test_env;
@@ -109,13 +112,19 @@ use serde_json::json;
 use sha1::Digest;
 use tempfile::TempDir;
 use test_case::test_case;
+use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use toml::toml;
 use tracing::Level;
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_test::internal::MockWriter;
+use wiremock::Mock;
 use wiremock::MockServer;
+use wiremock::Request;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 
 #[path = "skills_extension/cloud_skill_tests.rs"]
 mod cloud_skill_tests;
@@ -130,6 +139,66 @@ struct StaticSkillProvider {
 
 struct CatalogSkillProvider {
     catalog: SkillCatalog,
+}
+
+// The former OrchestratorSkillProvider is no longer part of the skills extension.
+// Keep this regression on the real, step-bound MCP resource path through its provider seam.
+struct StepBoundCloudSkillProvider;
+
+impl SkillProvider for StepBoundCloudSkillProvider {
+    fn list(&self, query: SkillListQuery) -> SkillProviderFuture<'_, SkillCatalog> {
+        Box::pin(async move {
+            let client = query
+                .mcp_resources
+                .ok_or_else(|| SkillProviderError::new("missing step MCP resource client"))?;
+            let page = if client.has_server(CODEX_APPS_MCP_SERVER_NAME).await {
+                client
+                    .list_resources(CODEX_APPS_MCP_SERVER_NAME, /*cursor*/ None)
+                    .await
+            } else {
+                // Regular-turn startup precedes the first captured step binding.
+                client
+                    .list_codex_apps_resources(codex_mcp::CodexAppsResourceListParams {
+                        cursor: None,
+                        mime_type: "mcp/skill".to_string(),
+                    })
+                    .await
+            }
+            .map_err(|error| SkillProviderError::new(error.to_string()))?;
+            Ok(SkillCatalog {
+                entries: page
+                    .resources
+                    .into_iter()
+                    .map(|resource| {
+                        SkillCatalogEntry::new(
+                            SkillPackageId(resource.uri.clone()),
+                            SkillAuthority::new(SkillSourceKind::Cloud, CODEX_APPS_MCP_SERVER_NAME),
+                            resource.name,
+                            resource.description.unwrap_or_default(),
+                            SkillResourceId::new(format!("{}/SKILL.md", resource.uri)),
+                        )
+                        .with_display_path(resource.uri)
+                    })
+                    .collect(),
+                warnings: Vec::new(),
+            })
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        _request: SkillReadRequest<'a>,
+    ) -> SkillProviderFuture<'a, SkillReadResult> {
+        Box::pin(async {
+            Err(SkillProviderError::new(
+                "catalog regression does not read skills",
+            ))
+        })
+    }
+
+    fn search(&self, _request: SkillSearchRequest) -> SkillProviderFuture<'_, SkillSearchResult> {
+        Box::pin(async { Ok(SkillSearchResult::default()) })
+    }
 }
 
 struct PausedCatalogSkillProvider {
@@ -2897,6 +2966,178 @@ async fn production_turn_keeps_full_executor_only_catalog_when_it_fits() -> Resu
 
     assert_full_descriptions(&executor_lines, &EXECUTOR_CATALOG);
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn same_turn_recapture_uses_step_binding_for_orchestrator_world_state() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const BINDING_A_CATALOG_MARKER: &str = "CATALOG_FROM_BINDING_A";
+    const BINDING_B_CATALOG_MARKER: &str = "CATALOG_FROM_BINDING_B";
+
+    let mcp_server = responses::start_mock_server().await;
+    let apps_server = AppsTestServer::mount(&mcp_server).await?;
+    let binding_b_active = Arc::new(AtomicBool::new(false));
+    let binding_b_active_for_responder = Arc::clone(&binding_b_active);
+    Mock::given(method("POST"))
+        .and(path_regex("^/api/codex/ps/mcp/?$"))
+        .and(|request: &Request| {
+            serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| {
+                matches!(
+                    body["method"].as_str(),
+                    Some("tools/list" | "resources/list")
+                )
+            })
+        })
+        .respond_with(move |request: &Request| {
+            let body: Value = serde_json::from_slice(&request.body)
+                .expect("MCP resource request should be valid JSON");
+            let uses_binding_b = binding_b_active_for_responder.load(Ordering::SeqCst);
+            let binding = if uses_binding_b {
+                "binding-b"
+            } else {
+                "binding-a"
+            };
+            let result = match body["method"].as_str() {
+                Some("tools/list") => json!({
+                    "tools": [{
+                        "name": format!("{}_tool", binding.replace('-', "_")),
+                        "description": format!("Tool from {binding}."),
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": false,
+                        },
+                        "_meta": {
+                            "connector_id": "calendar",
+                            "connector_name": "Google Calendar",
+                            "connector_description": "Plan events and schedules.",
+                        },
+                    }],
+                    "nextCursor": null,
+                }),
+                Some("resources/list") => {
+                    let marker = if uses_binding_b {
+                        BINDING_B_CATALOG_MARKER
+                    } else {
+                        BINDING_A_CATALOG_MARKER
+                    };
+                    json!({
+                        "resources": [{
+                            "name": "search",
+                            "uri": format!("skill://{binding}/search"),
+                            "description": marker,
+                            "mimeType": "mcp/skill",
+                            "_meta": {
+                                "plugin_name": binding,
+                                "skill_name": "search",
+                                "allow_implicit_invocation": true,
+                            },
+                        }],
+                    })
+                }
+                method => unreachable!("unexpected MCP method: {method:?}"),
+            };
+            ResponseTemplate::new(/*status*/ 200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "result": result,
+            }))
+        })
+        .with_priority(/*p*/ 1)
+        .mount(&mcp_server)
+        .await;
+
+    let (release_first_response, first_response_gate) = oneshot::channel();
+    let (responses_server, _) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: sse(vec![ev_response_created("resp-1")]),
+            },
+            StreamingSseChunk {
+                gate: Some(first_response_gate),
+                body: sse(vec![ev_completed("resp-1")]),
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+        }],
+    ])
+    .await;
+
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    install_with_providers(
+        &mut extensions,
+        SkillProviders::new().with_cloud_provider(Arc::new(StepBoundCloudSkillProvider)),
+        |config: &Config| SkillsExtensionConfig {
+            include_instructions: config.include_skill_instructions,
+            max_context_tokens: config.skill_max_context_tokens,
+            bundled_skills_enabled: false,
+            cloud_skill_enabled: config.cloud_skill_enabled,
+            shadow_selection_enabled: false,
+        },
+    );
+    let mut builder = apps_enabled_builder(apps_server.chatgpt_base_url)
+        .with_exec_server_url("none")
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(|config| {
+            configure_catalog_test(config);
+            config.cloud_skill_enabled = true;
+            config
+                .features
+                .disable(Feature::EnableRequestCompression)
+                .expect("request compression should be configurable in tests");
+        });
+    let test = builder
+        .build_with_streaming_server(&responses_server)
+        .await?;
+
+    let submission = test
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Use [$calendar](app://calendar) and inspect the available skills.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let TurnInputSubmission::Started { turn_id } = submission else {
+        panic!("initial input should start a turn");
+    };
+    responses_server.wait_for_request_count(/*count*/ 1).await;
+
+    binding_b_active.store(true, Ordering::SeqCst);
+    let submission = test
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Use [$calendar](app://calendar) with the refreshed binding.".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    assert_eq!(submission, TurnInputSubmission::Steered { turn_id });
+    release_first_response
+        .send(())
+        .expect("first response should still be waiting");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let requests = responses_server.requests().await;
+    assert_eq!(requests.len(), 2);
+    let first_request: Value = serde_json::from_slice(&requests[0])?;
+    let second_request: Value = serde_json::from_slice(&requests[1])?;
+    assert!(first_request.to_string().contains(BINDING_A_CATALOG_MARKER));
+    assert!(!first_request.to_string().contains(BINDING_B_CATALOG_MARKER));
+    assert!(
+        second_request
+            .to_string()
+            .contains(BINDING_B_CATALOG_MARKER)
+    );
+
+    test.codex.shutdown_and_wait().await?;
+    responses_server.shutdown().await;
     Ok(())
 }
 
