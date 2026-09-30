@@ -681,6 +681,13 @@ mod tests {
                 .await
                 .unwrap_err();
         assert!(error.to_string().contains("policy owner is unavailable"));
+        let (auth_a, cache_key_a, _) = connector_auth_snapshot(&config_a).await?;
+        assert_eq!(
+            list_cached_all_connectors_with_auth(&config_b, &auth_a, cache_key_a, &[]).as_ref(),
+            Some(&fetched_a),
+            "an admitted directory cache lookup must not reselect ambient B",
+        );
+        // Fetching B replaces the single in-memory directory cache entry.
         let fetched_b = list_all_connectors_with_options(&config_b, false, &[]).await?;
         assert_eq!(
             fetched_a
@@ -696,12 +703,6 @@ mod tests {
                 .map(|app| app.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["managed-b"]
-        );
-        let (auth_a, cache_key_a, _) = connector_auth_snapshot(&config_a).await?;
-        assert_eq!(
-            list_cached_all_connectors_with_auth(&config_b, &auth_a, cache_key_a, &[]),
-            Some(fetched_a),
-            "an admitted directory cache lookup must not reselect ambient B",
         );
 
         let requests = server.await??;
