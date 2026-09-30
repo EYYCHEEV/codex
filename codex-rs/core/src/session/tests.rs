@@ -9520,6 +9520,7 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ None,
+            &turn_context.config.application_network_policy,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10091,6 +10092,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
     request_setup.transport_auth_binding =
         TransportAuthBinding::for_nonmanaged_auth(request_setup.effective_auth.as_ref());
     request_setup.credential_revision = None;
+    request_setup.application_network_policy = Some(codex_http_client::NetworkPolicy::unmanaged());
 
     let session = Arc::new(session);
     let initial_runtime = session
@@ -10100,6 +10102,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10111,6 +10114,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10136,6 +10140,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10155,6 +10160,7 @@ async fn external_chatgpt_refresh_rebuilds_mcp_manager_and_stable_auth_reuses_it
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10218,6 +10224,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
     request_setup.effective_auth = Some(initial_auth.clone());
     request_setup.transport_auth_binding = managed_binding.clone();
     request_setup.credential_revision = Some(11);
+    request_setup.application_network_policy = Some(codex_http_client::NetworkPolicy::unmanaged());
 
     let session = Arc::new(session);
     let initial_runtime = session
@@ -10227,6 +10234,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10242,6 +10250,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10258,6 +10267,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )
@@ -10277,6 +10287,7 @@ async fn managed_agent_identity_change_rebuilds_mcp_manager_but_state_only_chang
             /*selected_capability_roots*/ &[],
             /*executor_capability_discovery*/ None,
             /*request_setup*/ Some(&request_setup.clone()),
+            request_setup.admitted_network_policy()?,
             /*required_servers*/ &[],
             /*required_plugins*/ &HashSet::new(),
         )

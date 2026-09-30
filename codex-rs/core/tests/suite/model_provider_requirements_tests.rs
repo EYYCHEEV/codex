@@ -21,6 +21,64 @@ use test_case::test_case;
 use wiremock::MockServer;
 
 #[tokio::test]
+async fn runtime_snapshot_accepts_command_refresh_and_retains_application_policy() -> Result<()> {
+    let server = MockServer::start().await;
+    let home = tempdir()?;
+    let token_path = home.path().join("token.txt");
+    std::fs::write(&token_path, "initial-command-token")?;
+    let command_auth = codex_protocol::config_types::ModelProviderAuthInfo {
+        command: if cfg!(windows) { "cmd.exe" } else { "cat" }.into(),
+        args: if cfg!(windows) {
+            vec!["/D", "/C", "type", "token.txt"]
+        } else {
+            vec!["token.txt"]
+        }
+        .into_iter()
+        .map(Into::into)
+        .collect(),
+        timeout_ms: std::num::NonZeroU64::new(/*n*/ 5_000).unwrap(),
+        refresh_interval_ms: 1,
+        cwd: home.path().try_into()?,
+    };
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy();
+    assert!(controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Unrestricted,
+    ));
+    let configured_policy = policy.clone();
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider.auth = Some(command_auth.clone());
+            config.application_network_policy = configured_policy;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.codex.current_runtime_snapshot().await?;
+
+    std::fs::write(&token_path, "refreshed-command-token")?;
+    // Expire the command cache before capturing the runtime with new credentials.
+    tokio::time::sleep(std::time::Duration::from_millis(/*millis*/ 2)).await;
+    assert!(controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Restricted {
+            allowed_hosts: Default::default(),
+        },
+    ));
+    let snapshot = test.codex.current_runtime_snapshot().await?;
+    let endpoint = "https://blocked.example/".parse()?;
+    assert_eq!(
+        snapshot
+            .application_network_policy
+            .acquire(&endpoint)
+            .map(|_| ()),
+        Err(codex_http_client::NetworkPolicyDenied::Destination),
+        "the isolated command manager must not replace application restrictions",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn cloud_provider_auth_merges_before_parsing_and_resolves_cwd_from_codex_home() -> Result<()>
 {
     let home = tempdir()?;

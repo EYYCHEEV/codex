@@ -366,7 +366,16 @@ impl McpRuntime {
                         .is_host_owned_apps(CODEX_APPS_MCP_SERVER_NAME, registration.config())
                 });
         let event_stream_access_retained = hosted_event_server_available
-            && current.codex_apps_tools_cache_key.as_ref() == Some(&codex_apps_tools_cache_key);
+            && current.codex_apps_tools_cache_key.as_ref() == Some(&codex_apps_tools_cache_key)
+            && current
+                .connections
+                .event_stream_connection
+                .as_ref()
+                .zip(connections.event_stream_connection.as_ref())
+                .is_some_and(|(previous, next)| {
+                    previous.runtime_context.local_http_network_policy()
+                        == next.runtime_context.local_http_network_policy()
+                });
         let mut cancellation = self
             .event_stream_cancellation
             .lock()
@@ -817,6 +826,7 @@ pub struct McpRuntimeContext {
     ready_environments: HashMap<String, Arc<Environment>>,
     local_process_cwd: PathBuf,
     local_http_client: Arc<dyn HttpClient>,
+    local_http_network_policy: codex_http_client::NetworkPolicy,
 }
 
 /// Applies the local HTTP headers helper configured for an MCP server.
@@ -852,16 +862,32 @@ pub fn apply_http_headers_helper(
 
 impl McpRuntimeContext {
     pub fn new(environment_manager: Arc<EnvironmentManager>, local_process_cwd: PathBuf) -> Self {
-        let local_http_client = Arc::new(
-            RouteAwareHttpClient::new(environment_manager.http_client_factory().clone())
-                .with_tls_backend_fallback(),
-        );
+        let policy = environment_manager
+            .http_client_factory()
+            .network_policy()
+            .clone();
+        Self::new_with_network_policy(environment_manager, local_process_cwd, policy)
+    }
+
+    /// Captures the admitted host policy without rebinding it to a later account.
+    pub fn new_with_network_policy(
+        environment_manager: Arc<EnvironmentManager>,
+        local_process_cwd: PathBuf,
+        policy: codex_http_client::NetworkPolicy,
+    ) -> Self {
+        let factory = environment_manager
+            .http_client_factory()
+            .clone()
+            .with_network_policy(policy.clone());
+        let local_http_client =
+            Arc::new(RouteAwareHttpClient::new(factory).with_tls_backend_fallback());
         Self {
             environment_manager,
             environment_selections: Arc::default(),
             ready_environments: HashMap::new(),
             local_process_cwd,
             local_http_client,
+            local_http_network_policy: policy,
         }
     }
 
@@ -882,6 +908,10 @@ impl McpRuntimeContext {
 
     pub(crate) fn local_http_client(&self) -> Arc<dyn HttpClient> {
         Arc::clone(&self.local_http_client)
+    }
+
+    pub(crate) fn local_http_network_policy(&self) -> &codex_http_client::NetworkPolicy {
+        &self.local_http_network_policy
     }
 
     pub(crate) fn resolve_server_environment(
@@ -947,6 +977,10 @@ pub(crate) fn emit_duration(metric: &str, duration: Duration, tags: &[(&str, &st
         let _ = metrics.record_duration(metric, duration, tags);
     }
 }
+
+#[cfg(test)]
+#[path = "runtime_network_policy_tests.rs"]
+mod network_policy_tests;
 
 #[cfg(test)]
 mod tests {

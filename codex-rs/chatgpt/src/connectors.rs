@@ -43,15 +43,32 @@ async fn apps_enabled(config: &Config) -> anyhow::Result<bool> {
 
 async fn connector_auth_snapshot(
     config: &Config,
-) -> anyhow::Result<(CodexAuth, ConnectorDirectoryCacheKey)> {
+) -> anyhow::Result<(
+    CodexAuth,
+    ConnectorDirectoryCacheKey,
+    codex_http_client::NetworkPolicy,
+)> {
+    // This temporary manager does not own application account changes. Bind before
+    // loading credentials so an intervening owner change revokes this request.
+    let policy = config
+        .application_network_policy
+        .clone()
+        .for_current_account();
     let auth_manager =
         AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
     if let Some(snapshot) = auth_manager
         .managed_chatgpt_auth_snapshot(&codex_login::ManagedChatgptSelectionScope::default())
         .await?
     {
+        let policy = auth_manager
+            .network_policy_for_managed_snapshot(
+                &snapshot,
+                &config.chatgpt_base_url,
+                /*session*/ None,
+            )
+            .await?;
         let cache_key = connector_directory_cache_key_from_managed_snapshot(config, &snapshot);
-        return Ok((snapshot.auth, cache_key));
+        return Ok((snapshot.auth, cache_key, policy));
     }
     let auth = auth_manager
         .auth()
@@ -62,7 +79,7 @@ async fn connector_auth_snapshot(
         "ChatGPT connectors require Codex backend auth"
     );
     let cache_key = connector_directory_cache_key(config, &auth);
-    Ok((auth, cache_key))
+    Ok((auth, cache_key, policy))
 }
 
 pub async fn list_connectors(config: &Config) -> anyhow::Result<Vec<AppInfo>> {
@@ -96,7 +113,7 @@ pub async fn list_cached_all_connectors(
         return Some(Vec::new());
     }
 
-    let (auth, cache_key) = connector_auth_snapshot(config).await.ok()?;
+    let (auth, cache_key, _) = connector_auth_snapshot(config).await.ok()?;
     list_cached_all_connectors_with_auth(config, &auth, cache_key, plugin_apps)
 }
 
@@ -130,11 +147,14 @@ pub async fn list_all_connectors_with_options(
     if !apps_enabled(config).await? {
         return Ok(Vec::new());
     }
-    let (auth, cache_key) = connector_auth_snapshot(config).await?;
-    list_all_connectors_with_auth(config, &auth, cache_key, force_refetch, plugin_apps).await
+    let (auth, cache_key, policy) = connector_auth_snapshot(config).await?;
+    let mut config = config.clone();
+    config.application_network_policy = policy;
+    list_all_connectors_with_auth(&config, &auth, cache_key, force_refetch, plugin_apps).await
 }
 
 /// Lists connectors for an exact account snapshot without consulting ambient auth.
+/// The caller must capture `config.application_network_policy` with `auth`.
 pub async fn list_all_connectors_with_auth(
     config: &Config,
     auth: &CodexAuth,
@@ -646,6 +666,21 @@ mod tests {
 
         let fetched_a = list_all_connectors_with_options(&config_a, true, &[]).await?;
         let cached_a = list_all_connectors_with_options(&config_a, false, &[]).await?;
+        // Keep the backend live: using ambient policy here would send a second
+        // selected-account request, not merely fail to reach a stopped fixture.
+        let controller = codex_http_client::NetworkPolicyController::default();
+        let policy = controller.policy();
+        assert!(controller.publish(
+            policy.revision(),
+            codex_http_client::DestinationPolicy::Unrestricted,
+        ));
+        let mut unowned_config = config_a.clone();
+        unowned_config.application_network_policy = policy;
+        let error =
+            list_all_connectors_with_options(&unowned_config, /*force_refetch*/ true, &[])
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("policy owner is unavailable"));
         let fetched_b = list_all_connectors_with_options(&config_b, false, &[]).await?;
         assert_eq!(
             fetched_a
@@ -661,6 +696,12 @@ mod tests {
                 .map(|app| app.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["managed-b"]
+        );
+        let (auth_a, cache_key_a, _) = connector_auth_snapshot(&config_a).await?;
+        assert_eq!(
+            list_cached_all_connectors_with_auth(&config_b, &auth_a, cache_key_a, &[]),
+            Some(fetched_a),
+            "an admitted directory cache lookup must not reselect ambient B",
         );
 
         let requests = server.await??;

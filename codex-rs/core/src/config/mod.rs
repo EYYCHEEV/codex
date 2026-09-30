@@ -1823,6 +1823,7 @@ impl Config {
         }
 
         McpConfig {
+            application_network_policy: self.application_network_policy.clone(),
             chatgpt_base_url: self.chatgpt_base_url.clone(),
             apps_mcp_product_sku: self.apps_mcp_product_sku.clone(),
             requires_read_only_mcp_tools: false,

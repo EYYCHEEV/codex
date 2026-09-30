@@ -176,3 +176,118 @@ fn tool_catalog_cache_does_not_reuse_catalogs_across_credential_policies() {
     assert_eq!(context(&host_identity).current_tools(), Some(Vec::new()));
     assert_eq!(context(&executor_identity).current_tools(), None);
 }
+
+#[test]
+fn local_http_connection_reuse_tracks_policy_owner_and_account_not_allowlist_updates() {
+    let controller = codex_http_client::NetworkPolicyController::default();
+    let policy = controller.policy().for_current_account();
+    let manager = Arc::new(environment_manager_without_environments());
+    let context = |policy| {
+        McpRuntimeContext::new_with_network_policy(
+            Arc::clone(&manager),
+            std::env::temp_dir(),
+            policy,
+        )
+    };
+    let server = EffectiveMcpServer::from_host_config(
+        serde_json::from_value(serde_json::json!({
+            "url": "https://example.com/mcp",
+            "http_headers": {"Authorization": "Bearer test-canary"},
+        }))
+        .expect("local HTTP configuration"),
+    );
+    let original = connection_identity(&server, &context(policy.clone()));
+    let retained = connection_identity(&server, &context(policy.clone()));
+    assert!(original.has_same_connection_config(&retained));
+    assert!(original == retained);
+
+    assert!(controller.publish(
+        policy.revision(),
+        codex_http_client::DestinationPolicy::Restricted {
+            allowed_hosts: Default::default(),
+        },
+    ));
+    let updated = connection_identity(&server, &context(policy.clone()));
+    assert!(original.has_same_connection_config(&updated));
+    assert!(original == updated);
+
+    let other_owner = connection_identity(
+        &server,
+        &context(
+            codex_http_client::NetworkPolicyController::default()
+                .policy()
+                .for_current_account(),
+        ),
+    );
+    assert!(!original.has_same_connection_config(&other_owner));
+    assert!(original != other_owner);
+
+    policy.invalidate();
+    let next_account =
+        connection_identity(&server, &context(controller.policy().for_current_account()));
+    assert!(!original.has_same_connection_config(&next_account));
+    assert!(original != next_account);
+}
+
+#[tokio::test]
+async fn host_policy_changes_do_not_replace_stdio_or_executor_http_connections() {
+    let manager = Arc::new(
+        codex_exec_server::EnvironmentManager::create_for_tests(
+            Some("ws://127.0.0.1:8765".to_string()),
+            /*local_runtime_paths*/ None,
+        )
+        .await,
+    );
+    let contexts = [
+        codex_http_client::NetworkPolicyController::default(),
+        codex_http_client::NetworkPolicyController::default(),
+    ]
+    .map(|controller| {
+        McpRuntimeContext::new_with_network_policy(
+            Arc::clone(&manager),
+            std::env::temp_dir(),
+            controller.policy().for_current_account(),
+        )
+    });
+    for config in [
+        serde_json::json!({"command": "unused-stdio-server"}),
+        serde_json::json!({
+            "url": "https://example.com/mcp",
+            "environment_id": "remote",
+            "http_headers": {"Authorization": "Bearer test-canary"},
+        }),
+    ] {
+        let server = EffectiveMcpServer::from_host_config(
+            serde_json::from_value(config).expect("MCP configuration"),
+        );
+        if !server.config().is_local_environment() {
+            assert!(
+                contexts[0]
+                    .resolve_server_environment("docs", server.config())
+                    .expect("remote environment resolves")
+                    .expect("remote environment exists")
+                    .is_remote()
+            );
+        }
+        let identities = contexts.each_ref().map(|context| {
+            McpServerConnectionIdentity::new(
+                "docs",
+                &server,
+                /*host_plugin_root*/ None,
+                OAuthCredentialsStoreMode::default(),
+                AuthKeyringBackendKind::default(),
+                McpOAuthRefreshMode::Legacy,
+                &context.resolve_server_environment("docs", server.config()),
+                context,
+                /*runtime_auth_provider*/ None,
+                /*auth*/ None,
+                /*codex_apps_cache_identity*/ None,
+                ElicitationCapability::default(),
+                ClientMcpExtensions::default(),
+                /*previous_identity*/ None,
+            )
+        });
+        assert!(identities[0].has_same_connection_config(&identities[1]));
+        assert!(identities[0] == identities[1]);
+    }
+}

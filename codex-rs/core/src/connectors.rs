@@ -113,20 +113,25 @@ pub(crate) async fn list_tool_suggest_discoverable_tools_with_auth(
 pub async fn list_cached_accessible_connectors_from_mcp_tools(
     config: &Config,
 ) -> Option<Vec<AppInfo>> {
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
-            .await
-            .ok()?;
-    let (auth, cache_key, _) = threadless_connector_auth_and_cache_keys(config, &auth_manager)
+    let mut config = config.clone();
+    let (_, auth, cache_key, _) = capture_temporary_threadless_connector_auth(&mut config)
         .await
         .ok()?;
+    list_cached_accessible_connectors_with_auth(&config, auth.as_ref(), &cache_key)
+}
+
+pub fn list_cached_accessible_connectors_with_auth(
+    config: &Config,
+    auth: Option<&CodexAuth>,
+    cache_key: &ConnectorDirectoryCacheKey,
+) -> Option<Vec<AppInfo>> {
     if !config
         .features
-        .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
+        .apps_enabled_for_auth(auth.is_some_and(CodexAuth::uses_codex_backend))
     {
         return Some(Vec::new());
     }
-    read_cached_accessible_connectors(&cache_key)
+    read_cached_accessible_connectors(cache_key)
 }
 
 pub(crate) fn refresh_accessible_connectors_cache_from_mcp_tools(
@@ -187,18 +192,23 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_environment_manager(
     force_refetch: bool,
     environment_manager: Arc<EnvironmentManager>,
 ) -> anyhow::Result<AccessibleConnectorsStatus> {
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
+    let mut config = config.clone();
+    let (auth_manager, auth, cache_key, codex_apps_cache_key) =
+        capture_temporary_threadless_connector_auth(&mut config).await?;
     let plugins_manager = Arc::new(plugins_manager_for_config(
-        config,
+        &config,
         Arc::clone(&auth_manager),
     ));
     let mcp_manager = Arc::new(McpManager::new(plugins_manager));
-    list_accessible_connectors_from_mcp_tools_with_mcp_manager(
-        config,
+    list_accessible_connectors_from_mcp_tools_with_auth(
+        &config,
         force_refetch,
         environment_manager,
         mcp_manager,
+        auth_manager,
+        auth,
+        cache_key,
+        codex_apps_cache_key,
     )
     .await
 }
@@ -209,10 +219,32 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
     environment_manager: Arc<EnvironmentManager>,
     mcp_manager: Arc<McpManager>,
 ) -> anyhow::Result<AccessibleConnectorsStatus> {
-    let auth_manager =
-        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
-    let (auth, cache_key, codex_apps_cache_key) =
-        threadless_connector_auth_and_cache_keys(config, &auth_manager).await?;
+    let mut config = config.clone();
+    let (auth_manager, auth, cache_key, codex_apps_cache_key) =
+        capture_temporary_threadless_connector_auth(&mut config).await?;
+    list_accessible_connectors_from_mcp_tools_with_auth(
+        &config,
+        force_refetch,
+        environment_manager,
+        mcp_manager,
+        auth_manager,
+        auth,
+        cache_key,
+        codex_apps_cache_key,
+    )
+    .await
+}
+
+pub async fn list_accessible_connectors_from_mcp_tools_with_auth(
+    config: &Config,
+    force_refetch: bool,
+    environment_manager: Arc<EnvironmentManager>,
+    mcp_manager: Arc<McpManager>,
+    auth_manager: Arc<AuthManager>,
+    auth: Option<CodexAuth>,
+    cache_key: ConnectorDirectoryCacheKey,
+    codex_apps_cache_key: codex_mcp::CodexAppsToolsCacheKey,
+) -> anyhow::Result<AccessibleConnectorsStatus> {
     if !config
         .features
         .apps_enabled_for_auth(auth.as_ref().is_some_and(CodexAuth::uses_codex_backend))
@@ -243,8 +275,11 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
         });
     }
 
-    let runtime_context =
-        McpRuntimeContext::new(Arc::clone(&environment_manager), config.cwd.to_path_buf());
+    let runtime_context = McpRuntimeContext::new_with_network_policy(
+        environment_manager,
+        config.cwd.to_path_buf(),
+        config.application_network_policy.clone(),
+    );
 
     let cancel_token = CancellationToken::new();
     let codex_apps_auth_manager =
@@ -385,18 +420,51 @@ pub async fn list_accessible_connectors_from_mcp_runtime(
     })
 }
 
-async fn threadless_connector_auth_and_cache_keys(
-    config: &Config,
+async fn capture_temporary_threadless_connector_auth(
+    config: &mut Config,
+) -> anyhow::Result<(
+    Arc<AuthManager>,
+    Option<CodexAuth>,
+    ConnectorDirectoryCacheKey,
+    codex_mcp::CodexAppsToolsCacheKey,
+)> {
+    // A temporary manager does not own application account changes. Bind before
+    // credential loading and never rebind this authority after that await.
+    let policy = config
+        .application_network_policy
+        .clone()
+        .for_current_account();
+    config.application_network_policy = policy.clone();
+    let auth_manager =
+        AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false).await?;
+    let (auth, cache_key, tools_cache_key) =
+        capture_threadless_connector_auth(config, &auth_manager).await?;
+    if !tools_cache_key.is_managed() {
+        config.application_network_policy = policy;
+    }
+    Ok((auth_manager, auth, cache_key, tools_cache_key))
+}
+
+/// Captures credentials, both cache identities, and policy from one auth owner.
+pub async fn capture_threadless_connector_auth(
+    config: &mut Config,
     auth_manager: &AuthManager,
 ) -> anyhow::Result<(
     Option<CodexAuth>,
-    AccessibleConnectorsCacheKey,
+    ConnectorDirectoryCacheKey,
     codex_mcp::CodexAppsToolsCacheKey,
 )> {
     if let Some(snapshot) = auth_manager
         .managed_chatgpt_auth_snapshot(&codex_login::ManagedChatgptSelectionScope::default())
         .await?
     {
+        config.application_network_policy = auth_manager
+            .network_policy_for_managed_snapshot(
+                &snapshot,
+                &config.chatgpt_base_url,
+                /*session*/ None,
+            )
+            .await?;
         let accessible_cache_key = ConnectorDirectoryCacheKey::from_transport_binding(
             config.chatgpt_base_url.clone(),
             snapshot.transport.clone(),
@@ -412,7 +480,17 @@ async fn threadless_connector_auth_and_cache_keys(
         return Ok((Some(snapshot.auth), accessible_cache_key, tools_cache_key));
     }
 
-    let auth = auth_manager.auth().await;
+    let auth = match auth_manager.auth_with_http_client_factory().await {
+        Some((auth, factory)) => {
+            config.application_network_policy = factory.network_policy().clone();
+            Some(auth)
+        }
+        None => {
+            config.application_network_policy =
+                auth_manager.http_client_factory().network_policy().clone();
+            None
+        }
+    };
     let transport = codex_login::TransportAuthBinding::for_nonmanaged_auth(auth.as_ref());
     let is_workspace_account = auth.as_ref().is_some_and(CodexAuth::is_workspace_account);
     let accessible_cache_key = ConnectorDirectoryCacheKey::from_runtime_binding(
