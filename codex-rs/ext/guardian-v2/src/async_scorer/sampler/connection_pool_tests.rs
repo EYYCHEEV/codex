@@ -671,7 +671,7 @@ async fn classifier_http_cache_retains_the_selected_policy_owner() -> Result<()>
         responses::ev_output_text_delta("low"),
         responses::ev_completed("score"),
     ]);
-    let mock = responses::mount_sse_sequence(&http, vec![events; 3]).await;
+    let mock = responses::mount_sse_once(&http, events).await;
     let base_url = format!("{}/v1", http.uri());
     let mut config = sampler_config(base_url.clone());
     config.provider = create_model_provider(
@@ -703,8 +703,11 @@ async fn classifier_http_cache_retains_the_selected_policy_owner() -> Result<()>
         ))),
     ));
     assert_eq!(
-        mock.requests().len(),
-        1,
+        (
+            mock.requests().len(),
+            http.received_requests().await.unwrap().len()
+        ),
+        (1, 1),
         "a cached classifier client must not retain ambient or previous-owner permission"
     );
     Ok(())
