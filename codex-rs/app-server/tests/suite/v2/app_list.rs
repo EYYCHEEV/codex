@@ -1616,6 +1616,18 @@ async fn start_apps_server_with_delays_and_control_inner(
     );
 
     let router = Router::new()
+        .route(
+            "/api/codex/accounts/check",
+            get(|State(state): State<Arc<AppsServerState>>| async move {
+                Json(json!({
+                    "accounts": [{
+                        "id": state.expected_account_id,
+                        "workspace_backend_origin": "https://chatgpt.com",
+                        "account_routing_override": "NO_CONSTRAINT",
+                    }],
+                }))
+            }),
+        )
         .route("/connectors/directory/list", get(list_directory_connectors))
         .route(
             "/connectors/directory/list_workspace",
