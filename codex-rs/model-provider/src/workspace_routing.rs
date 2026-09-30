@@ -34,6 +34,32 @@ impl WorkspaceRoutingContext {
         self.session = Some(Arc::new(session));
         self
     }
+
+    /// Attaches the destination authority for the already-selected request without reselection.
+    pub async fn admit_network_policy(
+        &self,
+        setup: &mut crate::ProviderRequestSetup,
+        manager: Option<&codex_login::AuthManager>,
+        configured_policy: codex_http_client::NetworkPolicy,
+    ) -> codex_protocol::error::Result<()> {
+        let policy = match setup.managed_snapshot.as_ref() {
+            Some(snapshot) => {
+                manager
+                    .ok_or_else(|| {
+                        io::Error::other("selected account network policy owner is unavailable")
+                    })?
+                    .network_policy_for_managed_snapshot(
+                        snapshot,
+                        &self.chatgpt_base_url,
+                        self.session.clone(),
+                    )
+                    .await?
+            }
+            None => configured_policy,
+        };
+        setup.application_network_policy = Some(policy);
+        Ok(())
+    }
 }
 
 /// Changes only the origin of requests to the selected ChatGPT backend.

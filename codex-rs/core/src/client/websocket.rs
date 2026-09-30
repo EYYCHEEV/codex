@@ -68,6 +68,8 @@ impl WebsocketCloseDiagnosticContext {
 
 impl WebsocketSession {
     pub(super) fn reset(&mut self, reason: Option<&'static str>) {
+        // Per-socket backend metrics call a resend after reconnect "initial".
+        // Retain the loss reason across reconnects/turns until the next send.
         let continuation_reset_reason = self
             .continuation_reset_reason
             .or_else(|| self.last_request.as_ref().and(reason));
@@ -96,6 +98,7 @@ impl WebsocketSession {
         self.connection = None;
         self.endpoint = None;
         self.connection_key = None;
+        self.http_client_factory = None;
         self.responses_headers.clear();
         self.last_request = None;
         self.last_response_rx = None;
@@ -314,6 +317,9 @@ impl ModelClientSession {
             match self
                 .websocket_connection(WebsocketConnectParams {
                     session_telemetry,
+                    http_client_factory: self
+                        .client
+                        .http_client_factory_for_setup(&client_setup)?,
                     api_provider: client_setup.api_provider,
                     auth_revision: client_setup
                         .credential_revision
@@ -367,7 +373,7 @@ impl ModelClientSession {
                     return Err(err);
                 }
             }
-    
+
             // Measure the complete logical request, not only the websocket delta.
             if !warmup
                 && crate::guardian::is_basic_session_source(&self.client.state.session_source)
@@ -415,7 +421,7 @@ impl ModelClientSession {
                 // request rather than the compressed websocket delta.
                 inference_trace_attempt.record_started(&request);
             }
-    
+
             let (previous_response_id, mut incremental_items) = match continuation {
                 Some(WebsocketContinuation {
                     response_id, items, ..
@@ -478,7 +484,7 @@ impl ModelClientSession {
             if !previous_response_id_from_untraced_warmup {
                 inference_trace_attempt.record_started(&ws_request);
             }
-    
+
             let websocket_connection =
                 self.websocket_session.connection.as_ref().ok_or_else(|| {
                     self.client.state.provider.map_api_error(ApiError::Stream(

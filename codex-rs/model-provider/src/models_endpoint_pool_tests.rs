@@ -150,3 +150,87 @@ async fn managed_pool_catalog_follows_selected_account_and_invalidates_on_pool_c
             .models
     );
 }
+
+#[tokio::test]
+async fn independent_catalog_uses_selected_policy_at_the_owners_backend() {
+    struct PolicyOwner(std::sync::atomic::AtomicUsize);
+    impl codex_login::WorkspaceRoutingResolver for PolicyOwner {
+        fn resolve<'a>(
+            &'a self,
+            _request: codex_login::WorkspaceRoutingRequest<'a>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn Future<Output = std::io::Result<Option<codex_login::WorkspaceRouting>>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            Box::pin(async { panic!("catalog admission must not perform workspace routing") })
+        }
+
+        fn network_policy_for_managed_snapshot<'a>(
+            &'a self,
+            snapshot: &'a codex_login::ManagedChatgptAuthSnapshot,
+            backend: &'a str,
+            _session: Option<Arc<codex_login::WorkspaceRoutingSession>>,
+        ) -> std::pin::Pin<
+            Box<dyn Future<Output = std::io::Result<codex_http_client::NetworkPolicy>> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                assert_eq!(
+                    (snapshot.auth.get_account_id().as_deref(), backend),
+                    (
+                        Some("catalog-selected"),
+                        "https://policy.example/backend-api"
+                    ),
+                );
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let controller = codex_http_client::NetworkPolicyController::default();
+                let policy = controller.policy().for_current_account();
+                assert!(controller.publish(
+                    policy.revision(),
+                    codex_http_client::DestinationPolicy::Restricted {
+                        allowed_hosts: Default::default(),
+                    },
+                ));
+                Ok(policy)
+            })
+        }
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    let manager = AuthManager::shared(
+        home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        Some("https://policy.example/backend-api".into()),
+        AuthKeyringBackendKind::default(),
+        codex_login::test_support::transport_default_auth_route_config(),
+    )
+    .await;
+    manager
+        .upsert_managed_chatgpt_oauth(credentials("catalog-selected"))
+        .await
+        .unwrap();
+    let owner = Arc::new(PolicyOwner(std::sync::atomic::AtomicUsize::new(
+        /*v*/ 0,
+    )));
+    let resolver: Arc<dyn codex_login::WorkspaceRoutingResolver> = owner.clone();
+    manager.set_workspace_routing_resolver(Arc::downgrade(&resolver));
+    let server = MockServer::start().await;
+    let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    provider.model_catalog_url = Some(format!("{}/independent-catalog", server.uri()).into());
+    let endpoint =
+        OpenAiModelsEndpoint::new(provider, Some(manager), /*gateway_auth_manager*/ None);
+    let error = endpoint
+        .list_models(
+            "0.0.0",
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        )
+        .await
+        .expect_err("selected policy must deny catalog content");
+    assert!(error.to_string().contains("destination"));
+    assert_eq!(owner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(server.received_requests().await.unwrap().is_empty());
+}

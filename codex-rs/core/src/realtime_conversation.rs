@@ -688,10 +688,12 @@ impl RealtimeConversationManager {
             audio_rx,
         };
 
-        let client = RealtimeWebsocketClient::new(api_provider, http_client_factory);
-        let client = match realtime_sideband_base_url {
-            Some(base_url) => client.with_webrtc_sideband_base_url(base_url),
-            None => client,
+        let client = |http_client_factory| {
+            let client = RealtimeWebsocketClient::new(api_provider, http_client_factory);
+            match realtime_sideband_base_url {
+                Some(base_url) => client.with_webrtc_sideband_base_url(base_url),
+                None => client,
+            }
         };
         let transcript_tail_flush = RealtimeTranscriptTailFlush {
             enabled: flush_transcript_tail_on_session_end,
@@ -707,7 +709,7 @@ impl RealtimeConversationManager {
                 )
                 .await?;
             let task = spawn_webrtc_sideband_input_task(RealtimeWebrtcSidebandInputTask {
-                client,
+                client: client(call.http_client_factory),
                 session_config,
                 call_id: call.call_id,
                 sideband_headers: call.sideband_headers,
@@ -723,12 +725,14 @@ impl RealtimeConversationManager {
             });
             (task, Some(call.sdp))
         } else if let Some(call_id) = existing_call_id {
+            let (sideband_headers, http_client_factory) = model_client
+                .realtime_sideband_auth(extra_headers.unwrap_or_default())
+                .await?;
             let task = existing_call::attach(existing_call::ExistingCallAttachment {
-                client,
-                model_client,
+                client: client(http_client_factory),
                 session_config,
                 call_id,
-                extra_headers: extra_headers.unwrap_or_default(),
+                sideband_headers,
                 input_channels,
                 events_tx,
                 handoff_state: handoff.clone(),
@@ -741,7 +745,7 @@ impl RealtimeConversationManager {
             .await?;
             (task, None)
         } else {
-            let connection = client
+            let connection = client(http_client_factory)
                 .connect(
                     session_config,
                     extra_headers.unwrap_or_default(),

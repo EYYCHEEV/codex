@@ -410,11 +410,7 @@ impl ModelClientSession {
             tracing::Span::current().record("api.path", endpoint.path());
             let transport = self
                 .client
-                .build_api_transport(
-                    &client_setup.api_provider,
-                    endpoint.path(),
-                    client_setup.redirect_policy,
-                )
+                .build_api_transport(&client_setup, endpoint.path())
                 .await?;
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup
@@ -440,7 +436,7 @@ impl ModelClientSession {
                     model_info.use_responses_lite,
                 )
                 .await;
-    
+
             let mut request = self.client.build_responses_request(
                 prompt,
                 model_info,
@@ -513,7 +509,7 @@ impl ModelClientSession {
             )
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
             let stream_result = client.stream_request(request, options).await;
-    
+
             match stream_result {
                 Ok(stream) => {
                     let (stream, _) = map_response_stream(

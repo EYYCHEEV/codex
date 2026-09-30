@@ -366,6 +366,7 @@ struct WebsocketSession {
     endpoint: Option<ResponsesEndpoint>,
     responses_headers: ApiHeaderMap,
     connection_key: Option<ResponsesConnectionKey>,
+    http_client_factory: Option<HttpClientFactory>,
     /// Owner of the cached state, including before a connection is opened.
     auth_owner_generation: Option<u64>,
     binding: Option<TransportAuthBinding>,
@@ -471,6 +472,7 @@ pub(crate) struct RealtimeWebrtcCallStart {
     pub(crate) sdp: String,
     pub(crate) call_id: String,
     pub(crate) sideband_headers: ApiHeaderMap,
+    pub(crate) http_client_factory: HttpClientFactory,
 }
 
 /// Reuses the API-auth material that created the WebRTC call for the sideband WebSocket join.
@@ -704,7 +706,7 @@ impl ModelClient {
     ) -> Result<RealtimeWebrtcCallStart> {
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
-        let client_setup = self
+        let mut client_setup = self
             .current_client_setup_for_routing(
                 ClientRouting::ConfiguredProvider,
                 /*model*/ None,
@@ -718,29 +720,30 @@ impl ModelClient {
         sideband_headers.extend(sideband_websocket_auth_headers(
             client_setup.api_auth.as_ref(),
         ));
-        let api_provider = api_provider_override.unwrap_or(client_setup.api_provider);
+        if let Some(api_provider) = api_provider_override {
+            client_setup.api_provider = api_provider;
+        }
         let transport = self
-            .build_api_transport(
-                &api_provider,
-                REALTIME_CALLS_ENDPOINT,
-                client_setup.redirect_policy,
-            )
+            .build_api_transport(&client_setup, REALTIME_CALLS_ENDPOINT)
             .await?;
-        let response = ApiRealtimeCallClient::new(transport, api_provider, client_setup.api_auth)
-            .create_with_session_and_headers(sdp, session_config, extra_headers)
-            .await
-            .map_err(|error| self.state.provider.map_api_error(error))?;
+        let http_client_factory = self.http_client_factory_for_setup(&client_setup)?;
+        let response =
+            ApiRealtimeCallClient::new(transport, client_setup.api_provider, client_setup.api_auth)
+                .create_with_session_and_headers(sdp, session_config, extra_headers)
+                .await
+                .map_err(|error| self.state.provider.map_api_error(error))?;
         Ok(RealtimeWebrtcCallStart {
             sdp: response.sdp,
             call_id: response.call_id,
             sideband_headers,
+            http_client_factory,
         })
     }
 
-    pub(crate) async fn realtime_sideband_headers(
+    pub(crate) async fn realtime_sideband_auth(
         &self,
         mut extra_headers: ApiHeaderMap,
-    ) -> Result<ApiHeaderMap> {
+    ) -> Result<(ApiHeaderMap, HttpClientFactory)> {
         let client_setup = self
             .current_client_setup_for_routing(
                 ClientRouting::ConfiguredProvider,
@@ -754,7 +757,10 @@ impl ModelClient {
         extra_headers.extend(sideband_websocket_auth_headers(
             client_setup.api_auth.as_ref(),
         ));
-        Ok(extra_headers)
+        Ok((
+            extra_headers,
+            self.http_client_factory_for_setup(&client_setup)?,
+        ))
     }
 
     /// Builds memory summaries for each provided normalized raw memory.
@@ -817,11 +823,7 @@ impl ModelClient {
             let mut rate_limit_recorder =
                 ManagedRateLimitRecorder::for_setup(auth_manager.as_ref(), &client_setup);
             let transport = self
-                .build_api_transport(
-                    &client_setup.api_provider,
-                    MEMORIES_SUMMARIZE_ENDPOINT,
-                    client_setup.redirect_policy,
-                )
+                .build_api_transport(&client_setup, MEMORIES_SUMMARIZE_ENDPOINT)
                 .await?;
             let client =
                 ApiMemoriesClient::new(transport, client_setup.api_provider, client_setup.api_auth)
@@ -1148,10 +1150,7 @@ impl ModelClient {
         session_id: Option<&str>,
     ) -> Result<CurrentClientSetup> {
         self.current_client_setup_with_exclusions(
-            routing,
-            model,
-            session_id,
-            /*excluded_identities*/ None,
+            routing, model, session_id, /*excluded_identities*/ None,
         )
         .await
     }
@@ -1163,6 +1162,11 @@ impl ModelClient {
         session_id: Option<&str>,
         excluded_identities: Option<Arc<Vec<String>>>,
     ) -> Result<CurrentClientSetup> {
+        let configured_policy = self
+            .http_client_factory
+            .network_policy()
+            .clone()
+            .for_current_account();
         // Routing may refresh credentials. Retry once for the same owner, but never
         // send a request built for an account that changed during setup.
         let auth_manager = self.auth_manager().filter(|manager| {
@@ -1194,7 +1198,7 @@ impl ModelClient {
                     .await?;
             }
             let Some(manager) = auth_manager.as_ref() else {
-                return Ok(setup);
+                return self.admit_client_setup(setup, configured_policy).await;
             };
             let auth_change = *manager.auth_change_state_receiver().borrow();
             if setup.auth_owner_generation != Some(auth_change.owner_generation) {
@@ -1205,7 +1209,7 @@ impl ModelClient {
             // Inventory notifications include usage observations. Revalidate the selected
             // managed credentials and eligibility rather than rebuilding for every observation.
             if setup.auth_revision == Some(*manager.auth_change_receiver().borrow()) {
-                return Ok(setup);
+                return self.admit_client_setup(setup, configured_policy).await;
             }
             if let Some(snapshot) = setup.managed_snapshot.as_ref()
                 && manager.managed_chatgpt_auth_snapshot_is_current(
@@ -1218,7 +1222,7 @@ impl ModelClient {
                     },
                 )?
             {
-                return Ok(setup);
+                return self.admit_client_setup(setup, configured_policy).await;
             }
             if attempt == 1 {
                 return Err(CodexErr::Io(std::io::Error::other(
@@ -1227,6 +1231,22 @@ impl ModelClient {
             }
         }
         unreachable!("request setup always returns or fails within two attempts")
+    }
+
+    async fn admit_client_setup(
+        &self,
+        mut setup: CurrentClientSetup,
+        configured_policy: codex_http_client::NetworkPolicy,
+    ) -> Result<CurrentClientSetup> {
+        self.state
+            .workspace_routing
+            .admit_network_policy(
+                &mut setup,
+                self.auth_manager().as_deref(),
+                configured_policy,
+            )
+            .await?;
+        Ok(setup)
     }
 
     fn responses_headers(&self, auth: Option<&CodexAuth>, model: &str) -> ApiHeaderMap {
@@ -1277,8 +1297,8 @@ impl ModelClient {
             metadata.remove("guardian_credits_requested");
             metadata.remove("parent_response_id");
         }
-        let guardian_reviewer = endpoint == ResponsesEndpoint::Guardian
-            || is_guardian_reviewer(responses_headers);
+        let guardian_reviewer =
+            endpoint == ResponsesEndpoint::Guardian || is_guardian_reviewer(responses_headers);
         if guardian_reviewer && let Some(parent_response_id) = parent_response_id {
             metadata.get_or_insert_with(HashMap::new).insert(
                 "parent_response_id".to_owned(),
@@ -1322,23 +1342,33 @@ impl ModelClient {
         HeaderValue::from_str(&routing_hint).ok()
     }
 
+    fn http_client_factory_for_setup(
+        &self,
+        setup: &CurrentClientSetup,
+    ) -> Result<HttpClientFactory> {
+        Ok(self
+            .http_client_factory
+            .clone()
+            .with_network_policy(setup.admitted_network_policy()?.clone()))
+    }
+
     async fn build_api_transport(
         &self,
-        api_provider: &ApiProvider,
+        setup: &CurrentClientSetup,
         endpoint: &str,
-        redirect_policy: ClientRedirectPolicy,
     ) -> Result<ReqwestTransport> {
+        let api_provider = &setup.api_provider;
         let redirect_policy = if api_provider
             .headers
             .contains_key(codex_model_provider::ACCOUNT_ROUTING_HEADER)
         {
             ClientRedirectPolicy::Reject
         } else {
-            redirect_policy
+            setup.redirect_policy
         };
         let request_url = api_provider.url_for_path(endpoint);
         let client = create_client_for_route_async(
-            self.http_client_factory.clone(),
+            self.http_client_factory_for_setup(setup)?,
             request_url,
             ClientRouteClass::Api,
             redirect_policy,
@@ -1361,6 +1391,7 @@ impl ModelClient {
         session_telemetry: &SessionTelemetry,
         api_provider: codex_api::Provider,
         api_auth: SharedAuthProvider,
+        http_client_factory: &HttpClientFactory,
         responses_metadata: &CodexResponsesMetadata,
         auth_context: AuthRequestTelemetryContext,
         request_route_telemetry: RequestRouteTelemetry,
@@ -1382,7 +1413,7 @@ impl ModelClient {
             ApiWebSocketResponsesClient::new(api_provider, api_auth)
                 .with_endpoint(endpoint)
                 .connect(
-                    &self.http_client_factory,
+                    http_client_factory,
                     headers,
                     codex_login::default_client::default_headers(),
                     /*turn_state*/ None,
@@ -1684,7 +1715,10 @@ impl ModelClientSession {
             .request_recovery
             .prepare(auth_manager.as_ref(), client_setup);
         let auth_context = AuthRequestTelemetryContext::new(
-            client_setup.effective_auth.as_ref().map(CodexAuth::auth_mode),
+            client_setup
+                .effective_auth
+                .as_ref()
+                .map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
             client_setup.agent_identity_telemetry.clone(),
             self.request_recovery.pending_retry,
@@ -1700,13 +1734,12 @@ impl ModelClientSession {
             client_setup.effective_auth.as_ref(),
             &responses_headers,
             &model_info.slug,
-            model_info
-                .service_tier_for_request(service_tier)
-                .as_deref(),
+            model_info.service_tier_for_request(service_tier).as_deref(),
         );
         match self
             .websocket_connection(WebsocketConnectParams {
                 session_telemetry,
+                http_client_factory: self.client.http_client_factory_for_setup(client_setup)?,
                 api_provider: client_setup.api_provider.clone(),
                 auth_revision: client_setup
                     .credential_revision
@@ -1766,6 +1799,7 @@ impl ModelClientSession {
             api_provider,
             auth_revision,
             api_auth,
+            http_client_factory,
             auth_owner_generation,
             responses_metadata,
             auth_context,
@@ -1780,7 +1814,9 @@ impl ModelClientSession {
             Some(_)
                 if self.websocket_session.endpoint != Some(endpoint)
                     || self.websocket_session.responses_headers != *responses_headers
-                    || self.websocket_session.connection_key.as_ref() != Some(&connection_key) =>
+                    || self.websocket_session.connection_key.as_ref() != Some(&connection_key)
+                    || self.websocket_session.http_client_factory.as_ref()
+                        != Some(&http_client_factory) =>
             {
                 Some("other")
             }
@@ -1807,6 +1843,7 @@ impl ModelClientSession {
                     session_telemetry,
                     api_provider,
                     api_auth,
+                    &http_client_factory,
                     responses_metadata,
                     auth_context,
                     request_route_telemetry,
@@ -1829,6 +1866,7 @@ impl ModelClientSession {
             self.websocket_session.responses_headers = responses_headers.clone();
             self.websocket_session.auth_owner_generation = auth_owner_generation;
             self.websocket_session.connection_key = Some(connection_key);
+            self.websocket_session.http_client_factory = Some(http_client_factory);
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
         } else {
@@ -1858,7 +1896,6 @@ impl ModelClientSession {
             Compression::None
         }
     }
-
 
     /// Builds request and SSE telemetry for streaming API calls.
     fn build_streaming_telemetry(
@@ -2406,6 +2443,7 @@ struct WebsocketConnectParams<'a> {
     api_provider: codex_api::Provider,
     auth_revision: Option<u64>,
     api_auth: SharedAuthProvider,
+    http_client_factory: HttpClientFactory,
     auth_owner_generation: Option<u64>,
     binding: TransportAuthBinding,
     responses_metadata: &'a CodexResponsesMetadata,
