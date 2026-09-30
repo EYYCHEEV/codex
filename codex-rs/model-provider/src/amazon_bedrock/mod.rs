@@ -457,6 +457,7 @@ impl ModelProvider for AmazonBedrockModelProvider {
                     credential_revision: None,
                     account_state_revision: None,
                     selection_revision: None,
+                    application_network_policy: None,
                 });
             }
             let http_client_factory = self.http_client_factory.clone().with_network_policy(
@@ -494,6 +495,7 @@ impl ModelProvider for AmazonBedrockModelProvider {
                 account_state_revision: None,
                 selection_revision: None,
                 transport_auth_binding,
+                application_network_policy: None,
             })
         })
     }

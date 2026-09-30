@@ -25,6 +25,7 @@ use codex_api::SharedAuthProvider;
 use codex_api::TransportError;
 use codex_api::build_session_headers;
 use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
 use codex_login::CodexAuth;
 use codex_login::ManagedChatgptAuthSnapshot;
 use codex_login::TransportAuthBinding;
@@ -74,6 +75,7 @@ pub(super) struct ConnectionPool {
 struct HttpTransport {
     url: String,
     redirect_policy: ClientRedirectPolicy,
+    http_client_factory: HttpClientFactory,
     transport: OnceCell<ReqwestTransport>,
 }
 
@@ -88,6 +90,7 @@ pub(super) struct PooledConnection {
     pub(super) expires_at: Instant,
     auth_changes: Option<tokio::sync::watch::Receiver<u64>>,
     key: ResponsesConnectionKey,
+    http_client_factory: HttpClientFactory,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -101,6 +104,7 @@ struct ClientSetup {
     redirect_policy: ClientRedirectPolicy,
     key: ResponsesConnectionKey,
     auth_changes: Option<tokio::sync::watch::Receiver<u64>>,
+    http_client_factory: HttpClientFactory,
 }
 
 enum Connection {
@@ -206,6 +210,7 @@ impl ConnectionPool {
             redirect_policy,
             key,
             auth_changes,
+            http_client_factory,
         } = self.client_setup().await?;
         let connection = loop {
             let idle = self
@@ -218,6 +223,7 @@ impl ConnectionPool {
                     if connection.key == key
                         && connection.transport_auth_binding == transport_auth_binding
                         && connection.credential_revision == credential_revision
+                        && connection.http_client_factory == http_client_factory
                         && connection
                             .auth_changes
                             .as_ref()
@@ -263,12 +269,14 @@ impl ConnectionPool {
                     if let Some(transport) = cached.as_ref()
                         && transport.url == url
                         && transport.redirect_policy == redirect_policy
+                        && transport.http_client_factory == http_client_factory
                     {
                         Arc::clone(transport)
                     } else {
                         let transport = Arc::new(HttpTransport {
                             url: url.clone(),
                             redirect_policy,
+                            http_client_factory: http_client_factory.clone(),
                             transport: OnceCell::new(),
                         });
                         *cached = Some(Arc::clone(&transport));
@@ -279,7 +287,7 @@ impl ConnectionPool {
                     .transport
                     .get_or_try_init(|| async {
                         let client = create_client_for_route_async(
-                            self.config.http_client_factory.clone(),
+                            http_client_factory.clone(),
                             url,
                             ClientRouteClass::Api,
                             redirect_policy,
@@ -324,6 +332,12 @@ impl ConnectionPool {
     }
 
     async fn client_setup(&self) -> Result<ClientSetup, LunaSamplerError> {
+        let configured_policy = self
+            .config
+            .http_client_factory
+            .network_policy()
+            .clone()
+            .for_current_account();
         let mut auth_changes = self
             .config
             .provider
@@ -349,6 +363,15 @@ impl ConnectionPool {
             .route_request_setup(&self.config.workspace_routing, &mut setup)
             .await
             .map_err(LunaSamplerError::Provider)?;
+        self.config
+            .workspace_routing
+            .admit_network_policy(
+                &mut setup,
+                self.config.provider.auth_manager().as_deref(),
+                configured_policy,
+            )
+            .await
+            .map_err(LunaSamplerError::Provider)?;
         if auth_changes
             .as_ref()
             .is_some_and(|auth| auth.has_changed().unwrap_or(true))
@@ -359,6 +382,12 @@ impl ConnectionPool {
         }
         let request_kind = self.responses_request_kind(&setup);
         let key = ResponsesConnectionKey::new(&setup.api_provider, revision);
+        let http_client_factory = self.config.http_client_factory.clone().with_network_policy(
+            setup
+                .admitted_network_policy()
+                .map_err(LunaSamplerError::Provider)?
+                .clone(),
+        );
         Ok(ClientSetup {
             provider: setup.api_provider,
             auth: setup.api_auth,
@@ -369,6 +398,7 @@ impl ConnectionPool {
             redirect_policy: setup.redirect_policy,
             key,
             auth_changes,
+            http_client_factory,
         })
     }
 
@@ -447,6 +477,7 @@ impl ConnectionPool {
             redirect_policy: _,
             key,
             auth_changes,
+            http_client_factory,
         } = self.client_setup().await?;
         let thread_id = ThreadId::new().to_string();
         let mut headers = self.headers(&thread_id, request_kind)?;
@@ -459,7 +490,7 @@ impl ConnectionPool {
         let endpoint = Self::endpoint_for(request_kind);
         let client = ResponsesWebsocketClient::new(provider, auth).with_endpoint(endpoint);
         let connect = client.connect(
-            &self.config.http_client_factory,
+            &http_client_factory,
             headers,
             default_headers(),
             /*turn_state*/ None,
@@ -502,6 +533,7 @@ impl ConnectionPool {
             expires_at: Instant::now() + MAX_WEBSOCKET_AGE,
             auth_changes,
             key,
+            http_client_factory,
             _permit: permit,
         })
     }

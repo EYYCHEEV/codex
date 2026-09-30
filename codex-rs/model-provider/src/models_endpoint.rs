@@ -165,6 +165,10 @@ impl OpenAiModelsEndpoint {
         client_version: &str,
         http_client_factory: HttpClientFactory,
     ) -> CoreResult<ModelsEndpointResponse> {
+        let configured_policy = http_client_factory
+            .network_policy()
+            .clone()
+            .for_current_account();
         let mut setup = self.request_setup().await?;
         let metric_auth_mode = if self.has_provider_api_key()
             || setup
@@ -190,6 +194,20 @@ impl OpenAiModelsEndpoint {
         });
         let (models, etag, identity) = timeout(MODELS_FETCH_TIMEOUT, async {
             loop {
+                setup.application_network_policy = Some(match setup.managed_snapshot.as_ref() {
+                    Some(snapshot) => {
+                        self.auth_manager
+                            .as_ref()
+                            .ok_or_else(|| {
+                                std::io::Error::other(
+                                    "selected account network policy owner is unavailable",
+                                )
+                            })?
+                            .network_policy_for_managed_snapshot_at_configured_backend(snapshot)
+                            .await?
+                    }
+                    None => configured_policy.clone(),
+                });
                 let identity = crate::models_identity::identity(
                     &self.provider_info,
                     setup.effective_auth.as_ref(),
@@ -240,7 +258,12 @@ impl OpenAiModelsEndpoint {
                     });
                 let transport = self
                     .transport_builder
-                    .build(http_client_factory.clone(), request_url.clone())
+                    .build(
+                        http_client_factory
+                            .clone()
+                            .with_network_policy(setup.admitted_network_policy()?.clone()),
+                        request_url.clone(),
+                    )
                     .await?;
                 let client = ModelsClient::new(transport, api_provider, resolved.auth)
                     .with_telemetry(Some(request_telemetry));

@@ -10,6 +10,9 @@ mod model_quota_controls_tests;
 #[path = "client_workspace_cap_tests.rs"]
 mod workspace_cap_tests;
 
+#[path = "client_selected_policy_tests.rs"]
+mod selected_policy;
+
 use super::AuthRequestTelemetryContext;
 use super::MAX_WEBSOCKET_DIAGNOSTIC_TEXT_BYTES;
 use super::ModelClient;
@@ -639,7 +642,7 @@ async fn workspace_routed_http_rejects_redirects_without_a_routing_header() {
         // Exercise the resolved route's redirect policy against loopback HTTP servers.
         setup.api_provider.base_url = origin.uri();
         let transport = client
-            .build_api_transport(&setup.api_provider, "/responses", setup.redirect_policy)
+            .build_api_transport(&setup, "/responses")
             .await
             .unwrap();
         let request = setup
@@ -2522,8 +2525,8 @@ async fn existing_call_sideband_headers_include_attestation() {
     let (model_client, attestation_calls) =
         model_client_with_counting_attestation(/*include_attestation*/ true);
 
-    let headers = model_client
-        .realtime_sideband_headers(http::HeaderMap::new())
+    let (headers, _) = model_client
+        .realtime_sideband_auth(http::HeaderMap::new())
         .await
         .expect("existing call sideband headers should build");
 

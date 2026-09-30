@@ -603,3 +603,109 @@ async fn http_cache_preserves_no_constraint_redirect_policy_and_configured_heade
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn classifier_http_cache_retains_the_selected_policy_owner() -> Result<()> {
+    use codex_http_client::DestinationPolicy;
+    use codex_http_client::NetworkPolicy;
+    use codex_http_client::NetworkPolicyController;
+    use codex_http_client::NetworkPolicyDenied;
+
+    struct PolicyOwner(tokio::sync::Mutex<NetworkPolicy>);
+    impl WorkspaceRoutingResolver for PolicyOwner {
+        fn resolve(
+            &self,
+            _request: WorkspaceRoutingRequest,
+        ) -> ModelProviderFuture<'_, std::io::Result<Option<WorkspaceRouting>>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn network_policy_for_managed_snapshot<'a>(
+            &'a self,
+            snapshot: &'a codex_login::ManagedChatgptAuthSnapshot,
+            _backend: &'a str,
+            _session: Option<Arc<codex_login::WorkspaceRoutingSession>>,
+        ) -> ModelProviderFuture<'a, std::io::Result<NetworkPolicy>> {
+            Box::pin(async move {
+                assert_eq!(snapshot.auth.get_account_id().as_deref(), Some("selected"));
+                Ok(self.0.lock().await.clone())
+            })
+        }
+    }
+
+    let home = tempfile::tempdir()?;
+    let auth = AuthManager::shared(
+        home.path().to_path_buf(),
+        /*enable_codex_api_key_env*/ false,
+        codex_login::AuthCredentialsStoreMode::File,
+        /*forced_chatgpt_workspace_id*/ None,
+        /*chatgpt_base_url*/ None,
+        codex_login::AuthKeyringBackendKind::default(),
+        codex_login::test_support::transport_default_auth_route_config(),
+    )
+    .await;
+    auth.upsert_managed_chatgpt_oauth(codex_login::ManagedChatgptOauthCredentials {
+        tokens: codex_login::TokenData {
+            id_token: codex_login::token_data::IdTokenInfo {
+                raw_jwt: "e30.e30.signature".into(),
+                ..Default::default()
+            },
+            access_token: "selected-access".into(),
+            refresh_token: "selected-refresh".into(),
+            account_id: Some("selected".into()),
+        },
+        last_refresh: "2099-01-01T00:00:00Z".parse()?,
+        oauth_api_key: None,
+    })
+    .await?;
+    let first = NetworkPolicyController::default();
+    assert!(first.publish(first.policy().revision(), DestinationPolicy::Unrestricted));
+    let owner = Arc::new(PolicyOwner(tokio::sync::Mutex::new(
+        first.policy().for_current_account(),
+    )));
+    let resolver: Arc<dyn WorkspaceRoutingResolver> = owner.clone();
+    auth.set_workspace_routing_resolver(Arc::downgrade(&resolver));
+    let http = responses::start_mock_server().await;
+    let events = responses::sse(vec![
+        responses::ev_response_created("score"),
+        responses::ev_output_text_delta("low"),
+        responses::ev_completed("score"),
+    ]);
+    let mock = responses::mount_sse_sequence(&http, vec![events; 3]).await;
+    let base_url = format!("{}/v1", http.uri());
+    let mut config = sampler_config(base_url.clone());
+    config.provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(Some(base_url)),
+        Some(auth),
+    );
+    let sampler = LunaSampler::new(config);
+    // Keep this regression on the normal HTTP fallback path.
+    *sampler
+        .connections
+        .retry_after
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(Instant::now() + CONNECT_COOLDOWN);
+    assert_eq!(sampler.sample(sample_request("allowed")).await?, "low");
+
+    let replacement = NetworkPolicyController::default();
+    assert!(replacement.publish(
+        replacement.policy().revision(),
+        DestinationPolicy::Restricted {
+            allowed_hosts: Default::default()
+        },
+    ));
+    *owner.0.lock().await = replacement.policy().for_current_account();
+    assert!(matches!(
+        sampler.sample(sample_request("denied")).await,
+        Err(LunaSamplerError::Api(ApiError::Transport(
+            TransportError::Policy(NetworkPolicyDenied::Destination,)
+        ))),
+    ));
+    assert_eq!(
+        mock.requests().len(),
+        1,
+        "a cached classifier client must not retain ambient or previous-owner permission"
+    );
+    Ok(())
+}

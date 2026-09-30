@@ -125,6 +125,20 @@ pub struct ProviderRequestSetup {
     pub account_state_revision: Option<u64>,
     pub selection_revision: Option<u64>,
     pub transport_auth_binding: TransportAuthBinding,
+    /// Filled by request admission before building a model or MCP transport.
+    pub application_network_policy: Option<codex_http_client::NetworkPolicy>,
+}
+
+impl ProviderRequestSetup {
+    pub fn admitted_network_policy(
+        &self,
+    ) -> codex_protocol::error::Result<&codex_http_client::NetworkPolicy> {
+        self.application_network_policy.as_ref().ok_or_else(|| {
+            codex_protocol::error::CodexErr::InvalidRequest(
+                "request network policy has not been admitted".to_string(),
+            )
+        })
+    }
 }
 
 /// Error returned when a provider cannot construct its app-visible account state.
@@ -571,6 +585,7 @@ pub(crate) async fn resolve_provider_request_setup(
             .map(|snapshot| snapshot.selection_revision),
         transport_auth_binding,
         managed_snapshot,
+        application_network_policy: None,
     })
 }
 
