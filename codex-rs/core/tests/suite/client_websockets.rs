@@ -780,7 +780,7 @@ async fn responses_websocket_request_prewarm_reuses_connection() {
     let request_setup = client_session
         .current_client_setup(
             Some(&harness.model_info.slug),
-            Some(responses_metadata.session_id.as_str()),
+            Some(&harness.session_id.to_string()),
         )
         .await
         .expect("current client setup");
@@ -884,7 +884,7 @@ async fn responses_websocket_request_prewarm_uses_caller_supplied_metadata() {
     let request_setup = client_session
         .current_client_setup(
             Some(&harness.model_info.slug),
-            Some(responses_metadata.session_id.as_str()),
+            Some(&harness.session_id.to_string()),
         )
         .await
         .expect("current client setup");
@@ -936,7 +936,7 @@ async fn responses_websocket_request_prewarm_traces_logical_request() {
     let request_setup = client_session
         .current_client_setup(
             Some(&harness.model_info.slug),
-            Some(prewarm_responses_metadata.session_id.as_str()),
+            Some(&harness.session_id.to_string()),
         )
         .await
         .expect("current client setup");
@@ -1311,7 +1311,7 @@ async fn responses_websocket_prewarm_reuses_advisory_model_and_tier_routing_hint
     let mut client_session = harness.client.new_session();
     let prompt = prompt_with_input(vec![message_item("hello")]);
     let responses_metadata = prewarm_metadata(&harness, /*turn_id*/ None);
-    let request_setup = client_session
+    let _request_setup = client_session
         .current_client_setup(Some(&model_info.slug), None)
         .await
         .expect("current client setup");
@@ -1340,7 +1340,7 @@ async fn responses_websocket_prewarm_reuses_advisory_model_and_tier_routing_hint
     let request_setup = client_session
         .current_client_setup(
             Some(&model_info.slug),
-            Some(responses_metadata.session_id.as_str()),
+            Some(&harness.session_id.to_string()),
         )
         .await
         .expect("current client setup");

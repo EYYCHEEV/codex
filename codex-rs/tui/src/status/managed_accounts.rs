@@ -3,8 +3,8 @@ use ratatui::prelude::*;
 use ratatui::style::Stylize;
 
 use super::account::ManagedAccountsState;
-use super::format::truncate_line_to_width;
 use super::helpers::format_tokens_compact;
+use crate::line_truncation::truncate_line_to_width;
 
 pub(super) fn managed_account_lines(
     accounts: &ManagedAccountsState,

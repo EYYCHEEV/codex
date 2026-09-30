@@ -1270,6 +1270,7 @@ client_id = "thread-runtime-test-client"
         .send_list_mcp_server_status_request(ListMcpServerStatusParams {
             cursor: None,
             limit: None,
+            server_name: None,
             detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
             thread_id: Some(thread.id.clone()),
         })
@@ -1294,6 +1295,7 @@ client_id = "thread-runtime-test-client"
         .send_list_mcp_server_status_request(ListMcpServerStatusParams {
             cursor: None,
             limit: None,
+            server_name: None,
             detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
             thread_id: None,
         })

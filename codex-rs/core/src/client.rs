@@ -457,21 +457,6 @@ fn response_items_equal_ignoring_internal_metadata(
     previous == current
 }
 
-impl WebsocketSession {
-    fn reset(&mut self, reason: Option<&'static str>) {
-        // Per-socket backend metrics call a resend after reconnect "initial".
-        // Retain the loss reason across reconnects/turns until the next send.
-        let continuation_reset_reason = self
-            .continuation_reset_reason
-            .or_else(|| self.last_request.as_ref().and(reason));
-        *self = Self {
-            auth_owner_generation: self.auth_owner_generation,
-            continuation_reset_reason,
-            ..Default::default()
-        };
-    }
-}
-
 enum WebsocketStreamOutcome {
     Stream(ResponseStream),
     FallbackToHttp,

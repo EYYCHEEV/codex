@@ -189,7 +189,10 @@ impl CatalogRequestProcessor {
         {
             // Refreshing credentials can contact the gateway before the catalog's own check.
             self.config_manager
-                .check_thread_model_provider(&self.config)
+                .check_thread_model_provider(
+                    &self.config,
+                    crate::config_manager::ProviderPolicyCheck::Current,
+                )
                 .await
                 .map_err(|err| config_load_error(&err))?;
             if gateway.resolve_access_token().await.is_err() {

@@ -274,6 +274,7 @@ async fn reconstruction_bounds_checkpoint_and_suffix_as_one_history() {
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         }),
         RolloutItem::ResponseItem(matching_output),
         RolloutItem::ResponseItem(safe_suffix.clone()),

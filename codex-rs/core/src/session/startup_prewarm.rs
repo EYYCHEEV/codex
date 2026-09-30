@@ -17,6 +17,7 @@ use tracing::instrument;
 use tracing::trace_span;
 use tracing::warn;
 
+use crate::agent::api::AgentControl;
 use crate::client::ModelClientSession;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::INITIAL_SUBMIT_ID;

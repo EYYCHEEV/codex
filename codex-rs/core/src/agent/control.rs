@@ -35,7 +35,6 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HasLegacyEvent;
@@ -374,8 +373,6 @@ impl LocalAgentControl {
         thread.mcp_startup_snapshot().await
     }
 
-
-
     pub(crate) async fn list_agents(
         &self,
         current_session_source: &SessionSource,
@@ -414,6 +411,7 @@ impl LocalAgentControl {
             && let Some(root_thread_id) = self.runtime.registry.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
+            let config = root_thread.config_snapshot().await;
             agents.push(LiveAgent {
                 thread_id: root_thread_id,
                 metadata: AgentMetadata {
@@ -422,8 +420,8 @@ impl LocalAgentControl {
                     ..Default::default()
                 },
                 status: root_thread.agent_status().await,
-                model: root_thread.config_snapshot().await.model,
-                reasoning_effort: root_thread.config_snapshot().await.reasoning_effort,
+                model: config.model,
+                reasoning_effort: config.reasoning_effort,
             });
         }
 
@@ -441,12 +439,13 @@ impl LocalAgentControl {
             let Ok(thread) = state.get_thread(thread_id).await else {
                 continue;
             };
+            let config = thread.config_snapshot().await;
             agents.push(LiveAgent {
                 thread_id,
                 metadata,
                 status: thread.agent_status().await,
-                model: thread.config_snapshot().await.model,
-                reasoning_effort: thread.config_snapshot().await.reasoning_effort,
+                model: config.model,
+                reasoning_effort: config.reasoning_effort,
             });
         }
 

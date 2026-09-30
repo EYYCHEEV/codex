@@ -258,8 +258,8 @@ async fn handle_spawn_agent(
         .agent_role
         .clone()
         .unwrap_or_else(|| DEFAULT_ROLE_NAME.to_string());
-    let model = agent_snapshot.model;
-    let reasoning_effort = agent_snapshot.reasoning_effort;
+    let model = agent_snapshot.model.clone();
+    let reasoning_effort = agent_snapshot.reasoning_effort.clone();
     emit_sub_agent_activity(
         &session,
         turn,

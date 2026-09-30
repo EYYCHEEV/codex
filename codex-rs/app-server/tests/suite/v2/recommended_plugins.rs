@@ -146,6 +146,7 @@ async fn recommended_plugins_after_external_login(
         payload,
         AccountLoginCompletedNotification {
             login_id: None,
+            managed_account_id: None,
             success: true,
             error: None,
             onboarding_entrypoint: None,

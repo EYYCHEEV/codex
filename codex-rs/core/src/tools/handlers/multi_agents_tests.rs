@@ -1276,7 +1276,7 @@ model_reasoning_effort = "medium"
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
+    set_agent_control(&mut session, manager.agent_control());
     session.thread_id = root.thread_id;
     let parent_provider_id = turn.config.model_provider_id.clone();
 
@@ -1372,7 +1372,7 @@ async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
     root.thread.session.new_default_turn().await;
     {
         let session_mut = Arc::get_mut(&mut session).expect("session should be uniquely owned");
-        session_mut.services.agent_control = manager.agent_control();
+        set_agent_control(session_mut, manager.agent_control());
         session_mut.thread_id = root.thread_id;
     }
 
@@ -1387,7 +1387,9 @@ async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
             environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
             required: false,
+            startup_readiness: Default::default(),
             supports_parallel_tool_calls: false,
+            tool_input_schema_max_bytes: None,
             omit_tools_from: None,
             disabled_reason: None,
             startup_timeout_sec: Some(startup_timeout_sec),
@@ -1497,19 +1499,23 @@ async fn multi_agent_v2_real_child_exposes_effective_route_and_mcp_lifecycle() {
         ))
         .await
         .expect("interrupt_agent should interrupt MCP startup");
-    let interrupted =
-        wait_for_mcp_startup_snapshot(&session.services.agent_control, worker_id, |mcp| {
-            matches!(
-                mcp.statuses.get("slow"),
-                Some(codex_protocol::protocol::McpStartupStatus::Cancelled)
-            ) && mcp.complete.as_ref().is_some_and(|complete| {
-                complete.cancelled == vec!["slow"] && complete.ready == vec!["ready"]
-            }) && mcp.statuses.values().all(|status| {
-                !matches!(status, codex_protocol::protocol::McpStartupStatus::Starting)
-            })
-        })
-        .await;
-    let _ = wait_for_agent_status(&session.services.agent_control, worker_id, |status| {
+    let local_agent_control = session
+        .services
+        .local_agent_runtime
+        .control(session.session_id());
+    let interrupted = wait_for_mcp_startup_snapshot(&local_agent_control, worker_id, |mcp| {
+        matches!(
+            mcp.statuses.get("slow"),
+            Some(codex_protocol::protocol::McpStartupStatus::Cancelled)
+        ) && mcp.complete.as_ref().is_some_and(|complete| {
+            complete.cancelled == vec!["slow"] && complete.ready == vec!["ready"]
+        }) && mcp
+            .statuses
+            .values()
+            .all(|status| !matches!(status, codex_protocol::protocol::McpStartupStatus::Starting))
+    })
+    .await;
+    let _ = wait_for_agent_status(&local_agent_control, worker_id, |status| {
         matches!(status, AgentStatus::Interrupted)
     })
     .await;
@@ -1563,7 +1569,7 @@ model_reasoning_effort = "unsupported"
     }
     root.thread.session.new_default_turn().await;
     let session_mut = Arc::get_mut(&mut session).expect("session should be uniquely owned");
-    session_mut.services.agent_control = manager.agent_control();
+    set_agent_control(session_mut, manager.agent_control());
     session_mut.thread_id = root.thread_id;
     let turn = Arc::new(turn);
 
@@ -1652,7 +1658,7 @@ model_reasoning_effort = "medium"
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
+    set_agent_control(&mut session, manager.agent_control());
     session.thread_id = root.thread_id;
     let thread_ids_before = manager.list_thread_ids().await;
 
@@ -1699,7 +1705,7 @@ async fn multi_agent_v2_configured_only_rejects_hidden_built_in_before_reservati
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
+    set_agent_control(&mut session, manager.agent_control());
     session.thread_id = root.thread_id;
     let thread_ids_before = manager.list_thread_ids().await;
 
@@ -2338,17 +2344,18 @@ async fn multi_agent_v2_list_agents_exposes_child_mcp_startup_snapshot() {
         .start_thread(StartThreadOptions::new((*turn.config).clone()))
         .await
         .expect("root thread should start");
-    session.services.agent_control = manager.agent_control();
+    set_agent_control(&mut session, manager.agent_control());
     session.thread_id = root.thread_id;
 
     let worker_path = AgentPath::from_string("/root/worker".to_string()).expect("path");
     session
         .services
-        .agent_control
+        .local_agent_runtime
         .register_session_root(root.thread_id, None);
     session
         .services
-        .agent_control
+        .local_agent_runtime
+        .control(session.session_id())
         .register_agent_metadata_for_tests(root.thread_id, worker_path);
     root.thread
         .session
@@ -4337,10 +4344,10 @@ fn wait_agent_result_deserializes_without_mcp_startup() {
 async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible() {
     let (mut session, turn, rx_event) = make_session_and_context_with_rx().await;
     let manager = thread_manager();
-    Arc::get_mut(&mut session)
-        .expect("session should not have additional references")
-        .services
-        .agent_control = manager.agent_control();
+    set_agent_control(
+        Arc::get_mut(&mut session).expect("session should not have additional references"),
+        manager.agent_control(),
+    );
     let config = turn.config.as_ref().clone();
     let finished_thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))
@@ -4436,14 +4443,18 @@ async fn wait_agent_multi_target_latest_status_keeps_unresolved_siblings_visible
 async fn wait_agent_timeout_keeps_final_status_empty_and_exposes_mcp_startup() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+    set_agent_control(&mut session, manager.agent_control());
     let config = turn.config.as_ref().clone();
     let thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start thread");
     let agent_id = thread.thread_id;
-    wait_for_mcp_startup_snapshot(&session.services.agent_control, agent_id, |snapshot| {
+    let local_agent_control = session
+        .services
+        .local_agent_runtime
+        .control(session.session_id());
+    wait_for_mcp_startup_snapshot(&local_agent_control, agent_id, |snapshot| {
         snapshot.complete.is_some()
     })
     .await;
@@ -4580,7 +4591,7 @@ async fn wait_agent_clamps_short_timeouts_to_minimum() {
 async fn wait_agent_clamps_long_timeouts_to_maximum() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+    set_agent_control(&mut session, manager.agent_control());
     let config = turn.config.as_ref().clone();
     let thread = manager
         .start_thread(StartThreadOptions::new(config.clone()))

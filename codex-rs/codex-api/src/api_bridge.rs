@@ -28,6 +28,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
         ApiError::Transport(_)
         | ApiError::Api { .. }
         | ApiError::Stream(_)
+        | ApiError::StreamDisconnected(_)
         | ApiError::WebsocketClosed(_)
         | ApiError::ContextWindowExceeded
         | ApiError::QuotaExceeded

@@ -564,7 +564,11 @@ impl CodexThread {
     ) -> Option<Vec<TurnEnvironmentSelection>> {
         let active = self.session.active_turn.lock().await;
         let task = active.as_ref()?.task.as_ref()?;
-        Some(task.turn_context.initial_environments.all_selections())
+        Some(
+            task.turn_context
+                .initial_environments
+                .configuration_selections(),
+        )
     }
 
     /// Returns the named running turn's current selections, including environments that are

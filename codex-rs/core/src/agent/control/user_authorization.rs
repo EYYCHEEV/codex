@@ -91,39 +91,35 @@ impl LocalAgentControl {
         let retained_context = root_history.retained_context();
         let reconciled = ReconciledRetainedContext::new(
             Some(retained_context),
-            root_logical_envelopes
-                .iter()
-                .filter_map(|envelope| {
-                    let item = &envelope.item;
-                    let Some(TurnItem::UserMessage(message)) = parse_turn_item(item) else {
-                        return None;
-                    };
-                    let text = message.message();
-                    if is_summary_message(&text)
-                        || text.trim_start().starts_with("<user_action>")
-                        || is_contextual_user_fragment(&ContentItem::InputText {
-                            text: text.clone(),
-                        })
-                    {
-                        return None;
-                    }
-                    let order = envelope
-                        .metadata
-                        .as_ref()
-                        .filter(|metadata| !metadata.inherited_user_message)
-                        .and_then(|metadata| metadata.user_input_order);
-                    Some((
-                        order,
-                        RetainedUserMessage {
-                            phase: None,
-                            origin: codex_history::UserInputOrigin::from_message(item),
-                            turn_id: item.turn_id().unwrap_or_default().to_owned(),
-                            message_id: item.id().map(|id| id.as_str().to_owned()),
-                            text,
-                            complete: false,
-                        },
-                    ))
-                }),
+            root_logical_envelopes.iter().filter_map(|envelope| {
+                let item = &envelope.item;
+                let Some(TurnItem::UserMessage(message)) = parse_turn_item(item) else {
+                    return None;
+                };
+                let text = message.message();
+                if is_summary_message(&text)
+                    || text.trim_start().starts_with("<user_action>")
+                    || is_contextual_user_fragment(&ContentItem::InputText { text: text.clone() })
+                {
+                    return None;
+                }
+                let order = envelope
+                    .metadata
+                    .as_ref()
+                    .filter(|metadata| !metadata.inherited_user_message)
+                    .and_then(|metadata| metadata.user_input_order);
+                Some((
+                    order,
+                    RetainedUserMessage {
+                        phase: None,
+                        origin: codex_history::UserInputOrigin::from_message(item),
+                        turn_id: item.turn_id().unwrap_or_default().to_owned(),
+                        message_id: item.id().map(|id| id.as_str().to_owned()),
+                        text,
+                        complete: false,
+                    },
+                ))
+            }),
         );
         let mut latest_user_turn_id = reconciled.latest_user_turn_id.clone();
         let mut missing_root_instructions = reconciled.missing_user_messages;

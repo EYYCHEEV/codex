@@ -1932,7 +1932,6 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
 
 #[expect(clippy::unwrap_used)]
 async fn send_request_with_provider(provider: ModelProviderInfo) {
-    let preconnect = provider.supports_websockets;
     let codex_home = TempDir::new().unwrap();
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::from_api_key("unused-api-key"));
@@ -1957,6 +1956,7 @@ async fn send_responses_request(
     auth_manager: Arc<AuthManager>,
     retry_owner: ResponsesRequestRetryOwner,
 ) {
+    let preconnect = provider.supports_websockets;
     let mut config = load_default_config_for_test(codex_home).await;
     config.model_provider_id = provider.name.clone();
     config.model_provider = provider.clone();

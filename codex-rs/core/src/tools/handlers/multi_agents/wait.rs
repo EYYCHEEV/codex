@@ -211,10 +211,9 @@ impl Handler {
 
         let mut statuses_by_id = statuses.into_iter().collect::<HashMap<_, _>>();
         let mcp_startup =
-            build_wait_agent_mcp_startup(&session.services.agent_control, &target_by_thread_id)
-                .await;
+            build_wait_agent_mcp_startup(&local_agent_control, &target_by_thread_id).await;
         let latest_status = build_wait_agent_latest_status(
-            &session.services.agent_control,
+            &local_agent_control,
             &target_by_thread_id,
             &mut statuses_by_id,
         )
