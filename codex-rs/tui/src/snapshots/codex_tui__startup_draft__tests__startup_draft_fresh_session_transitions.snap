@@ -6,7 +6,7 @@ expression: "snapshots.join(\"\\n---\\n\")"
 resume lookup fallback:
 before:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v<VERSION>)  
      loading
 
   Pull up a prompt.
@@ -17,7 +17,7 @@ before:
 
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v<VERSION>)  
      loading
 
   Pull up a prompt.
@@ -30,7 +30,7 @@ after:
 fork lookup fallback:
 before:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v<VERSION>)  
      loading
 
   Pull up a prompt.
@@ -41,7 +41,7 @@ before:
 
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v<VERSION>)  
      loading
 
   Pull up a prompt.
@@ -56,7 +56,7 @@ before:
 hidden while picker owns input
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v<VERSION>)  
      loading
 
   Pull up a prompt.
@@ -71,7 +71,7 @@ before:
 hidden while picker owns input
 after:
 
-  >_ OpenAI Codex (v<VERSION>)
+  >_ OpenAI Codex (v<VERSION>)  
      loading
 
   Pull up a prompt.

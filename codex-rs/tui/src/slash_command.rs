@@ -223,6 +223,7 @@ impl SlashCommand {
                 | SlashCommand::Clear
                 | SlashCommand::Resume
                 | SlashCommand::Agents
+                | SlashCommand::Agent
                 | SlashCommand::Quit
                 | SlashCommand::Exit
                 | SlashCommand::Status

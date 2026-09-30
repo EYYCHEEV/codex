@@ -152,7 +152,8 @@ async fn analytics_requests_use_reloaded_credentials_for_the_same_identity() {
     let auth_path = home.path().join("auth.json");
     let mut auth: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
-    auth["tokens"]["access_token"] = json!("refreshed-access-token");
+    auth["managed_chatgpt"]["accounts"][0]["tokens"]["access_token"] =
+        json!("refreshed-access-token");
     std::fs::write(auth_path, serde_json::to_vec(&auth).unwrap()).unwrap();
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/usage/daily-token-usage-breakdown"))
@@ -192,8 +193,9 @@ async fn analytics_retries_unauthorized_requests_after_credentials_reload() {
     let auth_path = home.path().join("auth.json");
     let mut auth: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
-    let original_token = auth["tokens"]["access_token"].as_str().unwrap().to_owned();
-    auth["tokens"]["access_token"] = json!("recovered-access-token");
+    let tokens = &mut auth["managed_chatgpt"]["accounts"][0]["tokens"];
+    let original_token = tokens["access_token"].as_str().unwrap().to_owned();
+    tokens["access_token"] = json!("recovered-access-token");
     let updated_auth = serde_json::to_vec(&auth).unwrap();
     Mock::given(method("GET"))
         .and(header("authorization", format!("Bearer {original_token}")))
