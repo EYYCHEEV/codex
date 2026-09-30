@@ -1253,8 +1253,10 @@ async fn plugin_install_preserves_status_when_remote_bundle_error_body_is_too_la
     Ok(())
 }
 
+#[test_case(false; "legacy_auth")]
+#[test_case(true; "managed_pool")]
 #[tokio::test]
-async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
+async fn plugin_install_returns_apps_needing_auth(managed_pool: bool) -> Result<()> {
     let connectors = vec![
         AppInfo {
             id: "alpha".to_string(),
@@ -1296,14 +1298,31 @@ async fn plugin_install_returns_apps_needing_auth() -> Result<()> {
 
     let codex_home = TempDir::new()?;
     write_connectors_config(codex_home.path(), &server_url)?;
-    write_chatgpt_auth(
-        codex_home.path(),
-        ChatGptAuthFixture::new("chatgpt-token")
-            .account_id("account-123")
-            .chatgpt_user_id("user-123")
-            .chatgpt_account_id("account-123"),
-        AuthCredentialsStoreMode::File,
-    )?;
+    if managed_pool {
+        super::account::seed_managed_accounts(
+            codex_home.path(),
+            &[("plugin-user@example.test", "account-123")],
+        )
+        .await?;
+        let auth_path = codex_home.path().join("auth.json");
+        let mut auth: serde_json::Value = serde_json::from_slice(&std::fs::read(&auth_path)?)?;
+        for account in auth["managed_chatgpt"]["accounts"]
+            .as_array_mut()
+            .expect("managed accounts")
+        {
+            account["tokens"]["access_token"] = json!("chatgpt-token");
+        }
+        std::fs::write(auth_path, serde_json::to_vec(&auth)?)?;
+    } else {
+        write_chatgpt_auth(
+            codex_home.path(),
+            ChatGptAuthFixture::new("chatgpt-token")
+                .account_id("account-123")
+                .chatgpt_user_id("user-123")
+                .chatgpt_account_id("account-123"),
+            AuthCredentialsStoreMode::File,
+        )?;
+    }
 
     let repo_root = TempDir::new()?;
     write_plugin_marketplace(
@@ -2620,6 +2639,18 @@ async fn start_apps_server(
         StreamableHttpServerConfig::default(),
     );
     let router = Router::new()
+        .route(
+            "/api/codex/accounts/check",
+            get(|| async {
+                Json(json!({
+                    "accounts": [{
+                        "id": "account-123",
+                        "workspace_backend_origin": "https://chatgpt.com",
+                        "account_routing_override": "NO_CONSTRAINT",
+                    }],
+                }))
+            }),
+        )
         .route("/connectors/directory/list", get(list_directory_connectors))
         .route(
             "/connectors/directory/list_workspace",

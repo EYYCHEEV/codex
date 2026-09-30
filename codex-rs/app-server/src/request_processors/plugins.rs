@@ -1771,14 +1771,35 @@ impl PluginRequestProcessor {
                     .map(|category| (app.connector_id.0.clone(), category.clone()))
             })
             .collect();
+        let mut config = config.clone();
+        let (auth, cache_key, tools_key) =
+            match codex_core::connectors::capture_threadless_connector_auth(
+                &mut config,
+                &self.auth_manager,
+            )
+            .await
+            {
+                Ok(binding) => binding,
+                Err(err) => {
+                    warn!(
+                        plugin = plugin_id,
+                        "failed to capture app authority after plugin install: {err:#}"
+                    );
+                    return Vec::new();
+                }
+            };
         let environment_manager = self.thread_manager.environment_manager();
         let (app_summaries, accessible_connectors_result) = tokio::join!(
-            load_plugin_app_summaries(config, auth, &plugin_apps, &app_category_by_id),
-            connectors::list_accessible_connectors_from_mcp_tools_with_mcp_manager(
-                config,
+            load_plugin_app_summaries(&config, auth.as_ref(), &plugin_apps, &app_category_by_id),
+            codex_core::connectors::list_accessible_connectors_from_mcp_tools_with_auth(
+                &config,
                 /*force_refetch*/ true,
                 Arc::clone(&environment_manager),
                 self.thread_manager.mcp_manager(),
+                Arc::clone(&self.auth_manager),
+                auth.clone(),
+                cache_key.clone(),
+                tools_key,
             ),
         );
 
@@ -1790,9 +1811,12 @@ impl PluginRequestProcessor {
                     "failed to load accessible apps after plugin install: {err:#}"
                 );
                 (
-                    connectors::list_cached_accessible_connectors_from_mcp_tools(config)
-                        .await
-                        .unwrap_or_default(),
+                    codex_core::connectors::list_cached_accessible_connectors_with_auth(
+                        &config,
+                        auth.as_ref(),
+                        &cache_key,
+                    )
+                    .unwrap_or_default(),
                     false,
                 )
             }
