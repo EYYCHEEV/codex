@@ -70,7 +70,12 @@ pub(crate) async fn prepare_agent_spawn_config(
     if !options.full_history_fork
         || (options.version == SpawnConfigVersion::V2 && options.role_name.is_some())
     {
-        apply_spawn_agent_role(session, &mut config, options.role_name).await?;
+        if options.version == SpawnConfigVersion::V2 && options.role_name.is_some() {
+            // The typed-route resolver validates both this preference and the parent fallback.
+            apply_role_to_config(&mut config, options.role_name).await?;
+        } else {
+            apply_spawn_agent_role(session, &mut config, options.role_name).await?;
+        }
         if options.version == SpawnConfigVersion::V2
             && options.full_history_fork
             && config.developer_instructions.is_none()
