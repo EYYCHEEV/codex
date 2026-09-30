@@ -29,12 +29,14 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_chatgpt::connectors;
 use codex_config::LoaderOverrides;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_connectors::ConnectorDirectoryCacheKey;
 use codex_core::config::ConfigBuilder;
 use codex_http_client::DestinationPolicy;
 use codex_http_client::HttpError;
 use codex_http_client::NetworkPolicyController;
 use codex_http_client::NetworkPolicyDenied;
 use codex_login::AuthManager;
+use codex_login::TransportAuthBinding;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -139,16 +141,34 @@ async fn connector_requests_preserve_account_policy() -> Result<()> {
             allowed_hosts: Default::default(),
         },
     );
+    let (auth, factory) = manager.auth_with_http_client_factory().await.unwrap();
+    config.application_network_policy = factory.network_policy().clone();
+    let cache_key = ConnectorDirectoryCacheKey::from_runtime_binding(
+        config.chatgpt_base_url.clone(),
+        TransportAuthBinding::for_nonmanaged_auth(Some(&auth)),
+        /*credential_revision*/ None,
+        auth.is_workspace_account(),
+    );
     let error = timeout(
         DEFAULT_TIMEOUT,
-        connectors::list_all_connectors_with_options(&config, /*force_refetch*/ true, &[]),
+        connectors::list_all_connectors_with_auth(
+            &config,
+            &auth,
+            cache_key,
+            /*force_refetch*/ true,
+            &[],
+        ),
     )
     .await?
     .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<HttpError>(),
-        Some(HttpError::Policy(NetworkPolicyDenied::Destination))
-    ));
+    assert!(
+        matches!(
+            error.downcast_ref::<HttpError>(),
+            Some(HttpError::Policy(NetworkPolicyDenied::Destination))
+        ),
+        "{error:#}"
+    );
+    assert_eq!(state.requests().len(), 1);
     server_handle.abort();
     Ok(())
 }
