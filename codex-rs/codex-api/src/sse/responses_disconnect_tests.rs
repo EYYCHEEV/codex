@@ -36,7 +36,7 @@ async fn transport_loss_does_not_replace_server_declared_failure() {
         .next()
         .await;
     assert!(
-        matches!(&result, Some(Err(ApiError::InvalidRequest { message })) if message == "semantic failure"),
+        matches!(&result, Some(Err(ApiError::InvalidPrompt { message })) if message == "semantic failure"),
         "server failure was replaced: {result:?}",
     );
 }
@@ -59,7 +59,7 @@ async fn idle_timeout_does_not_replace_server_declared_failure() {
         .next()
         .await;
     assert!(
-        matches!(&result, Some(Err(ApiError::InvalidRequest { message })) if message == "semantic failure"),
+        matches!(&result, Some(Err(ApiError::InvalidPrompt { message })) if message == "semantic failure"),
         "server failure was replaced: {result:?}",
     );
 }
