@@ -141,11 +141,6 @@ async fn handle_spawn_agent(
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
-    if is_full_history_fork && role_name.is_some() {
-        return Err(FunctionCallError::RespondToModel(
-            "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
-        ));
-    }
     if role_name.is_some() && (args.model.is_some() || args.reasoning_effort.is_some()) {
         return Err(FunctionCallError::RespondToModel(
             "Typed spawn_agent routes are owned by agent_type; omit model and reasoning_effort"
@@ -166,12 +161,12 @@ async fn handle_spawn_agent(
     .await
     .map_err(FunctionCallError::RespondToModel)?;
     let mut config = prepared.config;
-    let effective_role_name = if is_full_history_fork {
-        turn.session_source.get_agent_role()
-    } else {
-        prepared.role_name
-    };
-    let route = if role_name.is_some() && !is_full_history_fork {
+    let effective_role_name = prepared.role_name.or_else(|| {
+        is_full_history_fork
+            .then(|| turn.session_source.get_agent_role())
+            .flatten()
+    });
+    let route = if role_name.is_some() {
         resolve_typed_spawn_agent_route(&session, &mut config, &parent_route).await?
     } else {
         SpawnAgentRoute::Preferred
