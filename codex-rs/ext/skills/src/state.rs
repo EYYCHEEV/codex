@@ -37,6 +37,11 @@ use crate::sources::SkillProviders;
 #[path = "cloud_cache_tests.rs"]
 mod cloud_cache_tests;
 
+pub(super) enum CloudSkillRefresh {
+    TurnStart,
+    Step,
+}
+
 pub(crate) struct SkillsSessionState {
     pub(crate) mcp_resources: Option<Arc<McpResourceClient>>,
     pub(crate) extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
@@ -327,13 +332,14 @@ impl SkillsThreadState {
         next_cache
     }
 
-    /// The serialized turn-start lifecycle is the only discovery writer.
+    /// The serialized turn-start and changed-step lifecycle own discovery.
     /// Reuse warning-free discovery until invalidated; retry failures and partial catalogs next turn.
     #[tracing::instrument(name = "skills.cloud.refresh_cloud_catalog", level = "info", skip_all)]
     pub(crate) async fn refresh_cloud_catalog(
         &self,
         providers: &SkillProviders,
         query: SkillListQuery,
+        refresh: CloudSkillRefresh,
     ) -> SkillProviderResult<()> {
         if !self.cloud_skill_enabled() {
             return Ok(());
@@ -341,8 +347,12 @@ impl SkillsThreadState {
         // Switch generations before the fallible lookup; only same-auth-scope failures
         // may retain previously authorized metadata and contents.
         let cache = self.cloud_cache(query.mcp_resources.as_deref());
-        let resource_cache_key = cache.current_resource_cache_key();
-        if cache.is_current()
+        let mcp_resources = query.mcp_resources.clone();
+        let resource_cache_key = mcp_resources
+            .as_ref()
+            .and_then(|client| client.server_cache_key(codex_mcp::CODEX_APPS_MCP_SERVER_NAME));
+        if matches!(refresh, CloudSkillRefresh::TurnStart)
+            && cache.is_current()
             && cache
                 .catalog
                 .as_ref()
@@ -358,7 +368,10 @@ impl SkillsThreadState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !cache.is_current()
-            || cache.current_resource_cache_key() != resource_cache_key
+            || mcp_resources
+                .as_ref()
+                .and_then(|client| client.server_cache_key(codex_mcp::CODEX_APPS_MCP_SERVER_NAME))
+                != resource_cache_key
             || !catalogs
                 .cloud_cache
                 .as_ref()
@@ -371,7 +384,7 @@ impl SkillsThreadState {
         catalogs.cloud_cache = Some(Arc::new(CloudSkillGeneration {
             auth_cache_key: cache.auth_cache_key.clone(),
             resource_cache_key,
-            mcp_resources: cache.mcp_resources.clone(),
+            mcp_resources: mcp_resources.as_deref().cloned(),
             catalog: Some(catalog),
             resources: Mutex::new(CloudResourceCache::default()),
         }));

@@ -49,12 +49,6 @@ pub(crate) struct CloudSkillGeneration {
 }
 
 impl CloudSkillGeneration {
-    pub(crate) fn current_resource_cache_key(&self) -> Option<McpResourceServerCacheKey> {
-        self.mcp_resources
-            .as_ref()
-            .and_then(|client| client.server_cache_key(codex_mcp::CODEX_APPS_MCP_SERVER_NAME))
-    }
-
     pub(crate) fn is_current(&self) -> bool {
         self.auth_cache_key
             == self.mcp_resources.as_ref().map(|client| {

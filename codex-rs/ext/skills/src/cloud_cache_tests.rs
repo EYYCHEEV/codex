@@ -117,7 +117,11 @@ async fn late_read_cannot_return_or_populate_a_replaced_cache() {
         let (late, ()) = tokio::join!(state.read_skill(&providers, request(original)), async {
             provider.entered.notified().await;
             state
-                .refresh_cloud_catalog(&providers, query(replacement.clone()))
+                .refresh_cloud_catalog(
+                    &providers,
+                    query(replacement.clone()),
+                    CloudSkillRefresh::TurnStart,
+                )
                 .await
                 .unwrap();
             provider.resume.notify_one();
@@ -141,7 +145,11 @@ async fn late_discovery_cannot_publish_into_a_new_generation() {
     let providers = SkillProviders::new().with_cloud_provider(provider.clone());
     provider.pause_list.store(true, Ordering::SeqCst);
     let (late, ()) = tokio::join!(
-        state.refresh_cloud_catalog(&providers, query(Some(client()))),
+        state.refresh_cloud_catalog(
+            &providers,
+            query(Some(client())),
+            CloudSkillRefresh::TurnStart,
+        ),
         async {
             provider.entered.notified().await;
             state.cloud_cache(Some(&client()));

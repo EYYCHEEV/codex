@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::state::CloudSkillRefresh;
+
 use crate::HostSkillsSnapshot;
 use crate::InjectedHostSkillPrompts;
 use codex_analytics::InvocationType;
@@ -256,6 +258,14 @@ where
         input: WorldStateContributionInput<'a>,
     ) -> ExtensionFuture<'a, Vec<WorldStateSectionContribution>> {
         Box::pin(async move {
+            self.prepare_cloud_skills(
+                input.turn_id,
+                input.session_store,
+                input.thread_store,
+                input.turn_store,
+                CloudSkillRefresh::Step,
+            )
+            .await;
             let Some(context) =
                 CatalogContext::new(&self.providers, Arc::clone(&self.event_sink), input)
             else {
