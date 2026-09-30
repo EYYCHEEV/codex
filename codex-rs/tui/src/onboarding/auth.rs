@@ -1206,6 +1206,7 @@ mod tests {
             |_| {
                 widget.on_account_login_completed(AccountLoginCompletedNotification {
                     login_id: Some("login-1".to_string()),
+                    managed_account_id: None,
                     success: true,
                     error: None,
                     onboarding_entrypoint: None,

@@ -164,6 +164,7 @@ mod tests {
     impl HttpTransport for ErrorTransport {
         async fn execute(&self, _req: Request) -> Result<Response, TransportError> {
             Err(TransportError::Http {
+                retry_after: None,
                 status: StatusCode::TOO_MANY_REQUESTS,
                 url: Some("https://example.com/api/codex/memories/trace_summarize".to_string()),
                 headers: Some(self.headers.clone()),

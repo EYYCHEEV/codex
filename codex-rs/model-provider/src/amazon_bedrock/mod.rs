@@ -459,6 +459,12 @@ impl ModelProvider for AmazonBedrockModelProvider {
                     selection_revision: None,
                 });
             }
+            let http_client_factory = self.http_client_factory.clone().with_network_policy(
+                self.http_client_factory
+                    .network_policy()
+                    .clone()
+                    .for_current_account(),
+            );
             let source = self.auth_source();
             let managed_auth = self.managed_auth();
             let effective_auth = managed_auth.clone();
@@ -470,6 +476,7 @@ impl ModelProvider for AmazonBedrockModelProvider {
                 managed_auth.as_ref(),
                 &self.aws,
                 self.endpoint,
+                &http_client_factory,
             )
             .await?;
             let transport_auth_binding = transport_binding_for_auth(effective_auth.as_ref());

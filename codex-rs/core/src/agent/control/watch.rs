@@ -29,6 +29,8 @@ impl LocalAgentControl {
             thread_id: agent_id,
             metadata: self.get_agent_metadata(agent_id).unwrap_or_default(),
             status: receiver.borrow_and_update().clone(),
+            model: config.model.clone(),
+            reasoning_effort: config.reasoning_effort.clone(),
         };
         let weak_thread = Arc::downgrade(&thread);
         let changes = stream::unfold(
@@ -40,6 +42,8 @@ impl LocalAgentControl {
                     snapshot.status = receiver.borrow_and_update().clone();
                     if let Some(thread) = weak_thread.upgrade() {
                         *config = thread.config_snapshot().await;
+                        snapshot.model = config.model.clone();
+                        snapshot.reasoning_effort = config.reasoning_effort.clone();
                     }
                     // A final status can outlive the runtime. Keep its last observed settings
                     // so removal from the manager does not hide an already-published update.

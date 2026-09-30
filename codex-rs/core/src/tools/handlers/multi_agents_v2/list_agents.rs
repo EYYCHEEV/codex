@@ -52,17 +52,14 @@ impl Handler {
             .await
             .map_err(collab_spawn_error)?;
 
+        let local_agent_control = session
+            .services
+            .local_agent_runtime
+            .control(session.session_id());
         let mut listed = Vec::with_capacity(agents.len());
         for agent in agents {
-            let mcp_startup = session
-                .services
-                .agent_control
+            let mcp_startup = local_agent_control
                 .get_mcp_startup_snapshot(agent.thread_id)
-                .await;
-            let config_snapshot = session
-                .services
-                .agent_control
-                .get_agent_config_snapshot(agent.thread_id)
                 .await;
             listed.push(ListedAgent {
                 agent_name: agent
@@ -71,17 +68,12 @@ impl Handler {
                     .as_ref()
                     .map(ToString::to_string)
                     .unwrap_or_else(|| agent.thread_id.to_string()),
-                agent_type: config_snapshot
-                    .as_ref()
-                    .and_then(|config| config.session_source.get_agent_role())
+                agent_type: agent
+                    .metadata
+                    .agent_role
                     .unwrap_or_else(|| crate::agent::role::DEFAULT_ROLE_NAME.to_string()),
-                model: config_snapshot
-                    .as_ref()
-                    .map(|config| config.model.clone())
-                    .unwrap_or_default(),
-                reasoning_effort: config_snapshot
-                    .as_ref()
-                    .and_then(|config| config.reasoning_effort.clone()),
+                model: agent.model,
+                reasoning_effort: agent.reasoning_effort,
                 agent_status: agent.status,
                 mcp_startup,
             });

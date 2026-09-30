@@ -1,5 +1,5 @@
-use crate::agent::types::SpawnAgentForkMode;
 use crate::agent::child_config::model_supports_multi_agent_backend;
+use crate::agent::types::SpawnAgentForkMode;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::function_tool::FunctionCallError;
@@ -8,9 +8,9 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
-use codex_otel::SessionTelemetry;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_otel::SessionTelemetry;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;

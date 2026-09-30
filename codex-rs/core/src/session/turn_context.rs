@@ -1338,7 +1338,10 @@ impl Session {
     }
 
     /// Builds a context from refreshed config while retaining this thread's settings and environments.
-    pub(crate) async fn new_default_turn_with_config(&self, config: Arc<Config>) -> Arc<TurnContext> {
+    pub(crate) async fn new_default_turn_with_config(
+        &self,
+        config: Arc<Config>,
+    ) -> Arc<TurnContext> {
         let mut session_configuration = self.default_turn_configuration().await;
         session_configuration.original_config_do_not_use = config;
         let turn_environments = self.services.turn_environments.snapshot().await;

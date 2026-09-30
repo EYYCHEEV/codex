@@ -1775,7 +1775,10 @@ async fn run_sampling_request(
             base_instructions.clone(),
         );
         let responses_metadata = sess
-            .responses_metadata(attempt_step_context.as_ref(), CodexResponsesRequestKind::Turn)
+            .responses_metadata(
+                attempt_step_context.as_ref(),
+                CodexResponsesRequestKind::Turn,
+            )
             .await;
         if crate::guardian::is_basic_session_source(&turn_context.session_source) {
             crate::guardian::prepare_guardian_prompt(
@@ -3071,7 +3074,10 @@ async fn try_run_sampling_request(
             && turn_context.provider.info().is_openai();
         let mut preempt = step_context.preempt.clone().unwrap_or_default();
         let effort = sess
-            .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
+            .reasoning_effort_for_request(
+                &step_context.settings,
+                super::RequestEffortUsage::Sampling,
+            )
             .await;
         let stream_result = client_session
             .stream_attempt_with_setup(
@@ -3139,7 +3145,7 @@ async fn try_run_sampling_request(
             cancellation_token: cancellation_token.child_token(),
         };
         let receiving_span = trace_span!("receiving_stream");
-        let mut outcome: CodexResult<SamplingRequestResult> = loop {
+        let mut outcome: CodexResult<bool> = loop {
             let handle_responses = trace_span!(
                 parent: &receiving_span,
                 "handle_responses",
@@ -3178,10 +3184,7 @@ async fn try_run_sampling_request(
                     }
                     // TODO: Reconcile any response item already being presented to the client.
                     drop(stream);
-                    break Ok(SamplingRequestResult {
-                        needs_follow_up: true,
-                        last_agent_message,
-                    });
+                    break Ok(true);
                 }
                 Err(_) => break Err(CodexErr::TurnAborted),
             };
@@ -3213,10 +3216,7 @@ async fn try_run_sampling_request(
                 )
                 .await?
             {
-                break Ok(SamplingRequestResult {
-                    needs_follow_up: true,
-                    last_agent_message: last_agent_message.clone(),
-                });
+                break Ok(true);
             }
 
             match event {
@@ -3301,10 +3301,7 @@ async fn try_run_sampling_request(
                             .await
                             {
                                 Ok(true) => {
-                                    break Ok(SamplingRequestResult {
-                                        needs_follow_up: true,
-                                        last_agent_message: last_agent_message.clone(),
-                                    });
+                                    break Ok(true);
                                 }
                                 Ok(false) => {}
                                 Err(err) => break Err(err),
@@ -3515,10 +3512,7 @@ async fn try_run_sampling_request(
                     if let Some(false) = end_turn {
                         needs_follow_up = true;
                     }
-                    break Ok(SamplingRequestResult {
-                        needs_follow_up,
-                        last_agent_message: last_agent_message.clone(),
-                    });
+                    break Ok(needs_follow_up);
                 }
                 ResponseEvent::OutputTextDelta(delta) => {
                     // In review child threads, suppress assistant text deltas; the
@@ -3696,10 +3690,7 @@ async fn try_run_sampling_request(
             .await
             {
                 Ok(true) if !cancellation_token.is_cancelled() => {
-                    outcome = Ok(SamplingRequestResult {
-                        needs_follow_up: true,
-                        last_agent_message: last_agent_message.clone(),
-                    });
+                    outcome = Ok(true);
                 }
                 Ok(_) => {}
                 Err(err) => outcome = Err(err),
@@ -3746,7 +3737,10 @@ async fn try_run_sampling_request(
             }
         }
 
-        outcome
+        outcome.map(|needs_follow_up| SamplingRequestResult {
+            needs_follow_up,
+            last_agent_message,
+        })
     }
     .await;
     AttemptOutcome::new(result, replay_state)

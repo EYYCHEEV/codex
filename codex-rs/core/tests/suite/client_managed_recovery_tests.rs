@@ -187,6 +187,7 @@ async fn assert_managed_401_budget(retry_owner: RetryOwner) -> anyhow::Result<()
         /*attestation_provider*/ None,
         config.http_client_factory(),
         config.workspace_routing_context(),
+        Vec::new(),
     );
     let responses_metadata = test_turn_responses_metadata(&client, thread_id);
     let mut client_session = client.new_session();

@@ -879,12 +879,14 @@ impl LocalAgentControl {
             );
         }
 
+        let config = new_thread.thread.config_snapshot().await;
         let agent = LiveAgent {
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
+            model: config.model.clone(),
+            reasoning_effort: config.reasoning_effort.clone(),
         };
-        let config = new_thread.thread.config_snapshot().await;
         let session_telemetry = new_thread
             .thread
             .session_telemetry()

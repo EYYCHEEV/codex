@@ -75,7 +75,6 @@ async fn bootstrap_uses_bundled_models_when_catalog_request_stalls() -> Result<(
     let header = SessionHeaderHistoryCell::new(
         bootstrap.default_model.clone(),
         /*reasoning_effort*/ None,
-        /*show_fast_status*/ false,
         PathBuf::from("project"),
         "test",
     );

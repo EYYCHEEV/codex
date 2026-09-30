@@ -52,12 +52,14 @@ impl LocalAgentControl {
         let known_agent = metadata.is_some();
         let snapshot = match state.get_thread(agent_id).await {
             Ok(thread) => {
+                let config = Box::new(thread.config_snapshot().await);
                 let agent = LiveAgent {
                     thread_id: agent_id,
                     metadata: metadata.unwrap_or_default(),
                     status: thread.agent_status().await,
+                    model: config.model.clone(),
+                    reasoning_effort: config.reasoning_effort.clone(),
                 };
-                let config = Box::new(thread.config_snapshot().await);
                 if !config.ephemeral
                     && let Some(agent_graph_store) = state.agent_graph_store()
                     && let Err(err) = agent_graph_store

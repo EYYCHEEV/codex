@@ -1198,6 +1198,7 @@ mod tests {
     async fn response_stream_eof_is_websocket_closed() {
         let mut ws_stream = ws_stream_with_messages(Vec::new());
         let (tx_event, _rx_event) = mpsc::channel(1);
+        let (_tx_interrupt, rx_interrupt) = oneshot::channel();
         let timing_log_context = test_timing_log_context();
 
         let error = run_websocket_response_stream(
@@ -1208,6 +1209,7 @@ mod tests {
             /*telemetry*/ None,
             /*turn_state*/ None,
             &timing_log_context,
+            rx_interrupt,
         )
         .await
         .expect_err("EOF before response.completed must fail");
@@ -1223,6 +1225,7 @@ mod tests {
         let protocol_error = ProtocolError::InvalidOpcode(0xff);
         let mut ws_stream = ws_stream_with_messages(vec![Err(WsError::Protocol(protocol_error))]);
         let (tx_event, _rx_event) = mpsc::channel(1);
+        let (_tx_interrupt, rx_interrupt) = oneshot::channel();
         let timing_log_context = test_timing_log_context();
 
         let error = run_websocket_response_stream(
@@ -1233,6 +1236,7 @@ mod tests {
             /*telemetry*/ None,
             /*turn_state*/ None,
             &timing_log_context,
+            rx_interrupt,
         )
         .await
         .expect_err("non-close websocket error must fail");
@@ -1262,6 +1266,7 @@ mod tests {
             Ok(Message::Close(None)),
         ]);
         let (tx_event, mut rx_event) = mpsc::channel(4);
+        let (_tx_interrupt, rx_interrupt) = oneshot::channel();
         let timing_log_context = test_timing_log_context();
 
         run_websocket_response_stream(
@@ -1272,6 +1277,7 @@ mod tests {
             /*telemetry*/ None,
             /*turn_state*/ None,
             &timing_log_context,
+            rx_interrupt,
         )
         .await
         .expect("matching completion must win over a later queued close");
@@ -1318,6 +1324,7 @@ mod tests {
             )),
         ]);
         let (tx_event, mut rx_event) = mpsc::channel(4);
+        let (_tx_interrupt, rx_interrupt) = oneshot::channel();
         let timing_log_context = test_timing_log_context();
 
         run_websocket_response_stream(
@@ -1328,6 +1335,7 @@ mod tests {
             /*telemetry*/ None,
             /*turn_state*/ None,
             &timing_log_context,
+            rx_interrupt,
         )
         .await
         .expect("current response must complete after ignoring stale terminal event");

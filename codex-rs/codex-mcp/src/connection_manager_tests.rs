@@ -5593,7 +5593,9 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: false,
+        startup_readiness: Default::default(),
         supports_parallel_tool_calls: false,
+        tool_input_schema_max_bytes: None,
         omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(1)),
@@ -5606,7 +5608,10 @@ async fn never_ready_server_emits_failed_and_complete_at_configured_deadline() {
         oauth_resource: None,
         tools: HashMap::new(),
     };
-    let mcp_servers = HashMap::from([("slow".to_string(), EffectiveMcpServer::configured(config))]);
+    let mcp_servers = HashMap::from([(
+        "slow".to_string(),
+        EffectiveMcpServer::from_host_config(config),
+    )]);
     let (tx_event, rx_event) = async_channel::unbounded();
     let codex_home = tempdir().expect("tempdir");
     let cancel_token = CancellationToken::new();
@@ -5694,7 +5699,7 @@ async fn host_owned_codex_apps_is_registered_without_startup_status() {
     );
     let mcp_servers = HashMap::from([(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
-        EffectiveMcpServer::configured(apps_config.clone()),
+        EffectiveMcpServer::from_host_config(apps_config.clone()),
     )]);
     let mut catalog = crate::ResolvedMcpCatalog::builder();
     catalog.register(crate::McpServerRegistration::from_compatibility(

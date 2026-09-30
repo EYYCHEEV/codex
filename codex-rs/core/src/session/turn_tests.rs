@@ -164,7 +164,7 @@ fn capability_mentions_include_only_user_and_trusted_goal_inputs() {
         TurnInput::UserInput {
             content: ordinary_user_inputs.clone(),
             client_id: Some("client-message-id".to_string()),
-            acceptance_order: None,
+            metadata: Default::default(),
         },
         TurnInput::ResponseItem(codex_history::ResponseItemEnvelope::new(
             identical_extension_context,

@@ -89,24 +89,24 @@ fn map_api_error_distinguishes_capacity_from_slow_down() {
             (expected, retryable)
         );
     }
+}
 
-    #[test]
-    fn map_api_error_preserves_websocket_close_details() {
-        let err = map_api_error(ApiError::WebsocketClosed(Box::new(
-            codex_protocol::error::WebsocketCloseDetails {
-                code: Some(4001),
-                reason: Some("maintenance".to_string()),
-                reason_redacted: false,
-            },
-        )));
+#[test]
+fn map_api_error_preserves_websocket_close_details() {
+    let err = map_api_error(ApiError::WebsocketClosed(Box::new(
+        codex_protocol::error::WebsocketCloseDetails {
+            code: Some(4001),
+            reason: Some("maintenance".to_string()),
+            reason_redacted: false,
+        },
+    )));
 
-        let CodexErrorDetails::WebsocketClosed(details) = err.details() else {
-            panic!("expected CodexErr::WebsocketClosed, got {err:?}");
-        };
-        assert_eq!(details.code, Some(4001));
-        assert_eq!(details.reason.as_deref(), Some("maintenance"));
-        assert!(!details.reason_redacted);
-    }
+    let CodexErrorDetails::WebsocketClosed(details) = err.details() else {
+        panic!("expected CodexErr::WebsocketClosed, got {err:?}");
+    };
+    assert_eq!(details.code, Some(4001));
+    assert_eq!(details.reason.as_deref(), Some("maintenance"));
+    assert!(!details.reason_redacted);
 }
 
 #[test]

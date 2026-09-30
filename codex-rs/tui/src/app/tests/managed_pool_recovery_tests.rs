@@ -53,7 +53,7 @@ fn recovered_inventory() -> ListAccountsResponse {
     serde_json::from_value(inventory).expect("recovered owner response")
 }
 
-async fn pool_app(inventory: Value) -> (App, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
+async fn pool_app(inventory: Value) -> (Box<App>, tokio::sync::mpsc::UnboundedReceiver<AppEvent>) {
     let (mut app, events, _ops) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
     app.active_thread_id = Some(thread_id);

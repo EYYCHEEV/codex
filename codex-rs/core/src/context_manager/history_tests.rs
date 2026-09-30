@@ -2316,7 +2316,7 @@ fn record_items_projects_large_user_message_without_losing_text_or_metadata() {
             ..Default::default()
         }),
     };
-    let envelope = ResponseItemEnvelope {
+    let mut envelope = ResponseItemEnvelope {
         item: item.clone(),
         metadata: Some(CodexHarnessMetadata {
             user_input_order: Some(17),
@@ -2327,7 +2327,7 @@ fn record_items_projects_large_user_message_without_losing_text_or_metadata() {
     let mut history = ContextManager::new();
 
     history.record_annotated_items(
-        std::slice::from_ref(&envelope),
+        std::slice::from_mut(&mut envelope),
         TruncationPolicy::Tokens(10_000),
     );
 
@@ -2798,7 +2798,7 @@ fn record_items_omits_call_when_oversized_optional_id_output_arrives_first() {
 
 #[test]
 fn record_items_preserves_named_external_output_without_call_id_and_metadata() {
-    let envelope = ResponseItemEnvelope {
+    let mut envelope = ResponseItemEnvelope {
         item: ResponseItem::FunctionCallOutput {
             id: None,
             call_id: None,
@@ -2815,7 +2815,10 @@ fn record_items_preserves_named_external_output_without_call_id_and_metadata() {
     };
     let mut history = ContextManager::new();
 
-    history.record_annotated_items(std::slice::from_ref(&envelope), TruncationPolicy::Tokens(4));
+    history.record_annotated_items(
+        std::slice::from_mut(&mut envelope),
+        TruncationPolicy::Tokens(4),
+    );
 
     assert_eq!(history.annotated_items().len(), 1);
     assert_eq!(history.annotated_items()[0].metadata, envelope.metadata);

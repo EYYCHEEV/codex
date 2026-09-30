@@ -363,31 +363,37 @@ impl ContextManager {
                                 } else {
                                     "assistant"
                                 };
-                            !logical_items.iter().map(|envelope| &envelope.item).any(|item| {
-                                if item.id().map(codex_protocol::ResponseItemId::as_str)
-                                    != message.message_id.as_deref()
-                                    || item.turn_id().unwrap_or_default() != message.turn_id
-                                {
-                                    return false;
-                                }
-                                let ResponseItem::Message { role, content, .. } = item else {
-                                    return false;
-                                };
-                                if role != source_role || is_guardian_context_message(item) {
-                                    return false;
-                                }
-                                let text = content
-                                    .iter()
-                                    .filter_map(|content| match content {
-                                        ContentItem::InputText { text }
-                                        | ContentItem::OutputText { text } => Some(text.as_str()),
-                                        _ => None,
-                                    })
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
-                                guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS).0
-                                    == message.text
-                            })
+                            !logical_items
+                                .iter()
+                                .map(|envelope| &envelope.item)
+                                .any(|item| {
+                                    if item.id().map(codex_protocol::ResponseItemId::as_str)
+                                        != message.message_id.as_deref()
+                                        || item.turn_id().unwrap_or_default() != message.turn_id
+                                    {
+                                        return false;
+                                    }
+                                    let ResponseItem::Message { role, content, .. } = item else {
+                                        return false;
+                                    };
+                                    if role != source_role || is_guardian_context_message(item) {
+                                        return false;
+                                    }
+                                    let text = content
+                                        .iter()
+                                        .filter_map(|content| match content {
+                                            ContentItem::InputText { text }
+                                            | ContentItem::OutputText { text } => {
+                                                Some(text.as_str())
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    guardian_truncate_text(&text, GUARDIAN_MAX_ROOT_MESSAGE_TOKENS)
+                                        .0
+                                        == message.text
+                                })
                         }
                     })
             });
