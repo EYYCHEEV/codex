@@ -3612,7 +3612,6 @@ impl AuthManager {
         result
     }
 
-
     /// Log out by deleting the on‑disk auth.json (if present). Returns Ok(true)
     /// if a file was removed, Ok(false) if no auth file existed. On success,
     /// reloads the in‑memory auth cache so callers immediately observe the

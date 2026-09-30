@@ -1875,7 +1875,6 @@ impl ModelClientSession {
     }
 
 
-
     /// Builds request and SSE telemetry for streaming API calls.
     fn build_streaming_telemetry(
         session_telemetry: &SessionTelemetry,

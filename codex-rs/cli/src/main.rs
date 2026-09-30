@@ -1903,7 +1903,6 @@ fn profile_v2_for_subcommand<'a>(
     }
 }
 
-
 async fn enable_feature_in_config(feature: &str) -> anyhow::Result<()> {
     FeatureToggles::validate_feature(feature)?;
     let codex_home = find_codex_home()?;
