@@ -1302,6 +1302,29 @@ fn model_visible_item_fits(item: &ResponseItem) -> bool {
             <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
 }
 
+fn projected_message_fits(item: &ResponseItem) -> bool {
+    if estimate_item_token_count(item)
+        > i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+    {
+        return false;
+    }
+    let text_only = match item {
+        ResponseItem::Message { content, .. } => content.iter().all(|content| {
+            matches!(
+                content,
+                ContentItem::InputText { .. } | ContentItem::OutputText { .. }
+            )
+        }),
+        ResponseItem::AgentMessage { content, .. } => content
+            .iter()
+            .all(|content| matches!(content, AgentMessageInputContent::InputText { .. })),
+        _ => unreachable!("message projection requires a message item"),
+    };
+    // Text chunks include framing and passthrough metadata; encoded media keeps its
+    // existing model-visible accounting instead of charging for transport bytes.
+    !text_only || serialized_item_fits(item)
+}
+
 fn is_projectable_message(item: &ResponseItem) -> bool {
     matches!(
         item,
@@ -1323,8 +1346,7 @@ fn project_message(
     else {
         unreachable!("project_message requires a message item");
     };
-    let max_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
-    if estimate_item_token_count(item) <= max_tokens {
+    if projected_message_fits(item) {
         return vec![ResponseItemEnvelope {
             item: item.clone(),
             metadata: metadata.cloned(),
@@ -1395,9 +1417,7 @@ fn project_message(
             let chunk_index = chunks.len();
             let mut candidate = current.clone();
             candidate.push((content_item.clone(), source_index));
-            if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
-                <= max_tokens
-            {
+            if projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item) {
                 current = candidate;
                 continue;
             }
@@ -1406,9 +1426,7 @@ fn project_message(
             }
             let chunk_index = chunks.len();
             let candidate = vec![(content_item.clone(), source_index)];
-            if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
-                > max_tokens
-            {
+            if !projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item) {
                 return Vec::new();
             }
             current = candidate;
@@ -1421,10 +1439,7 @@ fn project_message(
                     let chunk_index = chunks.len();
                     let mut candidate = current.clone();
                     candidate.push((content_item.clone(), source_index));
-                    if estimate_item_token_count(
-                        &make_envelope(candidate.clone(), chunk_index).item,
-                    ) <= max_tokens
-                    {
+                    if projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item) {
                         current = candidate;
                         continue;
                     }
@@ -1433,9 +1448,7 @@ fn project_message(
                     }
                     let chunk_index = chunks.len();
                     let candidate = vec![(content_item.clone(), source_index)];
-                    if estimate_item_token_count(
-                        &make_envelope(candidate.clone(), chunk_index).item,
-                    ) > max_tokens
+                    if !projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item)
                     {
                         return Vec::new();
                     }
@@ -1469,9 +1482,7 @@ fn project_message(
                             },
                             source_index,
                         ));
-                        if estimate_item_token_count(&make_envelope(candidate, chunk_index).item)
-                            <= max_tokens
-                        {
+                        if projected_message_fits(&make_envelope(candidate, chunk_index).item) {
                             low = mid;
                         } else {
                             high = mid - 1;
@@ -1507,9 +1518,7 @@ fn project_message(
                 let chunk_index = chunks.len();
                 let mut candidate = current.clone();
                 candidate.push((content_item.clone(), source_index));
-                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
-                    <= max_tokens
-                {
+                if projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item) {
                     current = candidate;
                     continue;
                 }
@@ -1518,9 +1527,7 @@ fn project_message(
                 }
                 let chunk_index = chunks.len();
                 let candidate = vec![(content_item.clone(), source_index)];
-                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
-                    > max_tokens
-                {
+                if !projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item) {
                     return Vec::new();
                 }
                 current = candidate;
@@ -1532,7 +1539,7 @@ fn project_message(
     }
     if chunks
         .iter()
-        .any(|envelope| estimate_item_token_count(&envelope.item) > max_tokens)
+        .any(|envelope| !projected_message_fits(&envelope.item))
         || (is_contextual_user
             && chunks.iter().any(|envelope| {
                 !matches!(&envelope.item, ResponseItem::Message { content, .. }
@@ -1558,8 +1565,7 @@ fn project_agent_message(
     else {
         unreachable!("project_agent_message requires an agent message item");
     };
-    let max_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
-    if estimate_item_token_count(item) <= max_tokens {
+    if projected_message_fits(item) {
         return vec![ResponseItemEnvelope {
             item: item.clone(),
             metadata: metadata.cloned(),
@@ -1648,9 +1654,7 @@ fn project_agent_message(
                             },
                             source_index,
                         ));
-                        if estimate_item_token_count(&make_envelope(candidate, chunk_index).item)
-                            <= max_tokens
-                        {
+                        if projected_message_fits(&make_envelope(candidate, chunk_index).item) {
                             low = mid;
                         } else {
                             high = mid - 1;
@@ -1681,9 +1685,7 @@ fn project_agent_message(
                 let chunk_index = chunks.len();
                 let mut candidate = current.clone();
                 candidate.push((content_item.clone(), source_index));
-                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
-                    <= max_tokens
-                {
+                if projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item) {
                     current = candidate;
                     continue;
                 }
@@ -1692,9 +1694,7 @@ fn project_agent_message(
                 }
                 let chunk_index = chunks.len();
                 let candidate = vec![(content_item.clone(), source_index)];
-                if estimate_item_token_count(&make_envelope(candidate.clone(), chunk_index).item)
-                    > max_tokens
-                {
+                if !projected_message_fits(&make_envelope(candidate.clone(), chunk_index).item) {
                     return Vec::new();
                 }
                 current = candidate;
@@ -1706,7 +1706,7 @@ fn project_agent_message(
     }
     if chunks
         .iter()
-        .any(|envelope| estimate_item_token_count(&envelope.item) > max_tokens)
+        .any(|envelope| !projected_message_fits(&envelope.item))
     {
         return Vec::new();
     }
