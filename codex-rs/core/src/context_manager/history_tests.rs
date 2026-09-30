@@ -2827,7 +2827,7 @@ fn record_items_preserves_named_external_output_without_call_id_and_metadata() {
 }
 
 #[test]
-fn record_items_preserves_stamped_message_but_omits_oversized_general_item() {
+fn record_items_omits_oversized_stamped_message_and_general_item() {
     let items = [
         ResponseItem::Message {
             id: Some(ResponseItemId::with_suffix("msg", "large")),
@@ -2855,8 +2855,7 @@ fn record_items_preserves_stamped_message_but_omits_oversized_general_item() {
 
     history.record_items(items.iter(), TruncationPolicy::Tokens(10_000));
 
-    // Transport metadata does not consume the message's model-visible content budget.
-    assert_eq!(raw_items(&history), vec![items[0].clone()]);
+    assert!(history.annotated_items().is_empty());
 }
 
 #[test]
@@ -2879,7 +2878,7 @@ fn replacement_enforces_cap_preserves_metadata_and_clears_stale_pair_tracker() {
         metadata: replacement_metadata,
     };
     let oversized_replacement = ResponseItemEnvelope {
-        item: assistant_msg(&"x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES + 1)),
+        item: assistant_msg(&"x".repeat(MODEL_VISIBLE_ITEM_MAX_BYTES)),
         metadata: Some(CodexHarnessMetadata {
             user_input_order: Some(10),
             ..Default::default()
@@ -2932,8 +2931,8 @@ fn replacement_enforces_cap_preserves_metadata_and_clears_stale_pair_tracker() {
         vec![replacement.metadata, Some(projected_metadata), None, None,]
     );
     assert!(history.annotated_items().iter().all(|envelope| {
-        estimate_item_token_count(&envelope.item)
-            <= i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX)
+        serialized_json_bytes(&envelope.item)
+            .is_ok_and(|bytes| bytes <= MODEL_VISIBLE_ITEM_MAX_BYTES)
     }));
 }
 
