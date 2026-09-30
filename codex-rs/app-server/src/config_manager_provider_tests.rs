@@ -244,7 +244,7 @@ async fn selected_admission_defers_global_cloud_but_preserves_local_requirements
             ))
         }),
     ] {
-        let global = manager.with_cloud_config_bundle(loader);
+        let global = manager.with_cloud_config_bundle(loader, Default::default());
         assert!(
             global
                 .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
@@ -255,7 +255,8 @@ async fn selected_admission_defers_global_cloud_but_preserves_local_requirements
             .check_thread_model_provider(&current, ProviderPolicyCheck::RequestScoped(&auth))
             .await?;
         // Scoping the selected loader must not mutate the default account's loader.
-        let selected = global.with_cloud_config_bundle(CloudConfigBundleLoader::default());
+        let selected =
+            global.with_cloud_config_bundle(CloudConfigBundleLoader::default(), Default::default());
         selected
             .check_thread_model_provider(&current, ProviderPolicyCheck::Current)
             .await?;
@@ -308,7 +309,8 @@ async fn derived_cloud_managers_isolate_effective_policy_and_share_local_restric
     let blocked_url = "https://blocked.example".parse()?;
     let global_permit = global_policy.acquire(&global_url)?;
 
-    let bootstrap = manager.with_cloud_config_bundle(CloudConfigBundleLoader::default());
+    let bootstrap =
+        manager.with_cloud_config_bundle(CloudConfigBundleLoader::default(), Default::default());
     let bootstrap_config = bootstrap.load_latest_config(/*fallback_cwd*/ None).await?;
     assert_eq!(
         bootstrap_config
@@ -332,6 +334,7 @@ async fn derived_cloud_managers_isolate_effective_policy_and_share_local_restric
         CloudConfigBundleFixture::loader_with_enterprise_requirement(
             "[application.network.domains]\n'selected.example' = 'allow'",
         ),
+        Default::default(),
     );
     let selected_config = selected.load_latest_config(/*fallback_cwd*/ None).await?;
     assert_eq!(
@@ -393,6 +396,7 @@ async fn nonmanaged_and_independent_admission_keeps_global_cloud_policy() -> Res
     let current = manager.load_latest_config(/*fallback_cwd*/ None).await?;
     let manager = manager.with_cloud_config_bundle(
         CloudConfigBundleFixture::loader_with_enterprise_requirement("model_provider = 'other'"),
+        Default::default(),
     );
     for auth in [
         codex_login::CodexAuth::from_api_key("synthetic-api-key"),

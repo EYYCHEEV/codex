@@ -134,12 +134,16 @@ impl ConfigManager {
             .unwrap_or_default()
     }
 
-    pub(crate) fn with_cloud_config_bundle(&self, loader: CloudConfigBundleLoader) -> Self {
+    pub(crate) fn with_cloud_config_bundle(
+        &self,
+        loader: CloudConfigBundleLoader,
+        network_policy: codex_http_client::NetworkPolicyController,
+    ) -> Self {
         Self {
             // Account-scoped cloud requirements must not replace the global effective policy.
             // Local requirements and their reload serialization remain shared.
             cloud_config_bundle: Arc::new(RwLock::new(loader)),
-            network_policy: Default::default(),
+            network_policy,
             network_policy_snapshot: Arc::default(),
             ..self.clone()
         }
