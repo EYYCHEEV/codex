@@ -862,7 +862,7 @@ async fn client_setup_rebuilds_chatgpt_refresh_but_rejects_account_switches() {
         Arc::get_mut(&mut client.state).unwrap().provider = provider.clone();
         let result = client
             .current_client_setup_for_routing(
-                super::ClientRouting::ConfiguredProvider,
+                super::ClientRouting::Workspace,
                 /*model*/ None,
                 /*session_id*/ None,
             )
@@ -1038,9 +1038,6 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
         recorder.attach_direct_call_to_output(&mut item, Some((recorded, permit)));
         outputs.push(item);
     }
-    let original_outputs = outputs.clone();
-    recorder.attach_to_prompt(&mut outputs, &mut Default::default());
-    assert_eq!(outputs, original_outputs);
     let recorded = serde_json::to_value(&outputs)?;
     assert_eq!(
         recorded[0]["internal_chat_message_metadata_passthrough"]["executed_tool_calls"][0]["tool_result_metadata"],
@@ -1052,6 +1049,10 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
             .as_str()
             .is_some_and(|value| value.starts_with("omitted_due_to_size_limit (overage_bytes="))
     );
+    let mut bounded_outputs = outputs.clone();
+    bounded_outputs[0].clear_executed_tool_calls();
+    recorder.attach_to_prompt(&mut outputs, &mut Default::default());
+    assert_eq!(outputs, bounded_outputs);
     let omitted_output = outputs.pop().expect("second direct output");
     let mut without_omitted_metadata = ResponseItem::from(ResponseInputItem::FunctionCallOutput {
         call_id: "second".to_string(),
@@ -2676,7 +2677,7 @@ fn managed_account_failure_classification_is_narrow() {
         limit_window_minutes: None,
         rate_limits: None,
         promo_message: None,
-        rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberUsageLimitReached),
+        rate_limit_reached_type: Some(RateLimitReachedType::WorkspaceMemberCreditsDepleted),
     });
     assert_eq!(
         super::managed_chatgpt_failure(&workspace_quota),
