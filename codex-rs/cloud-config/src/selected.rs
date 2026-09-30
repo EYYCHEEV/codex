@@ -24,11 +24,29 @@ struct PolicyOwner {
     backend: String,
 }
 
+#[derive(Default)]
+struct TransportPolicyOwner {
+    controller: codex_http_client::NetworkPolicyController,
+}
+
+impl Drop for TransportPolicyOwner {
+    fn drop(&mut self) {
+        self.controller.policy().invalidate();
+    }
+}
+
+/// Cloud inputs and the stable transport policy owned by the same selected account.
+pub struct SelectedCloudConfigAdmission {
+    pub loader: CloudConfigBundleLoader,
+    pub network_policy: codex_http_client::NetworkPolicyController,
+}
+
 struct Entry {
     revision: u64,
     service: Arc<CloudConfigBundleService<BackendBundleClient>>,
     loader: CloudConfigBundleLoader,
     refresh_task: AbortHandle,
+    transport_policy: Arc<TransportPolicyOwner>,
 }
 
 impl Drop for Entry {
@@ -53,7 +71,7 @@ impl SelectedCloudConfigBundles {
         }
     }
 
-    /// Stops policy refreshes for removed identities without changing retained policies.
+    /// Stops refreshes and revokes transports for removed identities; retained bundles stay readable.
     pub async fn prune_removed_accounts(&self) -> std::io::Result<()> {
         let mut entries = self.entries.lock().await;
         if entries.is_empty() {
@@ -75,6 +93,15 @@ impl SelectedCloudConfigBundles {
         backend: String,
         http: HttpClientFactory,
     ) -> CloudConfigBundleLoader {
+        self.admission_for(snapshot, backend, http).await.loader
+    }
+
+    pub async fn admission_for(
+        &self,
+        snapshot: &ManagedChatgptAuthSnapshot,
+        backend: String,
+        http: HttpClientFactory,
+    ) -> SelectedCloudConfigAdmission {
         let key = PolicyOwner {
             identity: snapshot.identity_key.clone(),
             user: snapshot.auth.get_chatgpt_user_id(),
@@ -86,7 +113,10 @@ impl SelectedCloudConfigBundles {
         if let Some(entry) = previous
             && entry.revision == snapshot.account_revision
         {
-            return entry.loader.clone();
+            return SelectedCloudConfigAdmission {
+                loader: entry.loader.clone(),
+                network_policy: entry.transport_policy.controller.clone(),
+            };
         }
         let mut service = CloudConfigBundleService::new(
             self.auth_manager.clone(),
@@ -105,6 +135,11 @@ impl SelectedCloudConfigBundles {
         }
         let service = Arc::new(service);
         let (loader, refresh_task) = cloud_config_bundle_loader_for_shared_service(service.clone());
+        let transport_policy = previous
+            .filter(|_| key.user.is_some() && key.workspace.is_some())
+            .map(|entry| Arc::clone(&entry.transport_policy))
+            .unwrap_or_default();
+        let network_policy = transport_policy.controller.clone();
         // An old in-flight request may finish, but cannot replace newer credentials.
         if previous.is_none_or(|entry| entry.revision < snapshot.account_revision) {
             entries.insert(
@@ -114,10 +149,14 @@ impl SelectedCloudConfigBundles {
                     service,
                     loader: loader.clone(),
                     refresh_task,
+                    transport_policy,
                 },
             );
         }
-        loader
+        SelectedCloudConfigAdmission {
+            loader,
+            network_policy,
+        }
     }
 }
 

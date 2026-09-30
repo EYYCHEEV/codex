@@ -40,6 +40,9 @@ mod managed_removal_takeover_tests;
 #[path = "managed_refresh_presentation_tests.rs"]
 mod managed_refresh_presentation_tests;
 
+#[path = "selected_network_policy_tests.rs"]
+mod selected_network_policy_tests;
+
 const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";

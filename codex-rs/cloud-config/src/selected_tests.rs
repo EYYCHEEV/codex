@@ -164,6 +164,90 @@ fn http() -> HttpClientFactory {
 }
 
 #[tokio::test]
+async fn selected_transport_policy_survives_refresh_but_revokes_on_removal() {
+    use codex_http_client::DestinationPolicy;
+    use codex_http_client::NetworkPolicyDenied;
+
+    let home = tempdir().unwrap();
+    let (manager, selected) = snapshot(home.path(), "selected-user", "selected-old").await;
+    let registry = SelectedCloudConfigBundles::new(manager.clone(), home.path().to_path_buf());
+    let backend = Backend::new(json!({}));
+    let first = registry
+        .admission_for(&selected, backend.url.clone(), http())
+        .await;
+    assert_eq!(first.loader.get().await.unwrap(), None);
+    let policy = first.network_policy.policy().for_current_account();
+    assert!(
+        first
+            .network_policy
+            .publish(policy.revision(), DestinationPolicy::Unrestricted)
+    );
+    let destination = "https://selected.example/".parse().unwrap();
+    let permit = policy.acquire(&destination).unwrap();
+    let client = codex_login::default_client::create_client_with_chatgpt_cookies(
+        &http().with_network_policy(policy.clone()),
+    );
+    assert!(
+        client
+            .get(&backend.url)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let repeated = registry
+        .admission_for(&selected, backend.url.clone(), http())
+        .await;
+    assert_eq!(
+        repeated.network_policy.policy().for_current_account(),
+        policy
+    );
+
+    let mut refreshed = selected.clone();
+    refreshed.account_revision += 1;
+    let replacement = registry
+        .admission_for(&refreshed, backend.url.clone(), http())
+        .await;
+    assert_eq!(
+        replacement.network_policy.policy().for_current_account(),
+        policy
+    );
+    assert_eq!(
+        permit.check(),
+        Ok(()),
+        "refresh must not invalidate the same policy owner"
+    );
+    let other_backend = Backend::new(json!({}));
+    let other = registry
+        .admission_for(&refreshed, other_backend.url.clone(), http())
+        .await;
+    assert_ne!(other.network_policy.policy().for_current_account(), policy);
+
+    assert!(manager.logout().await.unwrap());
+    registry.prune_removed_accounts().await.unwrap();
+    let error = client
+        .get(&backend.url)
+        .send()
+        .await
+        .expect_err("retained account transport must not send after removal");
+    assert!(matches!(
+        error,
+        codex_http_client::HttpError::Policy(NetworkPolicyDenied::Revoked),
+    ));
+    assert_eq!(permit.check(), Err(NetworkPolicyDenied::Revoked));
+    assert_eq!(
+        policy.acquire(&destination).map(|_| ()),
+        Err(NetworkPolicyDenied::Revoked)
+    );
+    assert_eq!(
+        first.loader.get().await.unwrap(),
+        None,
+        "retained bundle data remains readable"
+    );
+}
+
+#[tokio::test]
 async fn selected_lkg_survives_new_credentials_and_transient_failure_including_empty_policy() {
     for body in [
         json!({}),

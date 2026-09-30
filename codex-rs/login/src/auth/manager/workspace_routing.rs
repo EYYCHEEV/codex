@@ -57,12 +57,83 @@ pub trait WorkspaceRoutingResolver: Send + Sync {
         &'a self,
         request: WorkspaceRoutingRequest<'a>,
     ) -> Pin<Box<dyn Future<Output = io::Result<Option<WorkspaceRouting>>> + Send + 'a>>;
+
+    /// Admits content requests for an already-selected account using its cloud requirements.
+    /// Implementations must preserve the identity and reject a changed backend or account.
+    fn network_policy_for_managed_snapshot<'a>(
+        &'a self,
+        _snapshot: &'a ManagedChatgptAuthSnapshot,
+        _chatgpt_base_url: &'a str,
+        _session: Option<Arc<WorkspaceRoutingSession>>,
+    ) -> Pin<Box<dyn Future<Output = io::Result<codex_http_client::NetworkPolicy>> + Send + 'a>>
+    {
+        Box::pin(async {
+            Err(io::Error::other(
+                "selected account network policy admission is unavailable",
+            ))
+        })
+    }
 }
 
 impl AuthManager {
     /// Installs the app-server's routing owner before accepting model requests.
     pub fn set_workspace_routing_resolver(&self, resolver: Weak<dyn WorkspaceRoutingResolver>) {
         assert!(self.workspace_routing_resolver.set(resolver).is_ok());
+    }
+
+    /// Captures policy for this exact selection, never for the ambient default account.
+    /// Standalone unmanaged clients need no admission owner. A managed application policy
+    /// cannot be paired with a selected identity without its owner and must fail closed.
+    pub async fn network_policy_for_managed_snapshot(
+        &self,
+        snapshot: &ManagedChatgptAuthSnapshot,
+        chatgpt_base_url: &str,
+        session: Option<Arc<WorkspaceRoutingSession>>,
+    ) -> io::Result<codex_http_client::NetworkPolicy> {
+        let Some(resolver) = self.workspace_routing_resolver.get() else {
+            let policy = self.application_network_policy();
+            if policy.is_managed() {
+                return Err(io::Error::other(
+                    "selected account network policy owner is unavailable",
+                ));
+            }
+            return Ok(policy);
+        };
+        let auth_changes = self.auth_change_state_receiver();
+        let owner_generation = auth_changes.borrow().owner_generation;
+        let resolver = resolver.upgrade().ok_or_else(|| {
+            io::Error::other("selected account network policy owner is unavailable")
+        })?;
+        let policy = resolver
+            .network_policy_for_managed_snapshot(snapshot, chatgpt_base_url, session)
+            .await?;
+        let current = self
+            .managed_chatgpt_auth_snapshot_for_attempt(snapshot)
+            .await?;
+        if current.is_none() || auth_changes.borrow().owner_generation != owner_generation {
+            return Err(io::Error::other(
+                "account changed during selected account network policy admission",
+            ));
+        }
+        Ok(policy)
+    }
+
+    /// Admits catalog requests against the auth owner's configured backend, never the catalog URL.
+    pub async fn network_policy_for_managed_snapshot_at_configured_backend(
+        &self,
+        snapshot: &ManagedChatgptAuthSnapshot,
+    ) -> io::Result<codex_http_client::NetworkPolicy> {
+        let Some(backend) = self.chatgpt_base_url.as_deref() else {
+            let policy = self.application_network_policy();
+            if !policy.is_managed() && self.workspace_routing_resolver.get().is_none() {
+                return Ok(policy);
+            }
+            return Err(io::Error::other(
+                "selected account policy backend is unavailable",
+            ));
+        };
+        self.network_policy_for_managed_snapshot(snapshot, backend, /*session*/ None)
+            .await
     }
 
     /// CLI callers without a discovery owner retain their existing routing behavior.
