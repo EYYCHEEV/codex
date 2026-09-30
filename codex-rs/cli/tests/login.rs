@@ -516,10 +516,7 @@ async fn login_status_bounds_stalled_refresh_and_continues_healthy_sibling() -> 
         .collect::<Vec<_>>();
     assert!(stderr.is_empty(), "{stderr}");
     assert!(stdout.contains("stalled@example.com"), "{stdout}");
-    assert!(
-        stdout.contains("refresh temporarily unavailable"),
-        "{stdout}"
-    );
+    assert!(stdout.contains("relogin required"), "{stdout}");
     assert!(stdout.contains("healthy@example.com"), "{stdout}");
     assert!(
         stdout.contains("1 saved reset"),
