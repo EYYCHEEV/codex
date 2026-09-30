@@ -1077,6 +1077,14 @@ impl ContextManager {
                 .into_iter()
                 .collect();
         };
+        // Text-only outputs must also fit after JSON framing and escaping. Media keeps its
+        // model-visible estimate rather than charging for encoded transport bytes.
+        let text_only = match &original_output.body {
+            FunctionCallOutputBody::Text(_) => true,
+            FunctionCallOutputBody::ContentItems(items) => items
+                .iter()
+                .all(|item| matches!(item, FunctionCallOutputContentItem::InputText { .. })),
+        };
 
         // The saved override already includes the tool's serialization allowance. Both it and
         // the model default remain subordinate to the hard per-item context ceiling.
@@ -1102,22 +1110,24 @@ impl ContextManager {
             *output = original_output.clone();
             truncate_function_output_payload(output, effective_policy, estimate_audio_token_count);
 
-            if serialized_json_bytes(&processed.item).is_err() {
+            let Ok(serialized_bytes) = serialized_json_bytes(&processed.item) else {
                 return Vec::new();
-            }
+            };
             let model_visible_bytes = estimate_response_item_model_visible_bytes(&processed.item);
+            let budgeted_bytes = if text_only {
+                model_visible_bytes.max(i64::try_from(serialized_bytes).unwrap_or(i64::MAX))
+            } else {
+                model_visible_bytes
+            };
             let estimated_tokens = estimate_item_token_count(&processed.item);
             let max_bytes = i64::try_from(MODEL_VISIBLE_ITEM_MAX_BYTES).unwrap_or(i64::MAX);
             let max_tokens = i64::try_from(MODEL_VISIBLE_ITEM_MAX_TOKENS).unwrap_or(i64::MAX);
-            if model_visible_bytes <= max_bytes && estimated_tokens <= max_tokens {
+            if budgeted_bytes <= max_bytes && estimated_tokens <= max_tokens {
                 return vec![processed];
             }
-            let model_visible_excess_bytes = usize::try_from(
-                model_visible_bytes
-                    .saturating_sub(max_bytes)
-                    .saturating_add(1),
-            )
-            .unwrap_or(usize::MAX);
+            let budget_excess_bytes =
+                usize::try_from(budgeted_bytes.saturating_sub(max_bytes).saturating_add(1))
+                    .unwrap_or(usize::MAX);
             let estimated_excess_tokens = usize::try_from(
                 estimated_tokens
                     .saturating_sub(max_tokens)
@@ -1125,7 +1135,7 @@ impl ContextManager {
             )
             .unwrap_or(usize::MAX);
             let excess_bytes =
-                model_visible_excess_bytes.max(approx_bytes_for_tokens(estimated_excess_tokens));
+                budget_excess_bytes.max(approx_bytes_for_tokens(estimated_excess_tokens));
             let reduced_policy = match effective_policy {
                 TruncationPolicy::Bytes(bytes) => {
                     TruncationPolicy::Bytes(bytes.saturating_sub(excess_bytes))
