@@ -85,6 +85,7 @@ async fn status_snapshot_only_downgrades_oauth_authentication_failures() {
 
 pub(crate) fn test_mcp_config(codex_home: PathBuf) -> McpConfig {
     McpConfig {
+        application_network_policy: codex_http_client::NetworkPolicy::unmanaged(),
         chatgpt_base_url: "https://chatgpt.com".to_string(),
         apps_mcp_product_sku: None,
         requires_read_only_mcp_tools: false,

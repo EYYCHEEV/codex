@@ -78,16 +78,25 @@ impl AppsRequestProcessor {
         if let Some(snapshot) = scoped_runtime.as_ref() {
             config.chatgpt_base_url = snapshot.mcp.config().chatgpt_base_url.clone();
             config.apps_mcp_product_sku = snapshot.mcp.config().apps_mcp_product_sku.clone();
+            config.application_network_policy = snapshot.application_network_policy.clone();
         }
-        let (auth, directory_cache_key) = match scoped_runtime.as_ref() {
+        let (auth, directory_cache_key, codex_apps_cache_key) = match scoped_runtime.as_ref() {
             Some(snapshot) => {
                 let auth = snapshot.effective_auth.clone();
                 let cache_key = snapshot.connector_directory_cache_key.clone();
-                (auth, cache_key)
+                (auth, cache_key, snapshot.codex_apps_tools_cache_key.clone())
             }
             None => {
-                self.threadless_auth_and_connector_directory_cache_key(&config.chatgpt_base_url)
-                    .await?
+                let (auth, cache_key, tools_key) =
+                    codex_core::connectors::capture_threadless_connector_auth(
+                        &mut config,
+                        &self.auth_manager,
+                    )
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!("failed to capture app authority: {err}"))
+                    })?;
+                (auth, Some(cache_key), tools_key)
             }
         };
         let scoped_mcp_runtime = scoped_runtime.map(|snapshot| snapshot.mcp);
@@ -103,9 +112,9 @@ impl AppsRequestProcessor {
             return Ok(Some(response));
         }
 
-        if scoped_mcp_runtime.is_some() && directory_cache_key.is_none() {
+        if auth.is_none() || directory_cache_key.is_none() {
             return Err(internal_error(
-                "thread-scoped apps/list requires an exact connector cache binding",
+                "apps/list requires an exact connector auth and cache binding",
             ));
         }
         let request = request_id.clone();
@@ -115,6 +124,7 @@ impl AppsRequestProcessor {
             .then(|| self.thread_manager.mcp_manager());
         let environment_manager = self.thread_manager.environment_manager();
         let plugins_manager = self.thread_manager.plugins_manager();
+        let auth_manager = Arc::clone(&self.auth_manager);
         let shutdown_token = self.shutdown_token.child_token();
         tokio::spawn(async move {
             tokio::select! {
@@ -130,6 +140,8 @@ impl AppsRequestProcessor {
                     auth,
                     scoped_mcp_runtime,
                     directory_cache_key,
+                    auth_manager,
+                    codex_apps_cache_key,
                     installed_start,
                 ) => {}
             }
@@ -153,6 +165,8 @@ impl AppsRequestProcessor {
         auth: Option<CodexAuth>,
         scoped_mcp_runtime: Option<Arc<codex_mcp::McpBinding>>,
         directory_cache_key: Option<ConnectorDirectoryCacheKey>,
+        auth_manager: Arc<AuthManager>,
+        codex_apps_cache_key: codex_mcp::CodexAppsToolsCacheKey,
         installed_start: Instant,
     ) {
         let reload = params.force_refetch;
@@ -164,6 +178,8 @@ impl AppsRequestProcessor {
         let retry_auth = auth.clone();
         let retry_scoped_mcp_runtime = scoped_mcp_runtime.clone();
         let retry_directory_cache_key = directory_cache_key.clone();
+        let retry_auth_manager = Arc::clone(&auth_manager);
+        let retry_codex_apps_cache_key = codex_apps_cache_key.clone();
         let result = Self::apps_list_response(
             &outgoing,
             params,
@@ -174,6 +190,8 @@ impl AppsRequestProcessor {
             auth,
             scoped_mcp_runtime,
             directory_cache_key,
+            auth_manager,
+            codex_apps_cache_key,
         )
         .await;
         if result.is_ok() {
@@ -199,6 +217,8 @@ impl AppsRequestProcessor {
                 retry_auth,
                 retry_scoped_mcp_runtime,
                 retry_directory_cache_key,
+                retry_auth_manager,
+                retry_codex_apps_cache_key,
             )
             .await
             {
@@ -217,6 +237,8 @@ impl AppsRequestProcessor {
         auth: Option<CodexAuth>,
         scoped_mcp_runtime: Option<Arc<codex_mcp::McpBinding>>,
         directory_cache_key: Option<ConnectorDirectoryCacheKey>,
+        auth_manager: Arc<AuthManager>,
+        codex_apps_cache_key: codex_mcp::CodexAppsToolsCacheKey,
     ) -> Result<(AppsListResponse, bool), JSONRPCErrorError> {
         let AppsListParams {
             cursor,
@@ -240,24 +262,27 @@ impl AppsRequestProcessor {
                 loaded_plugins.capability_summaries(),
             );
         let plugin_apps = connector_snapshot.connector_ids().to_vec();
-        let (mut accessible_connectors, mut all_connectors) = if scoped_mcp_runtime.is_some() {
-            let all_connectors =
-                auth.as_ref()
-                    .zip(directory_cache_key.clone())
-                    .and_then(|(auth, cache_key)| {
-                        connectors::list_cached_all_connectors_with_auth(
-                            &config,
-                            auth,
-                            cache_key,
-                            &plugin_apps,
-                        )
-                    });
-            (None, all_connectors)
+        let mut all_connectors =
+            auth.as_ref()
+                .zip(directory_cache_key.clone())
+                .and_then(|(auth, cache_key)| {
+                    connectors::list_cached_all_connectors_with_auth(
+                        &config,
+                        auth,
+                        cache_key,
+                        &plugin_apps,
+                    )
+                });
+        let mut accessible_connectors = if scoped_mcp_runtime.is_some() {
+            None
         } else {
-            tokio::join!(
-                connectors::list_cached_accessible_connectors_from_mcp_tools(&config),
-                connectors::list_cached_all_connectors(&config, &plugin_apps)
-            )
+            directory_cache_key.as_ref().and_then(|cache_key| {
+                codex_core::connectors::list_cached_accessible_connectors_with_auth(
+                    &config,
+                    auth.as_ref(),
+                    cache_key,
+                )
+            })
         };
         let cached_all_connectors = all_connectors.clone();
 
@@ -265,6 +290,7 @@ impl AppsRequestProcessor {
 
         let accessible_config = config.clone();
         let accessible_directory_cache_key = directory_cache_key.clone();
+        let accessible_auth = auth.clone();
         let accessible_tx = tx.clone();
         tokio::spawn(async move {
             let result = match scoped_mcp_runtime {
@@ -279,11 +305,16 @@ impl AppsRequestProcessor {
                 }
                 None => match mcp_manager {
                     Some(mcp_manager) => {
-                        connectors::list_accessible_connectors_from_mcp_tools_with_mcp_manager(
+                        codex_core::connectors::list_accessible_connectors_from_mcp_tools_with_auth(
                             &accessible_config,
                             force_refetch,
                             Arc::clone(&environment_manager),
                             mcp_manager,
+                            auth_manager,
+                            accessible_auth,
+                            accessible_directory_cache_key
+                                .expect("apps/list has an exact connector cache binding"),
+                            codex_apps_cache_key,
                         )
                         .await
                     }
@@ -310,14 +341,9 @@ impl AppsRequestProcessor {
                     )
                     .await
                 }
-                _ => {
-                    connectors::list_all_connectors_with_options(
-                        &all_config,
-                        force_refetch,
-                        &all_plugin_apps,
-                    )
-                    .await
-                }
+                _ => Err(anyhow::anyhow!(
+                    "apps/list requires an exact connector auth and cache binding"
+                )),
             }
             .map_err(|err| format!("failed to list apps: {err}"));
             let _ = tx.send(AppListLoadResult::Directory(result));
@@ -435,41 +461,6 @@ impl AppsRequestProcessor {
             .map_err(|_| invalid_request(format!("thread not found: {thread_id}")))?;
 
         Ok((thread_id, thread))
-    }
-
-    async fn threadless_auth_and_connector_directory_cache_key(
-        &self,
-        chatgpt_base_url: &str,
-    ) -> Result<(Option<CodexAuth>, Option<ConnectorDirectoryCacheKey>), JSONRPCErrorError> {
-        let managed_snapshot = self
-            .auth_manager
-            .managed_chatgpt_auth_snapshot(&codex_login::ManagedChatgptSelectionScope::default())
-            .await
-            .map_err(|err| {
-                internal_error(format!(
-                    "failed to resolve threadless managed account snapshot: {err}"
-                ))
-            })?;
-        if let Some(snapshot) = managed_snapshot {
-            let cache_key = ConnectorDirectoryCacheKey::from_transport_binding(
-                chatgpt_base_url.to_string(),
-                snapshot.transport,
-                snapshot.account_revision,
-                snapshot.auth.is_workspace_account(),
-            );
-            return Ok((Some(snapshot.auth), Some(cache_key)));
-        }
-
-        let auth = self.auth_manager.auth().await;
-        let cache_key = auth.as_ref().map(|auth| {
-            ConnectorDirectoryCacheKey::new(
-                chatgpt_base_url.to_string(),
-                auth.get_account_id(),
-                auth.get_chatgpt_user_id(),
-                auth.is_workspace_account(),
-            )
-        });
-        Ok((auth, cache_key))
     }
 
     async fn load_latest_config(

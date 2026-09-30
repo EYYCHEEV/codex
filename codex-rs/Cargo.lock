@@ -3846,6 +3846,7 @@ dependencies = [
  "codex-diagnostics",
  "codex-exec-server",
  "codex-exec-server-test-support",
+ "codex-http-client",
  "codex-login",
  "codex-model-provider",
  "codex-otel",

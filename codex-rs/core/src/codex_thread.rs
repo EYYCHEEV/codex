@@ -201,6 +201,8 @@ pub struct CodexThread {
 }
 pub struct ThreadRuntimeSnapshot {
     pub effective_auth: Option<codex_login::CodexAuth>,
+    /// Destination policy admitted for `effective_auth`, not the ambient default account.
+    pub application_network_policy: codex_http_client::NetworkPolicy,
     pub mcp: Arc<codex_mcp::McpBinding>,
     pub runtime_context: codex_mcp::McpRuntimeContext,
     pub connector_directory_cache_key: Option<codex_connectors::ConnectorDirectoryCacheKey>,
@@ -1007,15 +1009,19 @@ impl CodexThread {
                 Some(&self.session.session_id().to_string()),
             )
             .await?;
+        let application_network_policy = setup.admitted_network_policy()?.clone();
         let step = self
             .session
             .capture_step_context_for_setup(turn_context, &setup)
             .await?;
-        let runtime_context = self
-            .session
-            .mcp_runtime_context(&step.environments, step.turn.config.cwd.as_path());
+        let runtime_context = self.session.mcp_runtime_context_with_policy(
+            &step.environments,
+            step.turn.config.cwd.as_path(),
+            application_network_policy.clone(),
+        );
         Ok(ThreadRuntimeSnapshot {
             effective_auth: setup.effective_auth,
+            application_network_policy,
             mcp: Arc::clone(&step.mcp),
             runtime_context,
             connector_directory_cache_key: step.connector_directory_cache_key.clone(),

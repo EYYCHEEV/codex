@@ -20,6 +20,7 @@ use std::collections::HashSet;
 
 pub(super) struct McpDesiredState {
     pub(super) config: Arc<Config>,
+    pub(super) application_network_policy: codex_http_client::NetworkPolicy,
     pub(super) auth: Option<CodexAuth>,
     pub(super) codex_apps_tools_cache_key: codex_mcp::CodexAppsToolsCacheKey,
     pub(super) submit_id: String,
@@ -118,6 +119,7 @@ impl Session {
             .to_path_buf();
 
         McpDesiredState {
+            application_network_policy: config.application_network_policy.clone(),
             config: Arc::new(config),
             auth,
             codex_apps_tools_cache_key,
@@ -159,6 +161,7 @@ impl Session {
             auth.as_ref().is_some_and(CodexAuth::is_workspace_account),
         );
         let desired = McpDesiredState {
+            application_network_policy: config.application_network_policy.clone(),
             config: Arc::new(config),
             auth,
             codex_apps_tools_cache_key,
@@ -355,6 +358,7 @@ impl Session {
             plugins_available,
             selected_plugins: _,
         } = mcp_projection;
+        config.application_network_policy = desired.application_network_policy.clone();
         config.approval_policy = desired.config.permissions.approval_policy.clone();
         config.permission_profile = desired.config.permissions.effective_permission_profile();
         config.approvals_reviewer = desired.config.approvals_reviewer;
@@ -383,9 +387,10 @@ impl Session {
             }),
         );
         let mcp_config = Arc::new(config);
-        let runtime_context = McpRuntimeContext::new(
+        let runtime_context = McpRuntimeContext::new_with_network_policy(
             self.services.turn_environments.environment_manager(),
             desired.local_process_cwd.clone(),
+            desired.application_network_policy.clone(),
         )
         .with_selected_environments(
             desired.environments.configuration_selections().into(),

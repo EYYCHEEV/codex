@@ -123,6 +123,8 @@ pub struct McpPermissionPromptAutoApproveContext {
 /// runtime entry points such as [`effective_mcp_servers`].
 #[derive(Debug, Clone)]
 pub struct McpConfig {
+    /// Application network authority captured for host-owned HTTP transports.
+    pub application_network_policy: codex_http_client::NetworkPolicy,
     /// Base URL for ChatGPT-hosted app MCP servers, copied from the root config.
     pub chatgpt_base_url: String,
     /// Optional product SKU forwarded to the host-owned apps MCP server.

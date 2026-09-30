@@ -143,7 +143,6 @@ impl Session {
             )
         };
         let environments = self.services.turn_environments.snapshot().await;
-        let environment_selections = environments.configuration_selections();
         let selected_capability_roots = self
             .resolve_selected_capability_roots_for_step(&environments)
             .await;
@@ -180,7 +179,11 @@ impl Session {
             .project_selected_environment_mcp_servers(config, &environments, mcp_projection)
             .await
             .config;
-        let runtime_context = self.mcp_runtime_context(&environments, &host_fallback_cwd);
+        let runtime_context = self.mcp_runtime_context_with_policy(
+            &environments,
+            &host_fallback_cwd,
+            mcp_config.application_network_policy.clone(),
+        );
         (mcp_config, runtime_context)
     }
 
@@ -195,13 +198,30 @@ impl Session {
         environments: &TurnEnvironmentSnapshot,
         host_fallback_cwd: &std::path::Path,
     ) -> McpRuntimeContext {
+        let policy = self
+            .services
+            .turn_environments
+            .environment_manager()
+            .http_client_factory()
+            .network_policy()
+            .clone();
+        self.mcp_runtime_context_with_policy(environments, host_fallback_cwd, policy)
+    }
+
+    pub(crate) fn mcp_runtime_context_with_policy(
+        &self,
+        environments: &TurnEnvironmentSnapshot,
+        host_fallback_cwd: &std::path::Path,
+        policy: codex_http_client::NetworkPolicy,
+    ) -> McpRuntimeContext {
         let local_process_cwd = environments
             .local_environment_cwd()
             .map(|cwd| cwd.to_path_buf())
             .unwrap_or_else(|| host_fallback_cwd.to_path_buf());
-        McpRuntimeContext::new(
+        McpRuntimeContext::new_with_network_policy(
             self.services.turn_environments.environment_manager(),
             local_process_cwd,
+            policy,
         )
         .with_selected_environments(
             environments.configuration_selections().into(),
@@ -397,6 +417,7 @@ impl Session {
         selected_capability_roots: &[ResolvedSelectedCapabilityRoot],
         executor_capability_discovery: Option<&ExecutorCapabilityDiscoverySnapshot>,
         request_setup: Option<&CurrentClientSetup>,
+        application_network_policy: &codex_http_client::NetworkPolicy,
         required_servers: &[String],
         required_plugins: &HashSet<String>,
     ) -> Arc<codex_mcp::McpBinding> {
@@ -484,6 +505,7 @@ impl Session {
                     .current_config()
                     .is_some_and(|config| {
                         config.chatgpt_base_url == turn_context.config.chatgpt_base_url
+                            && config.application_network_policy == *application_network_policy
                     })
         };
         if runtime_matches()
@@ -497,8 +519,9 @@ impl Session {
         }
 
         let Ok(_refresh) = self.mcp_refresh.acquire().await else {
-            let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
-            return Arc::new(codex_mcp::McpBinding::empty(config));
+            let mut config = self.runtime_mcp_config(&turn_context.config).await;
+            config.application_network_policy = application_network_policy.clone();
+            return Arc::new(codex_mcp::McpBinding::empty(Arc::new(config)));
         };
         if runtime_matches()
             && let Some(binding) = self
@@ -514,13 +537,14 @@ impl Session {
             .latest_mcp_desired_state_with_cache_key(auth, cache_key, environments.clone())
             .await;
         desired.config = Arc::clone(&turn_context.config);
+        desired.application_network_policy = application_network_policy.clone();
         desired.originator = turn_context.originator.clone();
         desired.session_source = turn_context.session_source.clone();
         desired.local_process_cwd = environments
             .local_environment_cwd()
             .unwrap_or_else(|| turn_context.config.cwd.clone())
             .to_path_buf();
-        let mcp_projection = self
+        let mut mcp_projection = self
             .services
             .mcp_manager
             .runtime_config_for_step(
@@ -541,6 +565,7 @@ impl Session {
                 executor_capability_discovery,
             )
             .await;
+        mcp_projection.config.application_network_policy = application_network_policy.clone();
         let fallback_config = Arc::new(mcp_projection.config.clone());
         self.publish_mcp_runtime(
             &desired,

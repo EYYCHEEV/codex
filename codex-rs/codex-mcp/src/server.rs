@@ -143,6 +143,7 @@ pub(crate) struct McpServerConnectionIdentity {
     pub(crate) oauth_store_was_contended: bool,
     resolved_environment: Result<Option<Arc<Environment>>, String>,
     local_stdio_fallback_cwd: Option<PathBuf>,
+    local_http_network_policy: Option<codex_http_client::NetworkPolicy>,
     referenced_environment_variables: Vec<(String, Option<OsString>)>,
     runtime_auth: Option<CodexAuth>,
     runtime_auth_token: Option<String>,
@@ -244,6 +245,17 @@ impl McpServerConnectionIdentity {
                     }
             ))
         .then(|| runtime_context.local_process_cwd());
+        let local_http_network_policy = match (&config.transport, resolved_environment) {
+            (McpServerTransportConfig::StreamableHttp { .. }, Ok(environment))
+                if !environment
+                    .as_ref()
+                    .is_some_and(|environment| environment.is_remote()) =>
+            {
+                Some(runtime_context.local_http_network_policy().clone())
+            }
+            (McpServerTransportConfig::Stdio { .. }, _)
+            | (McpServerTransportConfig::StreamableHttp { .. }, _) => None,
+        };
         let referenced_environment_variables = match server.credential_policy() {
             McpCredentialPolicy::HostFallbackAllowed => referenced_environment_variables(config),
             McpCredentialPolicy::ExecutorOnly => Vec::new(),
@@ -271,6 +283,7 @@ impl McpServerConnectionIdentity {
             oauth_store_was_contended,
             resolved_environment: resolved_environment.clone(),
             local_stdio_fallback_cwd,
+            local_http_network_policy,
             referenced_environment_variables,
             runtime_auth,
             runtime_auth_token,
@@ -310,6 +323,7 @@ impl McpServerConnectionIdentity {
                 == other.oauth_config.as_ref().and_then(|oauth| oauth.client_secret.as_ref())
             && same_resolved_environment(&self.resolved_environment, &other.resolved_environment)
             && self.local_stdio_fallback_cwd == other.local_stdio_fallback_cwd
+            && self.local_http_network_policy == other.local_http_network_policy
             && self.referenced_environment_variables == other.referenced_environment_variables
             && same_runtime_auth
             && self.runtime_auth_token == other.runtime_auth_token

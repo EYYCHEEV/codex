@@ -265,8 +265,19 @@ async fn refresh_accessible_connectors_cache_from_mcp_tools_writes_latest_instal
     );
 }
 
-#[test]
-fn managed_accessible_connectors_cache_isolates_identity_and_credential_revision() {
+#[tokio::test]
+async fn managed_accessible_connectors_cache_isolates_identity_and_credential_revision() {
+    let codex_home = tempdir().expect("temporary home");
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("build config");
+    config
+        .features
+        .set_enabled(Feature::Apps, /*enabled*/ true)
+        .expect("enable Apps");
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
     let transport = TransportAuthBinding {
         identity_key: "first@example.com".to_string(),
         raw_account_id: Some("shared-workspace".to_string()),
@@ -300,16 +311,67 @@ fn managed_accessible_connectors_cache_isolates_identity_and_credential_revision
     with_accessible_connectors_cache_cleared(|| {
         write_cached_accessible_connectors(first_key.clone(), &cached);
 
-        assert_eq!(read_cached_accessible_connectors(&first_key), Some(cached));
         assert_eq!(
-            read_cached_accessible_connectors(&second_identity_key),
+            list_cached_accessible_connectors_with_auth(&config, Some(&auth), &first_key),
+            Some(cached)
+        );
+        assert_eq!(
+            list_cached_accessible_connectors_with_auth(&config, Some(&auth), &second_identity_key),
             None
         );
         assert_eq!(
-            read_cached_accessible_connectors(&refreshed_credential_key),
+            list_cached_accessible_connectors_with_auth(
+                &config,
+                Some(&auth),
+                &refreshed_credential_key,
+            ),
             None
         );
     });
+}
+
+#[tokio::test]
+async fn threadless_capture_replaces_stale_config_policy_with_captured_auth_owner_policy() {
+    let codex_home = tempdir().expect("temporary home");
+    let mut config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("build config");
+    let stale_owner = codex_http_client::NetworkPolicyController::default();
+    config.application_network_policy = stale_owner.policy().for_current_account();
+    let url = url::Url::parse("https://example.com/mcp").expect("test URL");
+    assert!(config.application_network_policy.acquire(&url).is_err());
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let manager =
+        AuthManager::from_auth_for_testing_with_home(auth.clone(), codex_home.path().to_path_buf());
+
+    let (captured_auth, directory_key, tools_key) =
+        capture_threadless_connector_auth(&mut config, &manager)
+            .await
+            .expect("capture unmanaged auth owner");
+
+    assert_eq!(captured_auth, Some(auth.clone()));
+    assert!(config.application_network_policy.acquire(&url).is_ok());
+    assert!(stale_owner.policy().acquire(&url).is_err());
+    assert_eq!(
+        directory_key,
+        ConnectorDirectoryCacheKey::from_runtime_binding(
+            config.chatgpt_base_url.clone(),
+            TransportAuthBinding::for_nonmanaged_auth(Some(&auth)),
+            /*credential_revision*/ None,
+            auth.is_workspace_account(),
+        )
+    );
+    assert_eq!(
+        tools_key,
+        codex_mcp::CodexAppsToolsCacheKey::from_runtime_binding(
+            TransportAuthBinding::for_nonmanaged_auth(Some(&auth)),
+            /*credential_revision*/ None,
+            config.chatgpt_base_url.clone(),
+            auth.is_workspace_account(),
+        )
+    );
 }
 
 #[test]

@@ -65,7 +65,6 @@ use codex_analytics::TurnCodexErrorFact;
 use codex_async_utils::OrCancelExt;
 use codex_attachment_store::AttachmentStore;
 use codex_attachment_store::InlineAttachmentStore;
-use codex_connectors::connector_runtime_context_key;
 use codex_context_fragments::RenderedFragment;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
@@ -3998,6 +3997,7 @@ impl Session {
         required_plugins: &HashSet<String>,
         codex_apps_tool_refresh: CodexAppsToolRefresh,
     ) -> CodexResult<Arc<StepContext>> {
+        let application_network_policy = setup.admitted_network_policy()?;
         // Read the step's model and record its environments together so an update cannot split them.
         // Wait for executor startup below, after releasing the lock.
         let (mut settings, environments) = {
@@ -4105,6 +4105,7 @@ impl Session {
                     &selected_capability_roots,
                     executor_capability_discovery.as_deref(),
                     Some(setup),
+                    application_network_policy,
                     required_servers,
                     required_plugins,
                 ))
@@ -4119,6 +4120,7 @@ impl Session {
                         &selected_capability_roots,
                         executor_capability_discovery.as_deref(),
                         Some(setup),
+                        application_network_policy,
                         required_servers,
                         required_plugins,
                     ))
