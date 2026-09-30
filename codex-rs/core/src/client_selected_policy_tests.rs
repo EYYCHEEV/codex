@@ -11,6 +11,8 @@ use codex_login::WorkspaceRoutingResolver;
 use codex_login::WorkspaceRoutingSession;
 use pretty_assertions::assert_eq;
 use tokio::sync::Mutex;
+use tokio_tungstenite::tungstenite::extensions::compression::deflate::DeflateConfig;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 struct SelectedPolicyOwner(Mutex<NetworkPolicy>);
 
@@ -121,7 +123,9 @@ async fn websocket_reuses_only_the_same_selected_policy_owner() -> anyhow::Resul
         let mut sockets = Vec::new();
         for count in 1..=2 {
             let (socket, _) = listener.accept().await?;
-            sockets.push(tokio_tungstenite::accept_async(socket).await?);
+            let mut config = WebSocketConfig::default();
+            config.extensions.permessage_deflate = Some(DeflateConfig::default());
+            sockets.push(tokio_tungstenite::accept_async_with_config(socket, Some(config)).await?);
             accepted.send(count)?;
         }
         let _ = stopped.await;
