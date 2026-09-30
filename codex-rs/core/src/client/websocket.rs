@@ -326,7 +326,6 @@ impl ModelClientSession {
                     request_route_telemetry: RequestRouteTelemetry::for_endpoint(endpoint.path()),
                     responses_headers: &responses_headers,
                     endpoint,
-
                 })
                 .await
             {

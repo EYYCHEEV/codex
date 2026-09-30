@@ -154,7 +154,6 @@ impl LunaSampler {
         }
     }
 
-
     /// Sends one tool-less classification request using an available transport.
     pub async fn sample(&self, request: LunaSamplingRequest) -> Result<String, LunaSamplerError> {
         let auth_owner_generation = self

@@ -10,6 +10,7 @@ use codex_config::ThreadConfigLoadErrorCode;
 use codex_config::ThreadConfigLoaderFuture;
 use codex_config::ThreadConfigSource;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_http_client::NetworkPolicyDenied;
 use pretty_assertions::assert_eq;
 use tempfile::tempdir;
 use test_case::test_case;
@@ -275,6 +276,113 @@ async fn selected_admission_defers_global_cloud_but_preserves_local_requirements
         );
         std::fs::remove_file(&requirements_path)?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn derived_cloud_managers_isolate_effective_policy_and_share_local_restrictions() -> Result<()>
+{
+    let home = tempdir()?;
+    let requirements_path = home.path().join("requirements.toml");
+    std::fs::write(
+        &requirements_path,
+        "[application.network.domains]\n'local.example' = 'allow'\n'blocked.example' = 'deny'",
+    )?;
+    let overrides = LoaderOverrides {
+        system_requirements_path: Some(requirements_path.clone()),
+        ..LoaderOverrides::without_managed_config_for_tests()
+    };
+    let manager = ConfigManager::new_for_tests(
+        home.path().to_path_buf(),
+        Vec::new(),
+        overrides,
+        CloudConfigBundleFixture::loader_with_enterprise_requirement(
+            "[application.network.domains]\n'global.example' = 'allow'",
+        ),
+    );
+    let global_load = manager.refresh_application_network_policy().await?;
+    let global_policy = manager.network_policy.policy();
+    let global_url = "https://global.example".parse()?;
+    let selected_url = "https://selected.example".parse()?;
+    let local_url = "https://local.example".parse()?;
+    let blocked_url = "https://blocked.example".parse()?;
+    let global_permit = global_policy.acquire(&global_url)?;
+
+    let bootstrap = manager.with_cloud_config_bundle(CloudConfigBundleLoader::default());
+    let bootstrap_config = bootstrap.load_latest_config(/*fallback_cwd*/ None).await?;
+    assert_eq!(
+        bootstrap_config
+            .application_network_policy
+            .acquire(&local_url)
+            .map(|_| ()),
+        Ok(()),
+    );
+    assert_eq!(
+        bootstrap_config
+            .application_network_policy
+            .acquire(&global_url)
+            .map(|_| ()),
+        Err(NetworkPolicyDenied::Destination),
+    );
+    manager.check_application_policy_load(&global_load)?;
+    global_permit.check()?;
+    assert_eq!(global_policy.acquire(&global_url).map(|_| ()), Ok(()));
+
+    let selected = manager.with_cloud_config_bundle(
+        CloudConfigBundleFixture::loader_with_enterprise_requirement(
+            "[application.network.domains]\n'selected.example' = 'allow'",
+        ),
+    );
+    let selected_config = selected.load_latest_config(/*fallback_cwd*/ None).await?;
+    assert_eq!(
+        selected_config
+            .application_network_policy
+            .acquire(&selected_url)
+            .map(|_| ()),
+        Ok(()),
+    );
+    manager.check_application_policy_load(&global_load)?;
+    global_permit.check()?;
+    assert_eq!(global_policy.acquire(&global_url).map(|_| ()), Ok(()));
+    assert_eq!(
+        global_policy.acquire(&selected_url).map(|_| ()),
+        Err(NetworkPolicyDenied::Destination),
+    );
+    assert_eq!(
+        bootstrap_config
+            .application_network_policy
+            .acquire(&selected_url)
+            .map(|_| ()),
+        Err(NetworkPolicyDenied::Destination),
+    );
+    for policy in [
+        &global_policy,
+        &bootstrap_config.application_network_policy,
+        &selected_config.application_network_policy,
+    ] {
+        assert_eq!(
+            policy.acquire(&blocked_url).map(|_| ()),
+            Err(NetworkPolicyDenied::Destination),
+        );
+    }
+
+    let local_policy = manager.local_network_policy.policy();
+    let local_permit = local_policy.acquire(&local_url)?;
+    std::fs::write(&requirements_path, "[application.network]")?;
+    selected.refresh_local_network_policy().await?;
+    assert_eq!(local_permit.check(), Err(NetworkPolicyDenied::Revoked));
+    for scoped in [&manager, &bootstrap, &selected] {
+        assert_eq!(
+            scoped
+                .local_network_policy
+                .policy()
+                .acquire(&local_url)
+                .map(|_| ()),
+            Err(NetworkPolicyDenied::Destination),
+        );
+    }
+    manager.check_application_policy_load(&global_load)?;
+    global_permit.check()?;
     Ok(())
 }
 
