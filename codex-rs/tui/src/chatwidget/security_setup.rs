@@ -42,7 +42,7 @@ impl ChatWidget {
     }
 
     pub(crate) fn show_security_setup(&mut self, identity: Identity, notice: Notice) {
-        if !notice.valid() {
+        if self.managed_accounts().is_some() || !notice.valid() {
             return;
         }
         if self.security_setup_identity.as_ref() != Some(&identity) {

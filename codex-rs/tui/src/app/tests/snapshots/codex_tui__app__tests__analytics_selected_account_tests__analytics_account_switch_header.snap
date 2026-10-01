@@ -1,0 +1,5 @@
+---
+source: tui/src/app/tests/analytics_selected_account_tests.rs
+expression: screen.lines().next().unwrap()
+---
+ Usage · Plus · a-scoped@example.test

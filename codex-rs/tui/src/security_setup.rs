@@ -81,6 +81,17 @@ pub(crate) fn prefetch(
     let request_handle = server.request_handle();
     tokio::spawn(async move {
         let result = tokio::time::timeout(Duration::from_secs(3), async {
+            // Singular auth cannot establish reminder eligibility for a selected pool account.
+            let pool: codex_app_server_protocol::ListAccountsResponse = request_handle
+                .request_typed(ClientRequest::ListAccounts {
+                    request_id: RequestId::String(Uuid::new_v4().to_string()),
+                    params: codex_app_server_protocol::ListAccountsParams::default(),
+                })
+                .await
+                .ok()?;
+            if !pool.accounts.is_empty() {
+                return None;
+            }
             // Saved credentials must match the connected server, which may use external auth.
             let status: GetAuthStatusResponse = request_handle
                 .request_typed(ClientRequest::GetAuthStatus {

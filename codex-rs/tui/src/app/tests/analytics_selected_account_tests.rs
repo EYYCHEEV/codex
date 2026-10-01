@@ -4,6 +4,12 @@ use app_test_support::create_fake_rollout;
 use app_test_support::encode_id_token;
 use app_test_support::rollout_path;
 use app_test_support::write_models_cache;
+use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::AccountAnalyticsQuery;
+use codex_app_server_protocol::AccountAnalyticsReadParams;
+use codex_app_server_protocol::AccountAnalyticsReadResponse;
+use codex_app_server_protocol::AccountPoolUpdatedNotification;
+use codex_app_server_protocol::AccountSelectionUpdatedNotification;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ListAccountsParams;
 use codex_app_server_protocol::ListAccountsResponse;
@@ -296,5 +302,293 @@ async fn analytics_uses_session_selected_account_and_policy_not_local_default() 
     );
     app.overlay = None;
     server.shutdown().await?;
+    Ok(())
+}
+
+fn draw(fixture: &mut Fixture) -> Result<String> {
+    let Some(Overlay::Analytics(view)) = fixture.app.overlay.as_mut() else {
+        panic!("Analytics overlay");
+    };
+    view.handle_event(&mut fixture.tui, TuiEvent::Draw)?;
+    let buffer = crate::custom_terminal::test_support::last_rendered_buffer(&fixture.tui.terminal);
+    Ok(buffer
+        .content()
+        .chunks(usize::from(buffer.area.width))
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+async fn wait_for_screen(fixture: &mut Fixture, account: &str, report: &str) -> Result<String> {
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 10), async {
+        loop {
+            let screen = draw(fixture)?;
+            if screen.contains(account) && screen.contains(report) && !screen.contains("Loading") {
+                return Ok(screen);
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 5)).await;
+        }
+    })
+    .await?
+}
+
+fn key(fixture: &mut Fixture, key: char) -> Result<()> {
+    let Some(Overlay::Analytics(view)) = fixture.app.overlay.as_mut() else {
+        panic!("Analytics overlay");
+    };
+    view.handle_event(
+        &mut fixture.tui,
+        TuiEvent::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
+    )?;
+    Ok(())
+}
+
+async fn rotate(fixture: &Fixture, from: &str, to: &str) -> Result<()> {
+    let scope = ManagedChatgptSelectionScope {
+        thread_id: Some(THREAD.into()),
+        session_id: Some(THREAD.into()),
+        model: Some("gpt-5.1".into()),
+        ..Default::default()
+    };
+    let emails = app_test_support::invalidate_managed_chatgpt_account(
+        &fixture.app.config,
+        &format!("email:{from}"),
+        &scope,
+    )
+    .await?;
+    assert_eq!(emails, (Some(from.into()), Some(to.into())));
+    Ok(())
+}
+
+async fn observe_selection(fixture: &mut Fixture, expected: &str) -> Result<()> {
+    let list: ListAccountsResponse = fixture
+        .server
+        .request_handle()
+        .request_typed(ClientRequest::ListAccounts {
+            request_id: AppServerRequestId::String(uuid::Uuid::new_v4().to_string()),
+            params: ListAccountsParams {
+                thread_id: Some(THREAD.into()),
+                ..Default::default()
+            },
+        })
+        .await?;
+    assert_eq!(list.selected_account_id.as_deref(), Some(expected));
+    for notification in [
+        ServerNotification::AccountPoolUpdated(AccountPoolUpdatedNotification {
+            accounts: list.accounts,
+            pool_revision: list.pool_revision,
+        }),
+        ServerNotification::AccountSelectionUpdated(AccountSelectionUpdatedNotification {
+            thread_id: THREAD.into(),
+            selected_account_id: list.selected_account_id,
+            selection_revision: list.selection_revision.unwrap(),
+        }),
+    ] {
+        fixture
+            .app
+            .handle_app_server_event(
+                &fixture.server,
+                AppServerEvent::ServerNotification(Box::new(notification)),
+            )
+            .await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn analytics_refresh_after_session_switch_never_labels_a_cached_report_as_b() -> Result<()> {
+    let mut fixture = fixture().await?;
+    rotate(&fixture, "a-scoped@example.test", "z-global@example.test").await?;
+    observe_selection(&mut fixture, "email:z-global@example.test").await?;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage/daily-token-usage-breakdown"))
+        .respond_with(|request: &wiremock::Request| {
+            let amount = match request
+                .headers
+                .get("chatgpt-account-id")
+                .unwrap()
+                .to_str()
+                .unwrap()
+            {
+                "workspace-global" => 120,
+                "workspace-scoped" => 240,
+                _ => panic!("unexpected account"),
+            };
+            ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"data": [{
+                "date": chrono::Utc::now().date_naive().to_string(),
+                "product_surface_usage_values": {"cli": amount},
+            }]}))
+        })
+        .with_priority(/*p*/ 1)
+        .mount(&fixture.backend)
+        .await;
+    let captured_a: AccountAnalyticsReadResponse = fixture
+        .server
+        .request_handle()
+        .request_typed(ClientRequest::AccountAnalyticsRead {
+            request_id: AppServerRequestId::Integer(21),
+            params: AccountAnalyticsReadParams {
+                thread_id: Some(THREAD.into()),
+                expected_binding: None,
+                query: AccountAnalyticsQuery::Account,
+            },
+        })
+        .await?;
+    fixture
+        .app
+        .handle_event(
+            &mut fixture.tui,
+            &mut fixture.server,
+            AppEvent::OpenAnalytics { view: None },
+        )
+        .await?;
+    wait_for_screen(&mut fixture, "z-global@example.test", "Overview").await?;
+    key(&mut fixture, '2')?;
+    wait_for_screen(&mut fixture, "z-global@example.test", "120").await?;
+    key(&mut fixture, 'g')?;
+    key(&mut fixture, 'g')?;
+    wait_for_screen(&mut fixture, "z-global@example.test", "120").await?;
+    let before = fixture.backend.received_requests().await.unwrap();
+    assert_eq!(
+        before
+            .iter()
+            .filter(|request| request.url.path().ends_with("daily-token-usage-breakdown"))
+            .count(),
+        1,
+        "changing grouping must reuse A's cached payload"
+    );
+
+    let jwt = encode_id_token(
+        &ChatGptIdTokenClaims::new()
+            .email("a-scoped@example.test")
+            .chatgpt_account_id("workspace-scoped")
+            .chatgpt_user_id("user-b")
+            .plan_type("plus"),
+    )
+    .expect("synthetic relogin");
+    app_test_support::upsert_managed_chatgpt_oauth(
+        &fixture.app.config,
+        ManagedChatgptOauthCredentials {
+            tokens: TokenData {
+                id_token: parse_chatgpt_jwt_claims(&jwt)?,
+                access_token: "access-b".into(),
+                refresh_token: "refresh-access-b".into(),
+                account_id: Some("workspace-scoped".into()),
+            },
+            last_refresh: chrono::Utc::now(),
+            oauth_api_key: None,
+        },
+    )
+    .await?;
+    rotate(&fixture, "z-global@example.test", "a-scoped@example.test").await?;
+    observe_selection(&mut fixture, "email:a-scoped@example.test").await?;
+    let cleared = draw(&mut fixture)?;
+    assert!(
+        !cleared.contains("z-global@example.test") && !cleared.contains("120"),
+        "{cleared}"
+    );
+    let stale: std::result::Result<AccountAnalyticsReadResponse, _> = fixture
+        .server
+        .request_handle()
+        .request_typed(ClientRequest::AccountAnalyticsRead {
+            request_id: AppServerRequestId::Integer(22),
+            params: AccountAnalyticsReadParams {
+                thread_id: Some(THREAD.into()),
+                expected_binding: Some(captured_a.binding.clone()),
+                query: AccountAnalyticsQuery::Validate,
+            },
+        })
+        .await;
+    assert!(
+        stale.is_err(),
+        "A's captured identity and credential cache key must be rejected"
+    );
+    key(&mut fixture, 'R')?;
+    let screen = wait_for_screen(&mut fixture, "a-scoped@example.test", "240").await?;
+    assert!(
+        !screen.contains("z-global@example.test") && !screen.contains("120"),
+        "{screen}"
+    );
+    let after = fixture.backend.received_requests().await.unwrap();
+    let new_usage = after
+        .iter()
+        .skip(before.len())
+        .filter(|request| request.url.path().ends_with("daily-token-usage-breakdown"))
+        .collect::<Vec<_>>();
+    assert!(!new_usage.is_empty());
+    assert!(new_usage.iter().all(|request| request.headers.get("chatgpt-account-id").unwrap() == "workspace-scoped"));
+    insta::assert_snapshot!(
+        "analytics_account_switch_header",
+        screen.lines().next().unwrap()
+    );
+    fixture.app.overlay = None;
+    fixture.server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pool_security_reminder_never_displays_default_a_eligibility_for_selected_b() -> Result<()>
+{
+    let mut fixture = fixture().await?;
+    fixture.app.config.model_provider_id = "openai".into();
+    Mock::given(path("/backend-api/wham/security-setup"))
+        .respond_with(
+            ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"notice": {
+                "title": "A eligible security setup", "description": "Account A only",
+                "action": {"label": "Set up A", "url": "https://chatgpt.com/cyber"},
+            }})),
+        )
+        .expect(/*r*/ 0)
+        .mount(&fixture.backend)
+        .await;
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let request_id = fixture.app.chat_widget.security_setup_request_id;
+    crate::security_setup::prefetch(
+        &fixture.app.config,
+        &fixture.server,
+        AppEventSender::new(tx),
+        request_id,
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(/*secs*/ 5), events.recv())
+            .await?
+            .is_none(),
+        "pool eligibility must fail closed before querying default A"
+    );
+    fixture
+        .app
+        .handle_event(
+            &mut fixture.tui,
+            &mut fixture.server,
+            AppEvent::SecuritySetupLoaded {
+                request_id,
+                identity: crate::security_setup::Identity {
+                    account: "workspace-global".into(),
+                    user: "user-a".into(),
+                },
+                notice: crate::security_setup::Notice {
+                    title: "A eligible security setup".into(),
+                    description: "Account A only".into(),
+                    action: crate::security_setup::Action {
+                        label: "Set up A".into(),
+                        url: "https://chatgpt.com/cyber".into(),
+                    },
+                },
+            },
+        )
+        .await?;
+    let screen = render_bottom_popup(&fixture.app.chat_widget, /*width*/ 80);
+    assert!(
+        !screen.contains("A eligible security setup") && !screen.contains("Set up A"),
+        "{screen}"
+    );
+    fixture.backend.verify().await;
+    fixture.server.shutdown().await?;
     Ok(())
 }

@@ -8,6 +8,7 @@ use super::models::AccountKind;
 use super::report_data::AnalyticsData;
 use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
+use codex_app_server_protocol::AccountAnalyticsBinding;
 use codex_app_server_protocol::AccountAnalyticsCreditBreakdown as Breakdown;
 use codex_app_server_protocol::AccountAnalyticsQuery as Query;
 use codex_app_server_protocol::AccountAnalyticsReadParams;
@@ -37,7 +38,8 @@ pub(super) struct Session {
     pub(super) account: AccountAnalyticsReadResponse,
     handle: AppServerRequestHandle,
     credit_groups: Vec<usize>,
-    cache: Mutex<HashMap<(AnalyticsReport, String, String), AnalyticsData>>,
+    cache:
+        Mutex<HashMap<(AccountAnalyticsBinding, AnalyticsReport, String, String), AnalyticsData>>,
 }
 
 impl Session {
@@ -217,9 +219,19 @@ impl Live {
         })?;
         // Credit events have no range parameters. Other grouping changes reuse the same payload.
         let key = if route == AnalyticsReport::Credits {
-            (route, String::new(), String::new())
+            (
+                session.account.binding.clone(),
+                route,
+                String::new(),
+                String::new(),
+            )
         } else {
-            (route, start.to_string(), end.to_string())
+            (
+                session.account.binding.clone(),
+                route,
+                start.to_string(),
+                end.to_string(),
+            )
         };
         let cached = session.cache.lock().await.get(&key).cloned();
         let response = if let Some(response) = cached {
@@ -228,8 +240,8 @@ impl Live {
             session
                 .request::<AnalyticsResponse>(Query::History {
                     report: route,
-                    start: key.1.clone(),
-                    end: key.2.clone(),
+                    start: key.2.clone(),
+                    end: key.3.clone(),
                 })
                 .await
                 .map(AnalyticsData::from)
