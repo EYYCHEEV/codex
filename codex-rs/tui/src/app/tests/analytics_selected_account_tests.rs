@@ -592,3 +592,142 @@ async fn pool_security_reminder_never_displays_default_a_eligibility_for_selecte
     fixture.server.shutdown().await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn security_setup_single_account_banner_clears_when_second_account_is_added() -> Result<()> {
+    let mut fixture = fixture().await?;
+    let mut pool: ListAccountsResponse = fixture
+        .server
+        .request_handle()
+        .request_typed(ClientRequest::ListAccounts {
+            request_id: AppServerRequestId::Integer(23),
+            params: ListAccountsParams {
+                thread_id: Some(THREAD.into()),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let both_accounts = pool.accounts.clone();
+    pool.accounts
+        .retain(|account| Some(&account.managed_account_id) == pool.selected_account_id.as_ref());
+    assert_eq!(pool.accounts.len(), 1);
+    pool.pool_revision += 1;
+    let next_pool_revision = pool.pool_revision + 1;
+    let next_selection_revision = pool.selection_revision.unwrap() + 1;
+    fixture.app.chat_widget.replace_managed_accounts(pool);
+    let binding = fixture
+        .app
+        .chat_widget
+        .managed_accounts()
+        .unwrap()
+        .selected_account_binding_key();
+    let identity = crate::security_setup::Identity {
+        account: "workspace-scoped".into(),
+        user: "user-b".into(),
+    };
+    let notice = crate::security_setup::Notice {
+        title: "Keep using Daybreak mode".into(),
+        description: "Set up security.".into(),
+        action: crate::security_setup::Action {
+            label: "Set up security".into(),
+            url: "https://chatgpt.com/cyber".into(),
+        },
+    };
+    let request_id = fixture.app.chat_widget.security_setup_request_id;
+    fixture
+        .app
+        .handle_event(
+            &mut fixture.tui,
+            &mut fixture.server,
+            AppEvent::SecuritySetupLoaded {
+                request_id,
+                identity: identity.clone(),
+                notice: notice.clone(),
+            },
+        )
+        .await?;
+    let single_account = render_bottom_popup(&fixture.app.chat_widget, /*width*/ 80);
+    assert!(
+        single_account.contains("Set up security"),
+        "{single_account}"
+    );
+    let request_id_before_growth = fixture.app.chat_widget.security_setup_request_id;
+    fixture
+        .app
+        .handle_app_server_event(
+            &fixture.server,
+            AppServerEvent::ServerNotification(Box::new(ServerNotification::AccountPoolUpdated(
+                AccountPoolUpdatedNotification {
+                    accounts: both_accounts,
+                    pool_revision: next_pool_revision,
+                },
+            ))),
+        )
+        .await;
+    assert_eq!(
+        fixture
+            .app
+            .chat_widget
+            .managed_accounts()
+            .unwrap()
+            .selected_account_binding_key(),
+        binding
+    );
+    assert_ne!(
+        fixture.app.chat_widget.security_setup_request_id,
+        request_id_before_growth
+    );
+    let multiple_accounts = render_bottom_popup(&fixture.app.chat_widget, /*width*/ 80);
+    assert!(
+        !multiple_accounts.contains("Set up security"),
+        "{multiple_accounts}"
+    );
+    fixture
+        .app
+        .handle_app_server_event(
+            &fixture.server,
+            AppServerEvent::ServerNotification(Box::new(
+                ServerNotification::AccountSelectionUpdated(AccountSelectionUpdatedNotification {
+                    thread_id: THREAD.into(),
+                    selected_account_id: Some("email:z-global@example.test".into()),
+                    selection_revision: next_selection_revision,
+                }),
+            )),
+        )
+        .await;
+    fixture
+        .app
+        .handle_event(
+            &mut fixture.tui,
+            &mut fixture.server,
+            AppEvent::SecuritySetupLoaded {
+                request_id: fixture.app.chat_widget.security_setup_request_id,
+                identity,
+                notice,
+            },
+        )
+        .await?;
+    assert!(
+        !render_bottom_popup(&fixture.app.chat_widget, /*width*/ 80).contains("Set up security")
+    );
+    insta::assert_snapshot!(
+        "security_setup_single_to_multiple_accounts",
+        format!(
+            "ONE ACCOUNT\n{}\nTWO ACCOUNTS\n{}",
+            single_account
+                .lines()
+                .take_while(|line| !line.contains("Ask Codex"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_end(),
+            multiple_accounts
+                .lines()
+                .take_while(|line| !line.contains("Ask Codex"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_end()
+        )
+    );
+    fixture.server.shutdown().await?;
+    Ok(())
+}

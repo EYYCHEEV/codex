@@ -324,6 +324,12 @@ impl App {
                     .and_then(ManagedAccountsState::selected_account_binding_key);
                 if previous_binding != current_binding {
                     self.on_managed_observation_binding_changed(app_server_client);
+                } else if self
+                    .chat_widget
+                    .managed_accounts()
+                    .is_some_and(|accounts| accounts.len() > 1)
+                {
+                    self.chat_widget.invalidate_security_setup();
                 }
                 return;
             }

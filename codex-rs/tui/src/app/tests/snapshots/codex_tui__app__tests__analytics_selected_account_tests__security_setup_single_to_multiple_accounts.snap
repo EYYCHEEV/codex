@@ -1,0 +1,12 @@
+---
+source: tui/src/app/tests/analytics_selected_account_tests.rs
+expression: "format!(\"ONE ACCOUNT\\n{}\\nTWO ACCOUNTS\\n{}\",\nsingle_account.lines().take_while(|line|\n!line.contains(\"Ask Codex\")).collect::<Vec<_>>().join(\"\\n\").trim_end(),\nmultiple_accounts.lines().take_while(|line|\n!line.contains(\"Ask Codex\")).collect::<Vec<_>>().join(\"\\n\").trim_end())"
+---
+ONE ACCOUNT
+  Keep using Daybreak mode
+  Set up security.
+
+› 1. Set up security
+
+  Press a number to choose · esc to dismiss · type to continue
+TWO ACCOUNTS
