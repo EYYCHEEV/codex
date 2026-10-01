@@ -1945,6 +1945,7 @@ impl App {
                     tui.frame_requester(),
                     self.model_catalog.try_list_models()?,
                     std::sync::Arc::new(self.config.clone()),
+                    self.chat_widget.thread_id(),
                 );
                 self.overlay = Some(Overlay::Analytics(view));
                 tui.frame_requester().schedule_frame();

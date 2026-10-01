@@ -242,7 +242,7 @@ async fn plan_gate_prevents_requests_and_unavailable_plan_does_not_block_other_r
         .features
         .enable(codex_features::Feature::AnalyticsPlanHistory)
         .unwrap();
-    view.open(handle, frame, Vec::new(), config);
+    view.open(handle, frame, Vec::new(), config, /*thread_id*/ None);
     test_support::settle(&mut view).await;
     assert!(matches!(view.plan.report, Load::Unavailable));
     assert!(view.sections[Section::Usage].history.ready().is_some());
@@ -266,7 +266,7 @@ async fn plan_gate_prevents_requests_and_unavailable_plan_does_not_block_other_r
         .features
         .enable(codex_features::Feature::AnalyticsPlanHistory)
         .unwrap();
-    business.open(handle, frame, Vec::new(), config);
+    business.open(handle, frame, Vec::new(), config, /*thread_id*/ None);
     test_support::settle(&mut business).await;
     assert!(!business.visible_sections().contains(&Section::Plan));
     assert!(matches!(business.plan.report, Load::Unavailable));

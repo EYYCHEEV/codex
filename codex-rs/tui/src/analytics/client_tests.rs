@@ -7,12 +7,14 @@ use base64::Engine;
 use codex_config::LoaderOverrides;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::path_regex;
 
 pub(in crate::analytics) fn sign_in(home: &std::path::Path, account: &str, user: &str, plan: &str) {
     let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
@@ -40,11 +42,25 @@ pub(in crate::analytics) fn sign_in(home: &std::path::Path, account: &str, user:
     .unwrap();
 }
 
-pub(in crate::analytics) async fn live(
-    server: &MockServer,
-    plan: &str,
-) -> (tempfile::TempDir, Live) {
+pub(in crate::analytics) struct TestHome {
+    home: tempfile::TempDir,
+    pub(in crate::analytics) config: Arc<crate::legacy_core::config::Config>,
+    server: crate::AppServerSession,
+}
+
+impl std::ops::Deref for TestHome {
+    type Target = tempfile::TempDir;
+    fn deref(&self) -> &Self::Target {
+        &self.home
+    }
+}
+
+pub(in crate::analytics) async fn live(server: &MockServer, plan: &str) -> (TestHome, Live) {
     let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), format!(
+        "chatgpt_base_url = '{}/backend-api'\ncli_auth_credentials_store = 'file'\n[features]\nremote_models = false\nresponses_websockets_v2 = false\n",
+        server.uri(),
+    )).unwrap();
     let mut config = ConfigBuilder::default()
         .codex_home(home.path().to_path_buf())
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
@@ -57,15 +73,46 @@ pub(in crate::analytics) async fn live(
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/accounts/check"))
         .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({
-            "accounts": [{"id": "account-a", "plan_type": plan}],
+            "accounts": [{"id": "account-a", "plan_type": plan,
+                "workspace_backend_origin": "https://chatgpt.com", "account_routing_override": "NO_CONSTRAINT"}],
             "account_ordering": ["account-a"]
         })))
         .with_priority(/*p*/ 2)
         .mount(server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/config/bundle"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({})))
+        .mount(server)
+        .await;
+    let config = Arc::new(config);
+    let app_server = crate::start_embedded_app_server_for_picker(&config)
+        .await
+        .unwrap();
+    let _: AccountAnalyticsReadResponse = app_server
+        .request_handle()
+        .request_typed(ClientRequest::AccountAnalyticsRead {
+            request_id: RequestId::String(uuid::Uuid::new_v4().to_string()),
+            params: AccountAnalyticsReadParams {
+                thread_id: None,
+                expected_binding: None,
+                query: Query::Validate,
+            },
+        })
+        .await
+        .unwrap();
+    let live = Live::new(
+        app_server.request_handle(),
+        /*thread_id*/ None,
+        "2026-01-15".parse().unwrap(),
+    );
     (
-        home,
-        Live::new(Arc::new(config), "2026-01-15".parse().unwrap()),
+        TestHome {
+            home,
+            config,
+            server: app_server,
+        },
+        live,
     )
 }
 
@@ -75,7 +122,14 @@ async fn report_requests(server: &MockServer) -> Vec<wiremock::Request> {
         .await
         .unwrap()
         .into_iter()
-        .filter(|request| request.url.path() != "/backend-api/wham/accounts/check")
+        .filter(|request| {
+            request.url.path().starts_with("/backend-api/wham/usage/")
+                || request
+                    .url
+                    .path()
+                    .starts_with("/backend-api/wham/analytics/")
+                || request.url.path() == "/backend-api/wham/profiles/me"
+        })
         .collect()
 }
 
@@ -84,18 +138,24 @@ async fn analytics_rejects_identity_changes_during_requests() {
     let server = MockServer::start().await;
     let (home, live) = live(&server, "business").await;
     let session = live.session().await.unwrap();
-    let authenticated = &session.backend;
-    let result = authenticated
-        .request(|_| async {
-            sign_in(home.path(), "account-b", "user-a", "business");
-            Ok(123)
+    let home_path = home.path().to_path_buf();
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/profiles/me"))
+        .respond_with(move |_: &wiremock::Request| {
+            sign_in(&home_path, "account-b", "user-a", "business");
+            ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"stats": {}}))
         })
+        .expect(/*r*/ 1)
+        .mount(&server)
+        .await;
+    let result = session
+        .request::<codex_backend_client::AccountProfile>(Query::Profile)
         .await;
     assert_eq!(
-        result.unwrap_err().to_string(),
+        request_error(result.unwrap_err()),
         "Account changed. Press R to refresh Analytics."
     );
-    assert!(report_requests(&server).await.is_empty());
+    assert_eq!(report_requests(&server).await.len(), 1);
 }
 
 #[tokio::test]
@@ -104,25 +164,20 @@ async fn analytics_rejects_account_and_user_changes_before_requests() {
         let server = MockServer::start().await;
         let (home, live) = live(&server, "plus").await;
         let session = live.session().await.unwrap();
-        let authenticated = &session.backend;
         sign_in(home.path(), account, user, "plus");
-        let requested = std::cell::Cell::new(/*value*/ false);
-        let result = authenticated
-            .request(|_| async {
-                requested.set(/*val*/ true);
-                Ok(())
-            })
+        let result = session
+            .request::<codex_backend_client::AccountProfile>(Query::Profile)
             .await;
-        assert!(!requested.get());
+        assert!(report_requests(&server).await.is_empty());
         assert_eq!(
-            result.unwrap_err().to_string(),
+            request_error(result.unwrap_err()),
             "Account changed. Press R to refresh Analytics."
         );
     }
 }
 
 #[tokio::test]
-async fn analytics_requires_local_chatgpt_authentication() {
+async fn analytics_requires_server_chatgpt_authentication() {
     for auth in [None, Some(json!({"OPENAI_API_KEY": "sk-test-only"}))] {
         let server = MockServer::start().await;
         let (home, live) = live(&server, "plus").await;
@@ -131,30 +186,51 @@ async fn analytics_requires_local_chatgpt_authentication() {
             Some(auth) => std::fs::write(path, serde_json::to_vec(&auth).unwrap()).unwrap(),
             None => std::fs::remove_file(path).unwrap(),
         }
-        assert_eq!(
-            live.session().await.err(),
-            Some("Sign in locally with ChatGPT to view Analytics.".to_string())
-        );
+        assert!(live.session().await.is_err());
         assert!(report_requests(&server).await.is_empty());
     }
 }
 
 #[tokio::test]
-async fn analytics_requests_use_reloaded_credentials_for_the_same_identity() {
+async fn analytics_invalidates_requests_after_credentials_reload() {
     let server = MockServer::start().await;
     let (home, live) = live(&server, "plus").await;
     let session = live.session().await.unwrap();
-    let authenticated = &session.backend;
     assert_eq!(
         live.account_label().as_deref(),
         Some("analytics@example.test")
     );
+    Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage/daily-token-usage-breakdown"))
+        .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"data": []})))
+        .expect(/*r*/ 1)
+        .up_to_n_times(/*n*/ 1)
+        .mount(&server)
+        .await;
+    live.history(Report::Usage, /*days*/ 7, Grouping::Surface)
+        .await
+        .unwrap();
+    let cached = live
+        .history(Report::Usage, /*days*/ 7, Grouping::Surface)
+        .await
+        .unwrap();
+    assert!(cached.is_some());
     let auth_path = home.path().join("auth.json");
-    let mut auth: serde_json::Value =
+    let auth: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
-    auth["managed_chatgpt"]["accounts"][0]["tokens"]["access_token"] =
-        json!("refreshed-access-token");
-    std::fs::write(auth_path, serde_json::to_vec(&auth).unwrap()).unwrap();
+    let mut tokens: codex_login::token_data::TokenData =
+        serde_json::from_value(auth["managed_chatgpt"]["accounts"][0]["tokens"].clone()).unwrap();
+    tokens.access_token = "refreshed-access-token".into();
+    app_test_support::upsert_managed_chatgpt_oauth(
+        home.config.as_ref(),
+        codex_login::ManagedChatgptOauthCredentials {
+            tokens,
+            last_refresh: chrono::Utc::now(),
+            oauth_api_key: None,
+        },
+    )
+    .await
+    .unwrap();
     Mock::given(method("GET"))
         .and(path("/backend-api/wham/usage/daily-token-usage-breakdown"))
         .and(header("chatgpt-account-id", "account-a"))
@@ -163,15 +239,42 @@ async fn analytics_requests_use_reloaded_credentials_for_the_same_identity() {
         .expect(/*r*/ 1)
         .mount(&server)
         .await;
-    let result = authenticated
-        .request(|client| async move {
-            client
-                .get_account_analytics(
-                    codex_backend_client::AnalyticsReport::Usage,
-                    "2026-09-01",
-                    "2026-09-07",
-                )
-                .await
+    assert!(
+        live.history(Report::Usage, /*days*/ 7, Grouping::Surface)
+            .await
+            .is_err(),
+        "the old credential generation must not serve its cached report"
+    );
+    assert!(
+        session
+            .request::<AnalyticsResponse>(Query::History {
+                report: AnalyticsReport::Usage,
+                start: "2026-09-01".into(),
+                end: "2026-09-07".into(),
+            })
+            .await
+            .is_err()
+    );
+    let refreshed = Live::new(live.handle.clone(), live.thread_id.clone(), live.end_date);
+    assert!(
+        refreshed
+            .session()
+            .await
+            .unwrap()
+            .account
+            .binding
+            .credential_revision
+            .unwrap()
+            > session.account.binding.credential_revision.unwrap()
+    );
+    let result = refreshed
+        .session()
+        .await
+        .unwrap()
+        .request::<AnalyticsResponse>(Query::History {
+            report: AnalyticsReport::Usage,
+            start: "2026-09-01".into(),
+            end: "2026-09-07".into(),
         })
         .await
         .unwrap();
@@ -185,19 +288,23 @@ async fn analytics_requests_use_reloaded_credentials_for_the_same_identity() {
 }
 
 #[tokio::test]
-async fn analytics_retries_unauthorized_requests_after_credentials_reload() {
+async fn analytics_refresh_recovers_after_unauthorized_credentials_reload() {
     let server = MockServer::start().await;
     let (home, live) = live(&server, "plus").await;
     let session = live.session().await.unwrap();
-    let authenticated = &session.backend;
     let auth_path = home.path().join("auth.json");
     let mut auth: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&auth_path).unwrap()).unwrap();
     let tokens = &mut auth["managed_chatgpt"]["accounts"][0]["tokens"];
     let original_token = tokens["access_token"].as_str().unwrap().to_owned();
     tokens["access_token"] = json!("recovered-access-token");
+    let revision = auth["managed_chatgpt"]["accounts"][0]["credential_revision"]
+        .as_u64()
+        .unwrap();
+    auth["managed_chatgpt"]["accounts"][0]["credential_revision"] = json!(revision + 1);
     let updated_auth = serde_json::to_vec(&auth).unwrap();
     Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage/daily-token-usage-breakdown"))
         .and(header("authorization", format!("Bearer {original_token}")))
         .respond_with(move |_: &wiremock::Request| {
             std::fs::write(&auth_path, &updated_auth).unwrap();
@@ -207,21 +314,32 @@ async fn analytics_retries_unauthorized_requests_after_credentials_reload() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
+        .and(path("/backend-api/wham/usage/daily-token-usage-breakdown"))
         .and(header("authorization", "Bearer recovered-access-token"))
         .and(header("chatgpt-account-id", "account-a"))
         .respond_with(ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"data": []})))
         .expect(/*r*/ 1)
         .mount(&server)
         .await;
-    let result = authenticated
-        .request(|client| async move {
-            client
-                .get_account_analytics(
-                    codex_backend_client::AnalyticsReport::Usage,
-                    "2026-09-01",
-                    "2026-09-07",
-                )
-                .await
+    assert!(
+        session
+            .request::<AnalyticsResponse>(Query::History {
+                report: AnalyticsReport::Usage,
+                start: "2026-09-01".into(),
+                end: "2026-09-07".into(),
+            })
+            .await
+            .is_err()
+    );
+    let refreshed = Live::new(live.handle.clone(), live.thread_id.clone(), live.end_date);
+    let result = refreshed
+        .session()
+        .await
+        .unwrap()
+        .request::<AnalyticsResponse>(Query::History {
+            report: AnalyticsReport::Usage,
+            start: "2026-09-01".into(),
+            end: "2026-09-07".into(),
         })
         .await
         .unwrap();
@@ -242,7 +360,7 @@ async fn analytics_retries_session_initialization_after_sign_in() {
     assert!(live.session().await.is_err());
     sign_in(home.path(), "account-a", "user-a", "plus");
     assert_eq!(
-        live.session().await.unwrap().backend.account().id,
+        live.session().await.unwrap().account.binding.account_id,
         "account-a"
     );
 }
@@ -441,6 +559,7 @@ async fn analytics_uses_api_response_for_usage_and_turns_availability() {
             server.reset().await;
             let (_home, live) = live(&server, "business").await;
             Mock::given(method("GET"))
+                .and(path_regex("^/backend-api/wham/(usage|analytics)/"))
                 .respond_with(ResponseTemplate::new(status))
                 .expect(/*r*/ 1)
                 .mount(&server)
@@ -564,6 +683,7 @@ async fn legacy_usage_falls_back_to_surface_for_attribution_only_groupings() {
     let (_home, live) = live(&server, "plus").await;
     let today = live.end_date.to_string();
     Mock::given(method("GET"))
+        .and(path_regex("^/backend-api/wham/(usage|analytics)/"))
         .respond_with(
             ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"data": [{
                 "date": today, "product_surface_usage_values": {"cli": 12.5}
@@ -621,6 +741,7 @@ async fn in_flight_account_switch_retains_refresh_guidance() {
     let (home, live) = live(&server, "plus").await;
     let home_path = home.path().to_path_buf();
     Mock::given(method("GET"))
+        .and(path_regex("^/backend-api/wham/(usage|analytics)/"))
         .respond_with(move |_: &wiremock::Request| {
             sign_in(&home_path, "account-b", "user-a", "plus");
             ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"data": []}))
@@ -643,6 +764,7 @@ async fn missing_breakdowns_remain_unavailable() {
     let (_home, live) = live(&server, "plus").await;
     let today = live.end_date.to_string();
     Mock::given(method("GET"))
+        .and(path_regex("^/backend-api/wham/(usage|analytics)/"))
         .respond_with(
             ResponseTemplate::new(/*s*/ 200).set_body_json(
                 json!({"data": [{"date": today, "product_surface_usage_values": {}}]}),
@@ -665,6 +787,7 @@ async fn out_of_range_legacy_rows_do_not_disable_attribution() {
     let (_home, live) = live(&server, "plus").await;
     let today = live.end_date.to_string();
     Mock::given(method("GET"))
+        .and(path_regex("^/backend-api/wham/(usage|analytics)/"))
         .respond_with(
             ResponseTemplate::new(/*s*/ 200).set_body_json(json!({"data": [
                 {"date": "2000-01-01", "product_surface_usage_values": {}},
@@ -702,6 +825,7 @@ async fn invalid_reports_can_retry_without_recreating_the_session() {
         let requests = Arc::new(std::sync::atomic::AtomicUsize::new(/*v*/ 0));
         let count = Arc::clone(&requests);
         Mock::given(method("GET"))
+            .and(path_regex("^/backend-api/wham/(usage|analytics)/"))
             .respond_with(move |_: &wiremock::Request| {
                 let body = if count.fetch_add(/*val*/ 1, std::sync::atomic::Ordering::SeqCst) == 0 {
                     json!({"data": [{"date": "invalid"}]})
@@ -736,6 +860,7 @@ async fn invalid_cached_breakdowns_are_evicted_before_retry() {
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(/*v*/ 0));
     let count = Arc::clone(&attempts);
     Mock::given(method("GET"))
+        .and(path_regex("^/backend-api/wham/(usage|analytics)/"))
         .respond_with(move |_: &wiremock::Request| {
             let model = if count.fetch_add(/*val*/ 1, std::sync::atomic::Ordering::SeqCst) == 0 {
                 json!({"model": "alpha", "credits": -1})
@@ -775,11 +900,13 @@ pub(in crate::analytics) async fn connected_view(
     crate::AppServerSession,
     crate::analytics::AnalyticsView,
 ) {
-    let (home, live) = live(server, plan).await;
-    let config = Arc::clone(&live.config);
-    let app_server = crate::start_embedded_app_server_for_picker(&config)
-        .await
-        .unwrap();
+    let (home, _live) = live(server, plan).await;
+    let TestHome {
+        home,
+        config,
+        server: app_server,
+        ..
+    } = home;
     let mut view =
         crate::analytics::AnalyticsView::new(crate::keymap::RuntimeKeymap::defaults().list);
     view.open(
@@ -787,6 +914,7 @@ pub(in crate::analytics) async fn connected_view(
         crate::tui::FrameRequester::test_dummy(),
         Vec::new(),
         config,
+        /*thread_id*/ None,
     );
     (home, app_server, view)
 }

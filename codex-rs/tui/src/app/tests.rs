@@ -11,6 +11,8 @@ mod security_setup_tests;
 mod advanced_reasoning_tests;
 #[path = "tests/agents_navigation_tests.rs"]
 mod agents_navigation_tests;
+#[path = "tests/analytics_selected_account_tests.rs"]
+mod analytics_selected_account_tests;
 #[path = "tests/approvals_reviewer_error_tests.rs"]
 mod approvals_reviewer_error_tests;
 #[path = "tests/backend_banner_fallback_tests.rs"]

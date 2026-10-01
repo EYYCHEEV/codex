@@ -35,6 +35,69 @@ pub async fn mount_workspace_routing(server: &wiremock::MockServer) {
         .await;
 }
 
+/// Mutates a synthetic login without exposing its auth owner to UI tests.
+pub async fn upsert_managed_chatgpt_oauth(
+    config: &impl codex_login::AuthManagerConfig,
+    credentials: codex_login::ManagedChatgptOauthCredentials,
+) -> std::io::Result<String> {
+    codex_login::AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ false)
+        .await?
+        .upsert_managed_chatgpt_oauth(credentials)
+        .await
+}
+
+/// Returns default and scoped fixture emails from the same owner.
+pub async fn managed_chatgpt_selection_emails(
+    config: &impl codex_login::AuthManagerConfig,
+    scope: &codex_login::ManagedChatgptSelectionScope,
+) -> std::io::Result<(Option<String>, Option<String>)> {
+    let owner = codex_login::AuthManager::shared_from_config(
+        config, /*enable_codex_api_key_env*/ false,
+    )
+    .await?;
+    let default = owner
+        .auth_cached()
+        .and_then(|auth| auth.get_account_email());
+    let selected = owner
+        .managed_chatgpt_auth_snapshot(scope)
+        .await?
+        .and_then(|snapshot| snapshot.auth.get_account_email());
+    Ok((default, selected))
+}
+
+/// Applies normal failure recovery to one fixture identity, returning only email metadata.
+pub async fn invalidate_managed_chatgpt_account(
+    config: &impl codex_login::AuthManagerConfig,
+    identity: &str,
+    scope: &codex_login::ManagedChatgptSelectionScope,
+) -> std::io::Result<(Option<String>, Option<String>)> {
+    let owner = codex_login::AuthManager::shared_from_config(
+        config, /*enable_codex_api_key_env*/ false,
+    )
+    .await?;
+    let before = owner
+        .managed_chatgpt_auth_snapshot_for_identity(identity)
+        .await?
+        .ok_or_else(|| std::io::Error::other("fixture account is missing"))?;
+    let previous_email = before.auth.get_account_email();
+    let after = owner
+        .recover_failed_attempt(
+            &before,
+            codex_login::ManagedChatgptFailure::AuthInvalid,
+            /*committed*/ false,
+            scope,
+        )
+        .await?;
+    let next_email = match after {
+        codex_login::ManagedChatgptRecoveryDecision::Rotate(snapshot)
+        | codex_login::ManagedChatgptRecoveryDecision::Keep(snapshot) => {
+            snapshot.auth.get_account_email()
+        }
+        codex_login::ManagedChatgptRecoveryDecision::Stop => None,
+    };
+    Ok((previous_email, next_email))
+}
+
 /// Builder for writing a fake ChatGPT auth.json in tests.
 #[derive(Debug, Clone)]
 pub struct ChatGptAuthFixture {

@@ -209,15 +209,24 @@ async fn account_reports_request_only_eligible_endpoints_and_refresh() {
             .await;
         let (_home, _app_server, mut view) = client::tests::connected_view(&server, plan).await;
         test_support::settle(&mut view).await;
-        let mut expected = [
+        // Owner policy admission reads routing before Analytics discovers its report plan.
+        let mut expected = vec![
+            "accounts/check",
             "accounts/check",
             usage,
             activity,
             "analytics/daily-plugin-usage-metrics",
             "analytics/daily-skill-usage-metrics",
             "profiles/me",
-        ]
-        .map(|endpoint| format!("/backend-api/wham/{endpoint}"));
+        ];
+        if plan == "business" {
+            expected.push("config/bundle");
+            expected.push("config/bundle");
+        }
+        let mut expected = expected
+            .into_iter()
+            .map(|endpoint| format!("/backend-api/wham/{endpoint}"))
+            .collect::<Vec<_>>();
         expected.sort();
         let mut paths = server
             .received_requests()
@@ -259,7 +268,7 @@ async fn account_reports_request_only_eligible_endpoints_and_refresh() {
                 .iter()
                 .filter(|request| request.url.path().starts_with("/backend-api/wham/"))
                 .count(),
-            12
+            if plan == "business" { 15 } else { 13 }
         );
         view.cancel_loads();
     }
@@ -413,6 +422,7 @@ async fn unknown_plan_keeps_summary_available_without_billing_reports() {
     assert_eq!(
         paths,
         [
+            "/backend-api/wham/accounts/check",
             "/backend-api/wham/accounts/check",
             "/backend-api/wham/profiles/me"
         ]

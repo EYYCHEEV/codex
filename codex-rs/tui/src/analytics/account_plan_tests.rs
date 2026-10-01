@@ -5,6 +5,7 @@ use super::tests::sign_in;
 use super::*;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use wiremock::Mock;
@@ -69,7 +70,11 @@ async fn refresh_uses_server_plan_and_routes_with_unchanged_local_credentials() 
         first
     );
     assert_eq!(reads.load(Ordering::SeqCst), 1);
-    let refreshed = Live::new(Arc::clone(&client.config), client.end_date);
+    let refreshed = Live::new(
+        client.handle.clone(),
+        client.thread_id.clone(),
+        client.end_date,
+    );
     refreshed
         .history(Report::Credits, /*days*/ 7, Grouping::Surface)
         .await

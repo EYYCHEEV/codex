@@ -41,7 +41,7 @@ pub(super) async fn read(
     live: Arc<Live>,
 ) -> Result<Option<Chats>, String> {
     let session = live.session().await?;
-    if !super::models::thread_usage_supported(session.backend.account().plan_type) {
+    if !super::models::thread_usage_supported(session.account.plan_type) {
         return Ok(None);
     }
     live.ensure_identity().await?;
@@ -174,12 +174,15 @@ async fn estimates(session: &Session, ids: &[&str]) -> Result<Vec<ThreadUsage>, 
     for _ in 0..15 {
         let Some(ids) = pending.pop() else { break };
         match session
-            .backend
-            .request(|client| async move { client.get_threads_usage(ids).await })
+            .request::<Vec<ThreadUsage>>(
+                codex_app_server_protocol::AccountAnalyticsQuery::Threads {
+                    ids: ids.iter().map(|id| (*id).to_string()).collect(),
+                },
+            )
             .await
         {
             Ok(batch) => rows.extend(batch),
-            Err(error) if error.status().is_some_and(|status| status.as_u16() == 503) => {
+            Err(error) if super::client::request_status(&error) == Some(503) => {
                 if ids.len() > 1 {
                     let midpoint = ids.len().div_ceil(/*rhs*/ 2);
                     pending.push(&ids[midpoint..]);

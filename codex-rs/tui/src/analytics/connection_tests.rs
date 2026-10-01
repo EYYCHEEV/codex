@@ -1,4 +1,4 @@
-//! Exercise local Analytics plan discovery and report recovery while connected to an app-server.
+//! Exercise server-owned Analytics over the remote transport, including report recovery.
 
 use super::tests::live;
 use super::tests::sign_in;
@@ -25,7 +25,9 @@ async fn read(socket: &mut WebSocketStream<TcpStream>) -> Value {
     serde_json::from_str(frame.to_text().unwrap()).unwrap()
 }
 
-async fn remote() -> (RemoteAppServerClient, tokio::task::JoinHandle<()>) {
+async fn remote(
+    owner: AppServerRequestHandle,
+) -> (RemoteAppServerClient, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -44,8 +46,28 @@ async fn remote() -> (RemoteAppServerClient, tokio::task::JoinHandle<()>) {
             .await
             .unwrap();
         assert_eq!(read(&mut socket).await["method"], "initialized");
-        // Analytics uses the local account without requesting connected-server account data.
-        assert!(socket.next().await.unwrap().unwrap().is_close());
+        while let Some(frame) = socket.next().await {
+            let frame = frame.unwrap();
+            if frame.is_close() {
+                break;
+            }
+            let request: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], "account/analytics/read");
+            let result = owner
+                .request_typed::<Value>(serde_json::from_value(request.clone()).unwrap())
+                .await;
+            let response = match result {
+                Ok(result) => json!({"id":request["id"],"result":result}),
+                Err(codex_app_server_client::TypedRequestError::Server { source, .. }) => {
+                    json!({"id":request["id"],"error":source})
+                }
+                Err(error) => panic!("{error}"),
+            };
+            socket
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .unwrap();
+        }
     });
     let client = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
         endpoint: RemoteAppServerEndpoint::WebSocket {
@@ -65,14 +87,14 @@ async fn remote() -> (RemoteAppServerClient, tokio::task::JoinHandle<()>) {
 }
 
 #[tokio::test]
-async fn local_reports_share_an_account_and_recover_profile_errors() {
+async fn remote_reports_use_server_auth_without_local_login_and_recover_errors() {
     use crate::analytics::AnalyticsView;
     use crate::analytics::data::Load;
     use crate::analytics::sections::Section;
 
     let http = crate::analytics::test_support::server().await;
     let (home, local) = live(&http, "enterprise").await;
-    let (client, server) = remote().await;
+    let (client, server) = remote(local.handle.clone()).await;
     let failed_profile = Mock::given(method("GET"))
         .and(wiremock::matchers::path("/backend-api/wham/profiles/me"))
         .and(header("chatgpt-account-id", "account-a"))
@@ -80,14 +102,27 @@ async fn local_reports_share_an_account_and_recover_profile_errors() {
         .expect(/*r*/ 1)
         .mount_as_scoped(&http)
         .await;
+    let frontend_home = tempfile::tempdir().unwrap();
+    let mut frontend_config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(frontend_home.path().to_path_buf())
+        .loader_overrides(codex_config::LoaderOverrides::without_managed_config_for_tests())
+        .build()
+        .await
+        .unwrap();
+    frontend_config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
     let mut view = AnalyticsView::new(crate::keymap::RuntimeKeymap::defaults().list);
     view.open(
         AppServerRequestHandle::Remote(client.request_handle()),
         crate::tui::FrameRequester::test_dummy(),
         Vec::new(),
-        std::sync::Arc::clone(&local.config),
+        std::sync::Arc::new(frontend_config),
+        /*thread_id*/ None,
     );
     crate::analytics::test_support::settle(&mut view).await;
+    assert_eq!(
+        view.live.as_ref().unwrap().account_label().as_deref(),
+        Some("analytics@example.test")
+    );
     assert_eq!(
         view.visible_sections(),
         &[
@@ -124,7 +159,13 @@ async fn local_reports_share_an_account_and_recover_profile_errors() {
         view.profile.ready(),
         Some(&serde_json::from_value(profile).unwrap())
     );
-    for request in http.received_requests().await.unwrap() {
+    for request in http
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|request| request.url.path().starts_with("/backend-api/wham/"))
+    {
         assert_eq!(
             request.headers.get("chatgpt-account-id").unwrap(),
             "account-a"
@@ -185,8 +226,8 @@ async fn account_lookup_failure_recovers_on_refresh_with_the_server_plan() {
     use crate::analytics::sections::Section;
 
     let http = crate::analytics::test_support::server().await;
-    let (_home, local) = live(&http, "plus").await;
-    let (client, server) = remote().await;
+    let (home, local) = live(&http, "plus").await;
+    let (client, server) = remote(local.handle.clone()).await;
     Mock::given(method("GET"))
         .and(wiremock::matchers::path("/backend-api/wham/accounts/check"))
         .respond_with(ResponseTemplate::new(/*s*/ 503))
@@ -195,12 +236,14 @@ async fn account_lookup_failure_recovers_on_refresh_with_the_server_plan() {
         .up_to_n_times(/*n*/ 1)
         .mount(&http)
         .await;
+    let preceding_requests = http.received_requests().await.unwrap().len();
     let mut view = AnalyticsView::new(crate::keymap::RuntimeKeymap::defaults().list);
     view.open(
         AppServerRequestHandle::Remote(client.request_handle()),
         crate::tui::FrameRequester::test_dummy(),
         Vec::new(),
-        std::sync::Arc::clone(&local.config),
+        std::sync::Arc::clone(&home.config),
+        /*thread_id*/ None,
     );
     crate::analytics::test_support::settle(&mut view).await;
     assert!(matches!(view.account, Load::Error(_)));
@@ -209,6 +252,8 @@ async fn account_lookup_failure_recovers_on_refresh_with_the_server_plan() {
             .await
             .unwrap()
             .iter()
+            .skip(preceding_requests)
+            .filter(|request| request.url.path().starts_with("/backend-api/wham/"))
             .map(|request| request.url.path())
             .collect::<Vec<_>>(),
         ["/backend-api/wham/accounts/check"]

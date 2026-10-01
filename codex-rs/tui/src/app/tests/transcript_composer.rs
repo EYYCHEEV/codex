@@ -95,9 +95,10 @@ async fn analytics_menu_reopen_preserves_navigation_and_explicit_view_selects_su
             "test-account",
         ))
         .respond_with(wiremock::ResponseTemplate::new(/*s*/ 200).set_body_json(
-            serde_json::json!({"accounts": [{"id": "test-account", "plan_type": "plus"}]}),
+            serde_json::json!({"accounts": [{"id": "test-account", "plan_type": "plus",
+                "workspace_backend_origin": "https://chatgpt.com", "account_routing_override": "NO_CONSTRAINT"}]}),
         ))
-        .expect(/*r*/ 3)
+        .expect(/*r*/ 4)
         .mount(&http)
         .await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -109,6 +110,13 @@ async fn analytics_menu_reopen_preserves_navigation_and_explicit_view_selects_su
         .await;
     app.config.chatgpt_base_url = format!("{}/backend-api", http.uri());
     app.config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
+    std::fs::write(
+        app.config.codex_home.join("config.toml"),
+        format!(
+            "chatgpt_base_url = '{}/backend-api'\ncli_auth_credentials_store = 'file'\n",
+            http.uri(),
+        ),
+    )?;
     app_test_support::write_chatgpt_auth(
         &app.config.codex_home,
         app_test_support::ChatGptAuthFixture::new("test-access-token")

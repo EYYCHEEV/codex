@@ -69,6 +69,7 @@ pub(crate) struct AnalyticsView {
     show_zero_credit_groups: bool,
     account: Load<codex_protocol::account::PlanType>,
     reports_started: bool,
+    thread_id: Option<codex_protocol::ThreadId>,
     connection: Option<(
         std::sync::Arc<crate::legacy_core::config::Config>,
         AppServerRequestHandle,
@@ -110,6 +111,7 @@ impl AnalyticsView {
             show_zero_credit_groups: false,
             account: Load::Unavailable,
             reports_started: false,
+            thread_id: None,
             connection: None,
             live: None,
             keymap,
@@ -146,6 +148,7 @@ impl AnalyticsView {
         frame: FrameRequester,
         models: Vec<codex_protocol::openai_models::ModelPreset>,
         config: std::sync::Arc<crate::legacy_core::config::Config>,
+        thread_id: Option<codex_protocol::ThreadId>,
     ) {
         self.model_names = models
             .into_iter()
@@ -154,6 +157,7 @@ impl AnalyticsView {
         self.plan.enabled = config
             .features
             .enabled(codex_features::Feature::AnalyticsPlanHistory);
+        self.thread_id = thread_id;
         self.connection = Some((config, handle, frame));
         self.is_done = false;
         self.show_help = false;
@@ -163,9 +167,10 @@ impl AnalyticsView {
     pub(crate) fn refresh(&mut self) {
         self.invalidate_mouse_targets();
         self.end_date = chrono::Utc::now().date_naive();
-        self.live = self.connection.as_ref().map(|(config, _, _)| {
+        self.live = self.connection.as_ref().map(|(_, handle, _)| {
             std::sync::Arc::new(client::Live::new(
-                std::sync::Arc::clone(config),
+                handle.clone(),
+                self.thread_id.map(|id| id.to_string()),
                 self.end_date,
             ))
         });
@@ -186,8 +191,7 @@ impl AnalyticsView {
                     live.session().await.map(|session| {
                         Some(
                             session
-                                .backend
-                                .account()
+                                .account
                                 .plan_type
                                 .unwrap_or(codex_protocol::account::PlanType::Unknown),
                         )

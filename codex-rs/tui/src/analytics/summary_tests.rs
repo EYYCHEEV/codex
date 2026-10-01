@@ -104,7 +104,7 @@ async fn summary_loads_once_per_open_and_does_not_block_other_reports() {
     assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
     let (config, handle, frame) = view.connection.as_ref().unwrap().clone();
     view.cancel_loads();
-    view.open(handle, frame, Vec::new(), config);
+    view.open(handle, frame, Vec::new(), config, /*thread_id*/ None);
     test_support::settle(&mut view).await;
     assert_eq!(
         view.profile.ready().unwrap().stats.tokens.lifetime_tokens,

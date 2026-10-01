@@ -19,8 +19,7 @@ impl Live {
     pub(super) async fn profile(&self) -> Result<Option<AccountProfile>, String> {
         let session = self.session().await?;
         let profile = session
-            .backend
-            .request(|client| async move { client.get_account_profile().await })
+            .request(codex_app_server_protocol::AccountAnalyticsQuery::Profile)
             .await;
         self.ensure_identity().await?;
         profile.map(Some).map_err(super::client::request_error)

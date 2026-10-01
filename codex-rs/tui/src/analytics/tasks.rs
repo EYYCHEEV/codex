@@ -1,13 +1,15 @@
 //! Consumer task queries preserve missing amounts and require complete descendant groups.
 use super::client::Live;
 use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_protocol::AccountAnalyticsQuery;
+use codex_app_server_protocol::AccountAnalyticsTaskParams as TaskUsageThread;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_backend_client::TaskUsage;
-use codex_backend_client::TaskUsageThread;
+use codex_backend_client::TaskUsageResponse;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -100,11 +102,7 @@ pub(super) async fn read(
         .into_iter()
         .map(|threads| async move {
             session
-                .backend
-                .request(|client| {
-                    let threads = threads.clone();
-                    async move { client.get_task_usage(&threads).await }
-                })
+                .request::<TaskUsageResponse>(AccountAnalyticsQuery::Tasks { threads })
                 .await
         })
         .collect::<Vec<_>>();
@@ -135,11 +133,7 @@ pub(super) async fn read(
                         .map(|task| (task.thread_id.clone(), task)),
                 );
             }
-            Err(error)
-                if error
-                    .status()
-                    .is_some_and(|status| matches!(status.as_u16(), 404 | 503)) =>
-            {
+            Err(error) if matches!(super::client::request_status(&error), Some(404 | 503)) => {
                 freshness.push(/*value*/ None);
             }
             Err(error) => return Err(super::client::request_error(error)),
