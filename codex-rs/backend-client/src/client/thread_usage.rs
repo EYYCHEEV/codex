@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Backend usage grouped by model, reasoning effort, and response speed.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ThreadUsageBreakdownGroup {
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
@@ -25,7 +25,7 @@ pub struct ThreadUsageBreakdownGroup {
 }
 
 /// Backend-estimated usage totals expressed in integer millionths.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ThreadUsage {
     pub thread_id: String,
     pub estimated_usage_credits_micros: i64,

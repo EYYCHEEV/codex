@@ -118,6 +118,13 @@ pub struct NetworkPolicyController {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NetworkPolicyRevision(u64);
 
+impl NetworkPolicyRevision {
+    /// Non-secret generation used to reject observations of an older policy.
+    pub fn generation(self) -> u64 {
+        self.0
+    }
+}
+
 impl Default for NetworkPolicyController {
     fn default() -> Self {
         Self {

@@ -6,27 +6,28 @@ use super::RequestError;
 use crate::TokenUsageProfileStats;
 use http::Method;
 use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AccountProfile {
     pub profile: Option<ProfileIdentity>,
     pub metadata: Option<ProfileMetadata>,
     pub stats: ProfileStats,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProfileIdentity {
     pub display_name: Option<String>,
     pub username: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProfileMetadata {
     pub stats_as_of: Option<String>,
     pub stats_error: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProfileStats {
     #[serde(flatten)]
     pub tokens: TokenUsageProfileStats,
@@ -39,7 +40,7 @@ pub struct ProfileStats {
     pub top_invocations: Option<Vec<ProfileInvocation>>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProfileInvocation {
     #[serde(rename = "type")]
     pub kind: ProfileInvocationKind,
@@ -48,7 +49,7 @@ pub struct ProfileInvocation {
     pub usage_count: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileInvocationKind {
     Plugin,

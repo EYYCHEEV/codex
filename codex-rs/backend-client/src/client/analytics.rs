@@ -5,6 +5,8 @@ use super::PathStyle;
 use super::RequestError;
 use codex_backend_openapi_models::models::analytics as models;
 use http::Method;
+use serde::Deserialize;
+use serde::Serialize;
 
 /// The bounded set of reports used by consumer and workspace Analytics views.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -20,7 +22,8 @@ pub enum AnalyticsReport {
 }
 
 /// Endpoint-specific backend contracts; normalization belongs to the consumer.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data", rename_all = "camelCase")]
 pub enum AnalyticsResponse {
     Usage(models::DailyProductSurfaceUsageResponse),
     Credits(models::CreditUsageEventsResponse),

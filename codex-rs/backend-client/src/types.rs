@@ -15,6 +15,7 @@ pub use codex_backend_openapi_models::models::TaskListItem;
 
 use codex_protocol::protocol::RateLimitSnapshot;
 use serde::Deserialize;
+use serde::Serialize;
 use serde::de::Deserializer;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -546,7 +547,7 @@ pub struct TokenUsageProfile {
     pub stats: TokenUsageProfileStats,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TokenUsageProfileStats {
     pub lifetime_tokens: Option<i64>,
     pub peak_daily_tokens: Option<i64>,
@@ -556,7 +557,7 @@ pub struct TokenUsageProfileStats {
     pub daily_usage_buckets: Option<Vec<TokenUsageProfileDailyBucket>>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TokenUsageProfileDailyBucket {
     pub start_date: String,
     pub tokens: i64,

@@ -6881,6 +6881,384 @@
           }
         ]
       },
+      "AccountAnalyticsBinding": {
+        "description": "Non-secret identity of a captured account, credential generation, and policy.",
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "credentialRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "managedAccountId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policyRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "routingRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "sessionId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "threadId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "userId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "policyRevision",
+          "routingRevision",
+          "userId"
+        ],
+        "type": "object"
+      },
+      "AccountAnalyticsCreditBreakdown": {
+        "enum": [
+          "product",
+          "model",
+          "speed",
+          "reasoningEffort"
+        ],
+        "type": "string"
+      },
+      "AccountAnalyticsQuery": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "validate"
+                ],
+                "title": "ValidateAccountAnalyticsQueryType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ValidateAccountAnalyticsQuery",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "account"
+                ],
+                "title": "AccountAccountAnalyticsQueryType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "AccountAccountAnalyticsQuery",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "profile"
+                ],
+                "title": "ProfileAccountAnalyticsQueryType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "ProfileAccountAnalyticsQuery",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "planHistory"
+                ],
+                "title": "PlanHistoryAccountAnalyticsQueryType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "PlanHistoryAccountAnalyticsQuery",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "end": {
+                "type": "string"
+              },
+              "report": {
+                "$ref": "#/definitions/v2/AccountAnalyticsReport"
+              },
+              "start": {
+                "description": "Inclusive UTC dates in YYYY-MM-DD form.",
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "history"
+                ],
+                "title": "HistoryAccountAnalyticsQueryType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "end",
+              "report",
+              "start",
+              "type"
+            ],
+            "title": "HistoryAccountAnalyticsQuery",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": {
+                "enum": [
+                  "threads"
+                ],
+                "title": "ThreadsAccountAnalyticsQueryType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "ids",
+              "type"
+            ],
+            "title": "ThreadsAccountAnalyticsQuery",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "threads": {
+                "items": {
+                  "$ref": "#/definitions/v2/AccountAnalyticsTaskParams"
+                },
+                "type": "array"
+              },
+              "type": {
+                "enum": [
+                  "tasks"
+                ],
+                "title": "TasksAccountAnalyticsQueryType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "threads",
+              "type"
+            ],
+            "title": "TasksAccountAnalyticsQuery",
+            "type": "object"
+          }
+        ]
+      },
+      "AccountAnalyticsReport": {
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "usage"
+                ],
+                "title": "UsageAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "UsageAccountAnalyticsReport",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "enterpriseTokens"
+                ],
+                "title": "EnterpriseTokensAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "EnterpriseTokensAccountAnalyticsReport",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "credits"
+                ],
+                "title": "CreditsAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "CreditsAccountAnalyticsReport",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "workspaceCredits"
+                ],
+                "title": "WorkspaceCreditsAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "WorkspaceCreditsAccountAnalyticsReport",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "breakdown": {
+                "$ref": "#/definitions/v2/AccountAnalyticsCreditBreakdown"
+              },
+              "type": {
+                "enum": [
+                  "enterpriseCredits"
+                ],
+                "title": "EnterpriseCreditsAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "breakdown",
+              "type"
+            ],
+            "title": "EnterpriseCreditsAccountAnalyticsReport",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "enum": [
+                  "messages"
+                ],
+                "title": "MessagesAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "title": "MessagesAccountAnalyticsReport",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "limit": {
+                "format": "uint8",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "plugins"
+                ],
+                "title": "PluginsAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "limit",
+              "type"
+            ],
+            "title": "PluginsAccountAnalyticsReport",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "limit": {
+                "format": "uint8",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              "type": {
+                "enum": [
+                  "skills"
+                ],
+                "title": "SkillsAccountAnalyticsReportType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "limit",
+              "type"
+            ],
+            "title": "SkillsAccountAnalyticsReport",
+            "type": "object"
+          }
+        ]
+      },
+      "AccountAnalyticsTaskParams": {
+        "properties": {
+          "createdAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "descendantThreadIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "descendantThreadIds",
+          "threadId"
+        ],
+        "type": "object"
+      },
       "AccountLoginCompletedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {

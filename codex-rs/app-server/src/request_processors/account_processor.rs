@@ -15,6 +15,7 @@ use codex_login::LoginOnboardingEntrypoint;
 use codex_login::login_with_bedrock_access_keys;
 use codex_model_provider::is_supported_amazon_bedrock_region;
 
+mod analytics;
 mod bedrock_setup;
 mod gateway_oauth;
 mod managed_accounts;

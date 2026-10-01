@@ -1,6 +1,11 @@
 // GENERATED CODE! DO NOT MODIFY BY HAND!
 
 export type { Account } from "./Account";
+export type { AccountAnalyticsBinding } from "./AccountAnalyticsBinding";
+export type { AccountAnalyticsCreditBreakdown } from "./AccountAnalyticsCreditBreakdown";
+export type { AccountAnalyticsQuery } from "./AccountAnalyticsQuery";
+export type { AccountAnalyticsReport } from "./AccountAnalyticsReport";
+export type { AccountAnalyticsTaskParams } from "./AccountAnalyticsTaskParams";
 export type { AccountLoginCompletedNotification } from "./AccountLoginCompletedNotification";
 export type { AccountPoolUpdatedNotification } from "./AccountPoolUpdatedNotification";
 export type { AccountRateLimitsUpdatedNotification } from "./AccountRateLimitsUpdatedNotification";

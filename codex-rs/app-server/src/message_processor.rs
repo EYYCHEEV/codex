@@ -1829,6 +1829,9 @@ impl MessageProcessor {
             ClientRequest::GetAccountTokenUsage { params, .. } => {
                 self.account_processor.get_account_token_usage(params).await
             }
+            ClientRequest::AccountAnalyticsRead { params, .. } => {
+                self.account_processor.read_analytics(params).await
+            }
             ClientRequest::GetWorkspaceMessages { .. } => {
                 self.account_processor.get_workspace_messages().await
             }

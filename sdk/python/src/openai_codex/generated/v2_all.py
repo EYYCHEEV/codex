@@ -43,6 +43,164 @@ class AmazonBedrockAccount(BaseModel):
     ] = False
 
 
+class AccountAnalyticsBinding(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    account_id: Annotated[str, Field(alias="accountId")]
+    credential_revision: Annotated[int | None, Field(alias="credentialRevision", ge=0)] = None
+    managed_account_id: Annotated[str | None, Field(alias="managedAccountId")] = None
+    policy_revision: Annotated[int, Field(alias="policyRevision", ge=0)]
+    routing_revision: Annotated[int, Field(alias="routingRevision", ge=0)]
+    session_id: Annotated[str | None, Field(alias="sessionId")] = None
+    thread_id: Annotated[str | None, Field(alias="threadId")] = None
+    user_id: Annotated[str, Field(alias="userId")]
+
+
+class AccountAnalyticsCreditBreakdown(Enum):
+    product = "product"
+    model = "model"
+    speed = "speed"
+    reasoning_effort = "reasoningEffort"
+
+
+class ValidateAccountAnalyticsQuery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["validate"], Field(title="ValidateAccountAnalyticsQueryType")]
+
+
+class AccountAccountAnalyticsQuery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["account"], Field(title="AccountAccountAnalyticsQueryType")]
+
+
+class ProfileAccountAnalyticsQuery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["profile"], Field(title="ProfileAccountAnalyticsQueryType")]
+
+
+class PlanHistoryAccountAnalyticsQuery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["planHistory"], Field(title="PlanHistoryAccountAnalyticsQueryType")]
+
+
+class ThreadsAccountAnalyticsQuery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    ids: list[str]
+    type: Annotated[Literal["threads"], Field(title="ThreadsAccountAnalyticsQueryType")]
+
+
+class UsageAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["usage"], Field(title="UsageAccountAnalyticsReportType")]
+
+
+class EnterpriseTokensAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[
+        Literal["enterpriseTokens"], Field(title="EnterpriseTokensAccountAnalyticsReportType")
+    ]
+
+
+class CreditsAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["credits"], Field(title="CreditsAccountAnalyticsReportType")]
+
+
+class WorkspaceCreditsAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[
+        Literal["workspaceCredits"], Field(title="WorkspaceCreditsAccountAnalyticsReportType")
+    ]
+
+
+class EnterpriseCreditsAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    breakdown: AccountAnalyticsCreditBreakdown
+    type: Annotated[
+        Literal["enterpriseCredits"], Field(title="EnterpriseCreditsAccountAnalyticsReportType")
+    ]
+
+
+class MessagesAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    type: Annotated[Literal["messages"], Field(title="MessagesAccountAnalyticsReportType")]
+
+
+class PluginsAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    limit: Annotated[int, Field(ge=0)]
+    type: Annotated[Literal["plugins"], Field(title="PluginsAccountAnalyticsReportType")]
+
+
+class SkillsAccountAnalyticsReport(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    limit: Annotated[int, Field(ge=0)]
+    type: Annotated[Literal["skills"], Field(title="SkillsAccountAnalyticsReportType")]
+
+
+class AccountAnalyticsReport(
+    RootModel[
+        UsageAccountAnalyticsReport
+        | EnterpriseTokensAccountAnalyticsReport
+        | CreditsAccountAnalyticsReport
+        | WorkspaceCreditsAccountAnalyticsReport
+        | EnterpriseCreditsAccountAnalyticsReport
+        | MessagesAccountAnalyticsReport
+        | PluginsAccountAnalyticsReport
+        | SkillsAccountAnalyticsReport
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        UsageAccountAnalyticsReport
+        | EnterpriseTokensAccountAnalyticsReport
+        | CreditsAccountAnalyticsReport
+        | WorkspaceCreditsAccountAnalyticsReport
+        | EnterpriseCreditsAccountAnalyticsReport
+        | MessagesAccountAnalyticsReport
+        | PluginsAccountAnalyticsReport
+        | SkillsAccountAnalyticsReport
+    )
+
+
+class AccountAnalyticsTaskParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    created_at: Annotated[str | None, Field(alias="createdAt")] = None
+    descendant_thread_ids: Annotated[list[str], Field(alias="descendantThreadIds")]
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class AccountRoutingOverride(Enum):
     no_constraint = "NO_CONSTRAINT"
     us = "us"
@@ -6783,6 +6941,49 @@ class Account(RootModel[ApiKeyAccount | ChatgptAccount | AmazonBedrockAccount]):
         populate_by_name=True,
     )
     root: ApiKeyAccount | ChatgptAccount | AmazonBedrockAccount
+
+
+class HistoryAccountAnalyticsQuery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    end: str
+    report: AccountAnalyticsReport
+    start: Annotated[str, Field(description="Inclusive UTC dates in YYYY-MM-DD form.")]
+    type: Annotated[Literal["history"], Field(title="HistoryAccountAnalyticsQueryType")]
+
+
+class TasksAccountAnalyticsQuery(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    threads: list[AccountAnalyticsTaskParams]
+    type: Annotated[Literal["tasks"], Field(title="TasksAccountAnalyticsQueryType")]
+
+
+class AccountAnalyticsQuery(
+    RootModel[
+        ValidateAccountAnalyticsQuery
+        | AccountAccountAnalyticsQuery
+        | ProfileAccountAnalyticsQuery
+        | PlanHistoryAccountAnalyticsQuery
+        | HistoryAccountAnalyticsQuery
+        | ThreadsAccountAnalyticsQuery
+        | TasksAccountAnalyticsQuery
+    ]
+):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    root: (
+        ValidateAccountAnalyticsQuery
+        | AccountAccountAnalyticsQuery
+        | ProfileAccountAnalyticsQuery
+        | PlanHistoryAccountAnalyticsQuery
+        | HistoryAccountAnalyticsQuery
+        | ThreadsAccountAnalyticsQuery
+        | TasksAccountAnalyticsQuery
+    )
 
 
 class AccountLoginCompletedNotification(BaseModel):

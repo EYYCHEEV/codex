@@ -135,6 +135,11 @@ impl ConnectorRuntimeContextKey {
         self.transport.clone()
     }
 
+    /// Credential generation captured with this runtime's transport identity.
+    pub fn credential_revision(&self) -> Option<u64> {
+        self.managed.then_some(self.credential_revision)
+    }
+
     /// Returns the normalized ChatGPT base URL captured by this runtime.
     pub fn base_url(&self) -> &str {
         &self.base_url

@@ -1394,6 +1394,13 @@ client_request_definitions! {
         response: v2::GetAccountTokenUsageResponse,
     },
 
+    #[experimental("account/analytics/read")]
+    AccountAnalyticsRead => "account/analytics/read" {
+        params: v2::AccountAnalyticsReadParams,
+        serialization: None,
+        response: v2::AccountAnalyticsReadResponse,
+    },
+
     GetWorkspaceMessages => "account/workspaceMessages/read" {
         params: #[ts(type = "undefined")] #[serde(skip_serializing_if = "Option::is_none")] Option<()>,
         serialization: None,

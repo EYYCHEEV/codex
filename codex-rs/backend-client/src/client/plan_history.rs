@@ -5,8 +5,9 @@ use super::PathStyle;
 use super::RequestError;
 use http::Method;
 use serde::Deserialize;
+use serde::Serialize;
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PlanLimitHistory {
     pub data_as_of: Option<String>,
     pub coverage_start: Option<String>,
@@ -17,7 +18,7 @@ pub struct PlanLimitHistory {
     pub periods: Vec<PlanLimitPeriod>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PlanLimitPeriod {
     pub id: String,
     pub window_minutes: u32,
@@ -30,7 +31,7 @@ pub struct PlanLimitPeriod {
     pub breakdowns: Option<Vec<PlanLimitBreakdown>>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanLimitDimension {
     ThreadSource,
@@ -42,13 +43,13 @@ pub enum PlanLimitDimension {
     Unknown,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PlanLimitBreakdown {
     pub dimension: PlanLimitDimension,
     pub rows: Vec<PlanLimitValue>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PlanLimitValue {
     pub key: String,
     pub basis_points: f64,

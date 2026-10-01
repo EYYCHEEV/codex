@@ -16,13 +16,13 @@ pub struct TaskUsageThread {
     pub descendant_thread_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskUsageResponse {
     pub data_as_of: Option<String>,
     pub threads: Vec<TaskUsage>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskUsageStatus {
     Available,
@@ -30,7 +30,7 @@ pub enum TaskUsageStatus {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskUsage {
     pub thread_id: String,
     pub data_status: TaskUsageStatus,
@@ -40,7 +40,7 @@ pub struct TaskUsage {
     pub groups: Vec<TaskUsageGroup>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskUsageAmounts {
     #[serde(default, deserialize_with = "percentage")]
     pub five_hour_limit_percent: Option<f64>,
@@ -62,7 +62,7 @@ fn percentage<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Optio
         .transpose()
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskUsageGroup {
     pub product_experience: Option<String>,
     pub model: Option<String>,
@@ -137,7 +137,8 @@ impl Client {
 }
 
 /// Decimal strings retain all backend digits for both rendering and sorting.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug, Eq, Serialize)]
+#[serde(transparent)]
 pub struct TaskCredits(String);
 
 impl TaskCredits {
